@@ -54,6 +54,16 @@ NOISE = re.compile(
 OPENER = build_opener(ProxyHandler({}))
 MONITORED_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "TG-Auto", "Proxy-Auto")
 SOURCE_ORDER = {"[主力] ": 0, "[备用1] ": 1, "[备用2] ": 2}
+TEST_JOB_LOCK = threading.Lock()
+TEST_STATE_LOCK = threading.Lock()
+TEST_STATE = {
+    "running": False,
+    "total": 0,
+    "completed": 0,
+    "started_at": None,
+    "finished_at": None,
+    "error": None,
+}
 
 
 def env():
@@ -415,15 +425,59 @@ def test_one(name):
     }
 
 
-def test_all():
+def test_all(progress=None):
     names = [item["name"] for item in nodes()]
     with ThreadPoolExecutor(max_workers=6) as executor:
         futures = [executor.submit(test_one, name) for name in names]
-        results = [future.result() for future in as_completed(futures)]
+        results = []
+        for completed, future in enumerate(as_completed(futures), 1):
+            results.append(future.result())
+            if progress:
+                progress(completed, len(names))
     results = sorted(results, key=lambda item: (not item["ok"], item["delay"] or 999999,
                                                  item["jitter"] or 999999, item["name"]))
     atomic_json(LAST_TESTS, {"tested_at": datetime.now().astimezone().isoformat(), "results": results})
     return results
+
+
+def test_status():
+    with TEST_STATE_LOCK:
+        state = dict(TEST_STATE)
+    latest = read_json(LAST_TESTS, {})
+    state["last_tested_at"] = latest.get("tested_at")
+    state["last_total"] = len(latest.get("results", []))
+    state["last_ok"] = sum(1 for item in latest.get("results", []) if item.get("ok"))
+    return state
+
+
+def start_test_all():
+    if not TEST_JOB_LOCK.acquire(blocking=False):
+        return {"started": False, **test_status()}
+    names = nodes()
+    now = datetime.now().astimezone().isoformat()
+    with TEST_STATE_LOCK:
+        TEST_STATE.update({"running": True, "total": len(names), "completed": 0,
+                           "started_at": now, "finished_at": None, "error": None})
+
+    def update_progress(completed, total):
+        with TEST_STATE_LOCK:
+            TEST_STATE.update({"completed": completed, "total": total})
+
+    def run():
+        try:
+            test_all(update_progress)
+            with TEST_STATE_LOCK:
+                TEST_STATE.update({"running": False, "completed": TEST_STATE["total"],
+                                   "finished_at": datetime.now().astimezone().isoformat()})
+        except Exception as exc:
+            with TEST_STATE_LOCK:
+                TEST_STATE.update({"running": False, "error": str(exc),
+                                   "finished_at": datetime.now().astimezone().isoformat()})
+        finally:
+            TEST_JOB_LOCK.release()
+
+    threading.Thread(target=run, name="mihomo-manual-speed-test", daemon=True).start()
+    return {"started": True, **test_status()}
 
 
 def resolve_leaf(name, depth=0):
@@ -524,10 +578,15 @@ PAGE = PAGE.replace(_history_marker, _stable_marker + _history_marker, 1)
 # Keep the subscription landing page small. The full node catalogue is only
 # needed once the user opens the candidate-pool tab.
 PAGE = PAGE.replace("if(id==='runtime')loadStatus()", "if(id==='pools')loadPools();if(id==='runtime')loadStatus()")
-PAGE = PAGE.replace("let all=[],pools={},delays={};", "let all=[],pools={},delays={},catalogLoaded=false;")
+PAGE = PAGE.replace("let all=[],pools={},delays={};", "let all=[],pools={},delays={},catalogLoaded=false,testPoll=null;")
 PAGE = PAGE.replace("async function load(){let d=await api('/api/state');", "async function load(){let d=await api('/api/nodes');")
 PAGE = PAGE.replace("renderPools()}function options", "catalogLoaded=true;renderPools()}async function loadSummary(){let d=await api('/api/state');document.querySelector('#slots').innerHTML=d.slots.map(slotCard).join('');pools=d.pools;if(d.tests&&d.tests.tested_at)document.querySelector('#testStatus').textContent='上次稳定性测速：'+d.tests.tested_at}async function loadPools(){if(catalogLoaded)return;try{await load()}catch(e){pageError(e)}}function pageError(e){let box=document.querySelector('#pageStatus');if(!box){box=document.createElement('div');box.id='pageStatus';box.className='status bad';document.querySelector('.intro').append(box)}box.innerHTML='页面数据加载失败。<button class=\"btn\" onclick=\"loadSummary().catch(pageError)\">重试</button>';console.error(e)}function options")
 PAGE = PAGE.replace("}load()", "}loadSummary().catch(pageError)")
+_old_speed_test = "async function testAll(){let status=document.querySelector('#testStatus');try{status.textContent='正在对每个节点连续测试三次，本次操作完成后即停止…';status.className='status';let d=await api('/api/test-all',{method:'POST',body:'{}'});delays=Object.fromEntries(d.results.map(function(x){return [x.name,x]}));status.textContent='测速完成：'+d.results.filter(function(x){return x.ok}).length+'/'+d.results.length+' 稳定可用';renderPools()}catch(e){status.textContent=e.message;status.className='status bad'}}"
+_new_speed_test = "function showTestStatus(d){let status=document.querySelector('#testStatus');clearTimeout(testPoll);if(d.running){status.textContent='测速中：'+d.completed+'/'+d.total+' 个节点已完成；可继续浏览页面，完成后自动显示结果';status.className='status';testPoll=setTimeout(refreshTestStatus,1000);return}if(d.error){status.textContent='测速未完成：'+d.error;status.className='status bad';return}if(d.finished_at){status.textContent='测速完成：'+d.last_ok+'/'+d.last_total+' 稳定可用';status.className='status';catalogLoaded=false;loadPools();return}if(d.last_tested_at){status.textContent='上次稳定性测速：'+d.last_tested_at}}async function refreshTestStatus(){try{showTestStatus(await api('/api/test-status'))}catch(e){let status=document.querySelector('#testStatus');status.textContent='测速状态读取失败：'+e.message;status.className='status bad'}}async function testAll(){try{showTestStatus(await api('/api/test-all',{method:'POST',body:'{}'}))}catch(e){let status=document.querySelector('#testStatus');status.textContent=e.message;status.className='status bad'}}"
+if _old_speed_test not in PAGE:
+    raise RuntimeError("speed test template marker missing")
+PAGE = PAGE.replace(_old_speed_test, _new_speed_test, 1)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -567,6 +626,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/nodes":
             self.reply(200, {"slots": [slot_state(s) for s in SLOTS], "nodes": nodes(), "pools": pools(),
                              "tests": read_json(LAST_TESTS, {})})
+        elif path == "/api/test-status":
+            self.reply(200, test_status())
         elif path == "/api/status":
             self.reply(200, status())
         elif path == "/":
@@ -589,7 +650,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/remove": result = clear_slot(body["slot"])
             elif path == "/api/pools": result = save_pools(body.get("pools", {}))
             elif path == "/api/rollback": result = rollback_pools()
-            elif path == "/api/test-all": result = {"results": test_all()}
+            elif path == "/api/test-all": result = start_test_all()
             else: raise ValueError("not found")
             self.reply(200, result)
         except (ValueError, KeyError, OSError, subprocess.SubprocessError) as exc:
