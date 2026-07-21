@@ -111,6 +111,8 @@ class Handler(BaseHTTPRequestHandler):
     def target(self, path, query):
         if path == "/airport":
             return ("redirect", "/airport/")
+        if path == "/dns":
+            return ("redirect", "/dns/")
         if path.startswith("/airport/"):
             suffix = path[len("/airport"):]
             return ("backend", "127.0.0.1", 18090, suffix + ("?" + query if query else ""))
@@ -121,6 +123,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def proxy(self, request_path=None):
         parsed = urlsplit(request_path or self.path)
+        is_dns = parsed.path.startswith("/dns/")
         target = self.target(parsed.path, parsed.query)
         if target[0] == "redirect":
             self.redirect(target[1])
@@ -135,11 +138,32 @@ class Handler(BaseHTTPRequestHandler):
         headers["Host"] = f"{host}:{port}"
         headers["X-Family-Gateway"] = secret().decode()
         headers["X-Forwarded-For"] = self.client_address[0]
+        if is_dns:
+            upstream_auth = config().get("DNS_UPSTREAM_AUTH_B64", "").strip()
+            if upstream_auth:
+                headers["Authorization"] = "Basic " + upstream_auth
         try:
             connection = http.client.HTTPConnection(host, port, timeout=75)
             connection.request(self.command, path, body=body, headers=headers)
             response = connection.getresponse()
             response_body = response.read()
+            if is_dns and response.status == HTTPStatus.UNAUTHORIZED:
+                self.send_error(HTTPStatus.BAD_GATEWAY, "DNS 管理后端认证未配置")
+                return
+            content_type = response.getheader("Content-Type", "")
+            if is_dns and "text/html" in content_type:
+                values = config()
+                proxy_ip = values["FAMILY_PROXY_IP"]
+                html = response_body.decode("utf-8")
+                html = html.replace(
+                    "function apiUrl(path) { return new URL(path, window.location.origin).toString(); }",
+                    "function apiUrl(path) { const prefix = window.location.pathname.startsWith('/dns/') ? '/dns' : ''; return new URL(prefix + path, window.location.origin).toString(); }",
+                )
+                html = html.replace(f'href="http://{proxy_ip}:18088/"', 'href="/"')
+                html = html.replace(f'href="http://{proxy_ip}:18088/rules"', 'href="/rules"')
+                html = html.replace(f'href="http://{proxy_ip}:18090/"', 'href="/airport/"')
+                html = html.replace('<a class="active" href="/">DNS</a>', '<a class="active" href="/dns/">DNS</a>')
+                response_body = html.encode("utf-8")
             self.send_response(response.status, response.reason)
             for key, value in response.getheaders():
                 if key.lower() not in HOP_BY_HOP | {"content-length", "set-cookie"}:
@@ -154,6 +178,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.allowed():
             self.send_error(HTTPStatus.FORBIDDEN)
+            return
+        if self.path == "/favicon.ico":
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self.end_headers()
             return
         # Preserve the existing unauthenticated RouterOS health probe without
         # exposing the interactive management interface.

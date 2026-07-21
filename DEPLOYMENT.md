@@ -22,6 +22,14 @@ sudoedit /etc/family-proxy-ui/router.env
 
 只填写 `router.env` 内的 LAN、旁路主机、RouterOS API 用户/密码及管理页用户名/密码。首次运行安装器会把 `UI_PASSWORD` 转为 PBKDF2 哈希并从文件中删除。该文件、网关会话密钥和节点/订阅文件均不在 Git 中。
 
+现有 DNS 仪表盘若启用了 Basic Auth，再把 `username:password` 的 Base64 结果填入 `DNS_UPSTREAM_AUTH_B64`：
+
+```bash
+printf '%s' 'dns_username:dns_password' | base64
+```
+
+该值只保存在权限为 `600` 的 `router.env` 中。统一入口通过 `/dns/` 代为认证，浏览器不会再出现第二套认证框。
+
 ## 2. 安装控制平面
 
 ```bash
@@ -82,7 +90,7 @@ sudo systemctl restart family-proxy-ui family-mihomo-sub-import family-proxy-gat
 sudo ./scripts/verify-server.sh
 ```
 
-对单个接管设备的 RouterOS 回滚，使用 `routeros/99-remove-device-template.rsc`，并在旁路主机中删除同一 IP 后同步：
+对单个接管设备的 RouterOS 回滚，使用 `routeros/99-remove-device-template.rsc` 从共享名单撤出，并在旁路主机中删除同一 IP 后同步：
 
 ```bash
 sudoedit /etc/family-proxy-ui/managed-ips
@@ -97,4 +105,4 @@ sudo /usr/local/sbin/family-mihomo-tproxy-auto sync
 - 接管测试设备在国内 App、局域网服务和外网业务上都通过；未接管设备保持原样。
 - RouterOS 文本导出、二进制备份和本次服务器备份均可定位。
 
-RouterOS 的命令设计遵循其 [Packet Flow](https://help.mikrotik.com/docs/spaces/ROS/pages/328227/Packet+Flow+in+RouterOS)、[Connection Tracking](https://help.mikrotik.com/docs/spaces/ROS/pages/130220087/Connection+tracking) 与 [Netwatch](https://help.mikrotik.com/docs/spaces/ROS/pages/8323208/Netwatch) 文档：策略路由、NAT、FastTrack 排除和回滚均按单设备范围处理。
+RouterOS 的命令设计遵循其 [Packet Flow](https://help.mikrotik.com/docs/spaces/ROS/pages/328227/Packet+Flow+in+RouterOS)、[Connection Tracking](https://help.mikrotik.com/docs/spaces/ROS/pages/130220087/Connection+tracking) 与 [Netwatch](https://help.mikrotik.com/docs/spaces/ROS/pages/8323208/Netwatch) 文档：IPv4 策略路由、DNS 和 FastTrack 排除使用共享地址列表，设备增减仍保持单设备事务与独立 IPv6 防漏。

@@ -13,6 +13,7 @@ import subprocess
 import threading
 import time
 import yaml
+from collections import deque
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -36,11 +37,18 @@ PROXY_IP = "__FAMILY_PROXY_IP__"
 FIXED_MANAGED_IPS = set()
 RESERVED_IPS = {"__FAMILY_ROUTER_IP__", "__FAMILY_RESERVED_GATEWAY_IP__", PROXY_IP}
 AUDIT_PATH = Path("/var/log/family-proxy-ui-audit.jsonl")
+BUILD_VERSION = "2026.07.21-seven-point"
+SHARED_LIST = "family_mihomo_devices"
+SHARED_TABLE = "family_mihomo_shared"
+SHARED_CONN_MARK = "family_mihomo_conn"
+SHARED_TAG = "family-mihomo-shared"
 CSRF_TOKEN = secrets.token_urlsafe(32)
 HEALTH_LOCK = threading.Lock()
 HEALTH_GATE = {"ready": True, "failures": 0, "successes": 0}
 RULES_LOCK = threading.Lock()
 DEVICE_PREFS_LOCK = threading.Lock()
+DNS_METRICS_LOCK = threading.Lock()
+DNS_SAMPLES = deque(maxlen=120)
 PROTECTED_RULES = {"GEOSITE,CN,DIRECT", "GEOIP,CN,DIRECT,no-resolve"}
 
 
@@ -218,6 +226,13 @@ def managed_ips():
     return {line.strip() for line in MANAGED_IPS_PATH.read_text().splitlines() if line.strip()}
 
 
+def address_list_managed(api):
+    return {
+        item.get("address") for item in api.print("/ip/firewall/address-list")
+        if item.get("list") == SHARED_LIST and item.get("address")
+    }
+
+
 def save_managed_ips(addresses):
     content = "".join(f"{address}\n" for address in sorted(addresses, key=lambda value: tuple(map(int, value.split(".")))))
     temporary = MANAGED_IPS_PATH.with_suffix(".new")
@@ -270,7 +285,17 @@ def local_health():
     except RouterError:
         pass
     try:
+        dns_started = time.monotonic()
         checks["dns"] = dns_probe()
+        dns_ms = round((time.monotonic() - dns_started) * 1000, 1)
+        if checks["dns"]:
+            with DNS_METRICS_LOCK:
+                DNS_SAMPLES.append(dns_ms)
+                ordered = sorted(DNS_SAMPLES)
+                detail["dns_ms"] = dns_ms
+                detail["dns_p50_ms"] = ordered[(len(ordered) - 1) // 2]
+                detail["dns_p95_ms"] = ordered[max(0, round((len(ordered) - 1) * 0.95))]
+                detail["dns_samples"] = len(ordered)
     except (OSError, TimeoutError):
         pass
     return {
@@ -552,8 +577,72 @@ def router_summary(api):
     summary.update({
         "netwatch": health.get("status", "unknown") if health else "missing",
         "router": "connected",
+        "version": BUILD_VERSION,
     })
     return summary
+
+
+def last_audit_event():
+    try:
+        lines = AUDIT_PATH.read_text(encoding="utf-8").splitlines()
+        return json.loads(lines[-1]) if lines else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def latest_backup(config):
+    root = config.get("BACKUP_ROOT", "").strip()
+    if not root:
+        return None
+    try:
+        candidates = [path for path in Path(root).iterdir() if path.is_dir()]
+        latest = max(candidates, key=lambda path: path.stat().st_mtime)
+        return {"name": latest.name, "time": time.strftime(
+            "%Y-%m-%d %H:%M", time.localtime(latest.stat().st_mtime))}
+    except (OSError, ValueError):
+        return None
+
+
+def connection_packets(connections, ip):
+    packets = 0
+    active = 0
+    for connection in connections:
+        source = connection.get("src-address", "").rsplit(":", 1)[0]
+        reply_destination = connection.get("reply-dst-address", "").rsplit(":", 1)[0]
+        if source == ip or reply_destination == ip:
+            active += 1
+            packets += int(connection.get("orig-packets", "0") or 0)
+            packets += int(connection.get("repl-packets", "0") or 0)
+    return active, packets
+
+
+def configuration_drift(api, leases, router_managed, file_managed):
+    issues = []
+    lease_by_ip = {item.get("address"): item for item in leases}
+    if router_managed != file_managed:
+        issues.append("RouterOS 名单与 Z4Pro 状态文件不一致")
+    for ip in sorted(router_managed | file_managed):
+        lease = lease_by_ip.get(ip)
+        if not lease:
+            issues.append(f"{ip} 缺少 DHCP 租约")
+            continue
+        if lease.get("dhcp-option"):
+            issues.append(f"{ip} 仍使用设备专属网关或 DNS")
+        mac = lease.get("mac-address", "")
+        guard = any(
+            item.get("comment") == managed_tag(ip) + " IPv6 bypass guard"
+            and item.get("src-mac-address", "").upper() == mac.upper()
+            for item in api.print("/ipv6/firewall/filter")
+        )
+        if not guard:
+            issues.append(f"{ip} 缺少 IPv6 防漏规则")
+    legacy_lists = {
+        item.get("list") for item in api.print("/ip/firewall/address-list")
+        if item.get("list", "").startswith("family_mihomo_") and item.get("list") != SHARED_LIST
+    }
+    if legacy_lists:
+        issues.append("仍有旧设备地址列表：" + "、".join(sorted(legacy_lists)))
+    return issues
 
 
 def list_devices():
@@ -564,14 +653,16 @@ def list_devices():
     with RouterOS() as api:
         leases = api.print("/ip/dhcp-server/lease")
         mangle = api.print("/ip/firewall/mangle")
-        managed = set()
-        counters = {}
+        connections = api.print("/ip/firewall/connection")
+        managed = address_list_managed(api)
+        legacy_managed = set()
         for rule in mangle:
             comment = rule.get("comment", "")
             address = policy_address(comment)
             if address:
-                managed.add(address)
-                counters[address] = int(rule.get("packets", "0") or 0)
+                legacy_managed.add(address)
+        managed |= legacy_managed
+        file_managed = managed_ips()
         devices = []
         for lease in leases:
             ip = lease.get("address")
@@ -580,7 +671,7 @@ def list_devices():
             mac = lease.get("mac-address", "").upper()
             if not mac:
                 continue
-            packets = counters.get(ip, 0)
+            active_connections, packets = connection_packets(connections, ip)
             is_managed = ip in managed
             if is_managed:
                 managed_macs.add(mac)
@@ -597,9 +688,20 @@ def list_devices():
                 "favorite": is_managed or mac in favorite_macs,
                 "fixed": False,
                 "packets": packets,
-                "effective": is_managed and packets > 0,
+                "connections": active_connections,
+                "effective": is_managed and active_connections > 0,
             })
         summary = router_summary(api)
+        drift = configuration_drift(api, leases, address_list_managed(api), file_managed)
+        upnp = [item for item in api.print("/ip/firewall/nat")
+                if item.get("dynamic") == "true" and item.get("comment", "").startswith("upnp ")]
+        summary.update({
+            "drift": drift,
+            "upnp_mappings": len(upnp),
+            "last_change": last_audit_event(),
+            "backup": latest_backup(load_config()),
+            "ipv6_policy": "纳管设备阻断",
+        })
     if managed_macs - favorite_macs:
         with DEVICE_PREFS_LOCK:
             latest = load_device_preferences()
@@ -622,6 +724,70 @@ def ensure_policy_anchors(api):
     for path, comment, chain in anchors:
         if not any(item.get("comment") == comment for item in api.print(path)):
             api.add(path, chain=chain, action="accept", disabled="yes", comment=comment)
+
+
+def ensure_shared_policy(api):
+    ensure_table(api, SHARED_TABLE)
+    ensure_policy_anchors(api)
+    mangle_anchor = rule_id(api, "/ip/firewall/mangle", "family-mihomo-auto anchor")
+    nat_anchor = rule_id(api, "/ip/firewall/nat", "family-mihomo-auto DNS anchor")
+
+    if not any(item.get("comment") == SHARED_TAG + " route" for item in api.print("/ip/route")):
+        api.add("/ip/route", **{
+            "dst-address": "0.0.0.0/0", "gateway": PROXY_IP, "routing-table": SHARED_TABLE,
+            "check-gateway": "ping", "comment": SHARED_TAG + " route",
+        })
+
+    mangle = api.print("/ip/firewall/mangle")
+    if not any(item.get("comment") == SHARED_TAG + " route to z4pro" for item in mangle):
+        route_id = add_before(api, "/ip/firewall/mangle", mangle_anchor,
+                              chain="prerouting", action="mark-routing",
+                              **{"new-routing-mark": SHARED_TABLE, "passthrough": "no",
+                                 "src-address-list": SHARED_LIST,
+                                 "connection-mark": SHARED_CONN_MARK,
+                                 "comment": SHARED_TAG + " route to z4pro"})
+        mark_id = add_before(api, "/ip/firewall/mangle", route_id,
+                             chain="prerouting", action="mark-connection",
+                             **{"new-connection-mark": SHARED_CONN_MARK, "passthrough": "yes",
+                                "src-address-list": SHARED_LIST,
+                                "dst-address-list": "!local_lan_ipv4",
+                                "connection-mark": "no-mark",
+                                "comment": SHARED_TAG + " mark connection"})
+        add_before(api, "/ip/firewall/mangle", mark_id,
+                   chain="prerouting", action="accept",
+                   **{"src-address-list": SHARED_LIST,
+                      "dst-address-list": "local_lan_ipv4",
+                      "comment": SHARED_TAG + " local bypass"})
+
+    nat = api.print("/ip/firewall/nat")
+    if not any(item.get("comment") == SHARED_TAG + " DNS TCP" for item in nat):
+        tcp_id = add_before(api, "/ip/firewall/nat", nat_anchor,
+                            chain="dstnat", action="dst-nat", protocol="tcp",
+                            **{"src-address-list": SHARED_LIST, "dst-port": "53",
+                               "to-addresses": PROXY_IP, "to-ports": "53",
+                               "comment": SHARED_TAG + " DNS TCP"})
+        add_before(api, "/ip/firewall/nat", tcp_id,
+                   chain="dstnat", action="dst-nat", protocol="udp",
+                   **{"src-address-list": SHARED_LIST, "dst-port": "53",
+                      "to-addresses": PROXY_IP, "to-ports": "53",
+                      "comment": SHARED_TAG + " DNS UDP"})
+
+    filters = api.print("/ip/firewall/filter")
+    if not any(item.get("comment") == SHARED_TAG + " FastTrack exclude" for item in filters):
+        fasttrack = next((rule for rule in filters if rule.get("action") == "fasttrack-connection"), None)
+        api.add("/ip/firewall/filter", chain="forward", action="accept", **{
+            "connection-mark": SHARED_CONN_MARK, "comment": SHARED_TAG + " FastTrack exclude",
+        })
+        exclude = next((rule for rule in api.print("/ip/firewall/filter")
+                        if rule.get("comment") == SHARED_TAG + " FastTrack exclude"), None)
+        if exclude and fasttrack:
+            api.talk("/ip/firewall/filter/move", {
+                "numbers": exclude[".id"], "destination": fasttrack[".id"]})
+
+    ipv6_filters = api.print("/ipv6/firewall/filter")
+    if not any(rule.get("comment") == "family-mihomo-auto IPv6 drop" for rule in ipv6_filters):
+        api.add("/ipv6/firewall/filter", chain="family_mihomo_auto_v6",
+                action="drop", comment="family-mihomo-auto IPv6 drop")
 
 
 def rule_id(api, path, comment):
@@ -669,6 +835,20 @@ def cleanup_device_rules(api, ip):
     return removed
 
 
+def remove_shared_membership(api, ip):
+    removed = 0
+    for item in api.print("/ip/firewall/address-list"):
+        if item.get("list") == SHARED_LIST and item.get("address") == ip:
+            api.remove("/ip/firewall/address-list", item[".id"])
+            removed += 1
+    tag = managed_tag(ip) + " IPv6 bypass guard"
+    for item in api.print("/ipv6/firewall/filter"):
+        if item.get("comment") == tag:
+            api.remove("/ipv6/firewall/filter", item[".id"])
+            removed += 1
+    return removed
+
+
 def conflicting_policy(api, ip):
     memberships = set()
     address = ipaddress.ip_address(ip)
@@ -691,19 +871,25 @@ def conflicting_policy(api, ip):
 
 
 def verify_device_rules(api, ip):
-    tag = managed_tag(ip)
-    expected = {
-        "/ip/firewall/mangle": 3,
-        "/ip/firewall/nat": 2,
-        "/ip/firewall/filter": 1,
-        "/ipv6/firewall/filter": 1,
-        "/ip/route": 1,
-    }
     missing = []
-    for path, count in expected.items():
-        actual = sum(item.get("comment", "").startswith(tag) for item in api.print(path))
+    membership = any(item.get("list") == SHARED_LIST and item.get("address") == ip
+                     for item in api.print("/ip/firewall/address-list"))
+    if not membership:
+        missing.append("设备名单")
+    expected = (
+        ("/ip/firewall/mangle", 3),
+        ("/ip/firewall/nat", 2),
+        ("/ip/firewall/filter", 1),
+        ("/ip/route", 1),
+    )
+    for path, count in expected:
+        actual = sum(item.get("comment", "").startswith(SHARED_TAG) for item in api.print(path))
         if actual < count:
             missing.append(f"{path}:{actual}/{count}")
+    guard = sum(item.get("comment") == managed_tag(ip) + " IPv6 bypass guard"
+                for item in api.print("/ipv6/firewall/filter"))
+    if guard != 1:
+        missing.append(f"IPv6 防漏:{guard}/1")
     if missing:
         raise RouterError("规则创建不完整：" + ", ".join(missing))
 
@@ -711,9 +897,6 @@ def verify_device_rules(api, ip):
 def enable_device(ip):
     ip = validate_ip(ip)
     tag = managed_tag(ip)
-    suffix = ip.rsplit(".", 1)[1]
-    table = f"family_mihomo_auto_{suffix}"
-    mark = f"family_mihomo_auto_{suffix}_conn"
     health = local_health()
     if not health["ready"]:
         raise RouterError("Z4Pro 复合健康检查未通过，未创建任何规则")
@@ -725,7 +908,7 @@ def enable_device(ip):
         mac = lease.get("mac-address")
         if not mac:
             raise RouterError("该 DHCP 租约没有 MAC 地址")
-        if any(rule.get("comment", "").startswith(tag) for rule in api.print("/ip/firewall/mangle")):
+        if ip in address_list_managed(api):
             raise RouterError("该设备已由页面管理")
         conflict = conflicting_policy(api, ip)
         if conflict:
@@ -734,45 +917,9 @@ def enable_device(ip):
         if lease.get("dynamic") == "true":
             api.talk("/ip/dhcp-server/lease/make-static", {".id": lease[".id"]})
         try:
-            ensure_table(api, table)
-            ensure_policy_anchors(api)
-            mangle_anchor = rule_id(api, "/ip/firewall/mangle", "family-mihomo-auto anchor")
-            nat_anchor = rule_id(api, "/ip/firewall/nat", "family-mihomo-auto DNS anchor")
-            api.add("/ip/route", **{
-                "dst-address": "0.0.0.0/0", "gateway": PROXY_IP, "routing-table": table,
-                "check-gateway": "ping", "comment": tag + " route",
-            })
-            route_id = add_before(api, "/ip/firewall/mangle", mangle_anchor, chain="prerouting", action="mark-routing",
-                                  **{"new-routing-mark": table, "passthrough": "no", "src-address": ip,
-                                     "connection-mark": mark, "comment": tag + " route to z4pro"})
-            mark_id = add_before(api, "/ip/firewall/mangle", route_id, chain="prerouting", action="mark-connection",
-                                 **{"new-connection-mark": mark, "passthrough": "yes", "src-address": ip,
-                                    "dst-address-list": "!local_lan_ipv4", "connection-mark": "no-mark",
-                                    "comment": tag + " mark connection"})
-            add_before(api, "/ip/firewall/mangle", mark_id, chain="prerouting", action="accept", **{
-                "src-address": ip, "dst-address-list": "local_lan_ipv4", "comment": tag + " local bypass",
-            })
-            tcp_id = add_before(api, "/ip/firewall/nat", nat_anchor, chain="dstnat", action="dst-nat", protocol="tcp", **{
-                "src-address": ip, "dst-port": "53", "to-addresses": PROXY_IP, "to-ports": "53",
-                "comment": tag + " DNS TCP",
-            })
-            add_before(api, "/ip/firewall/nat", tcp_id, chain="dstnat", action="dst-nat", protocol="udp", **{
-                "src-address": ip, "dst-port": "53", "to-addresses": PROXY_IP, "to-ports": "53",
-                "comment": tag + " DNS UDP",
-            })
-            fasttrack = next((rule for rule in api.print("/ip/firewall/filter") if rule.get("action") == "fasttrack-connection"), None)
-            fasttrack_id = fasttrack.get(".id") if fasttrack else None
-            api.add("/ip/firewall/filter", chain="forward", action="accept", **{
-                "connection-mark": mark, "comment": tag + " FastTrack exclude",
-            })
-            excludes = [rule for rule in api.print("/ip/firewall/filter") if rule.get("comment") == tag + " FastTrack exclude"]
-            exclude_id = excludes[-1][".id"] if excludes else None
-            if exclude_id and fasttrack_id:
-                api.talk("/ip/firewall/filter/move", {"numbers": exclude_id, "destination": fasttrack_id})
-
-            ipv6_filters = api.print("/ipv6/firewall/filter")
-            if not any(rule.get("comment") == "family-mihomo-auto IPv6 drop" for rule in ipv6_filters):
-                api.add("/ipv6/firewall/filter", chain="family_mihomo_auto_v6", action="drop", comment="family-mihomo-auto IPv6 drop")
+            ensure_shared_policy(api)
+            api.add("/ip/firewall/address-list", list=SHARED_LIST, address=ip,
+                    comment="family-mihomo-managed " + ip)
             api.add("/ipv6/firewall/filter", chain="forward", action="jump", **{
                 "jump-target": "family_mihomo_auto_v6", "src-mac-address": mac,
                 "comment": tag + " IPv6 bypass guard",
@@ -785,7 +932,7 @@ def enable_device(ip):
             cleared = clear_device_connections(api, ip)
             audit("enable", ip, "success", f"cleared_connections={cleared}")
         except (RouterError, OSError) as exc:
-            cleanup_device_rules(api, ip)
+            remove_shared_membership(api, ip)
             addresses = managed_ips()
             addresses.discard(ip)
             save_managed_ips(addresses)
@@ -801,7 +948,8 @@ def enable_device(ip):
 def remove_device(ip):
     ip = validate_ip(ip)
     with RouterOS() as api:
-        removed = cleanup_device_rules(api, ip)
+        removed = remove_shared_membership(api, ip)
+        removed += cleanup_device_rules(api, ip)
         addresses = managed_ips()
         addresses.discard(ip)
         save_managed_ips(addresses)
@@ -832,6 +980,41 @@ const csrf="__CSRF__",statusEl=document.querySelector('#status');let filter='man
 </script></body></html>'''
 PAGE = PAGE.replace('<div class="eyebrow">SELECTIVE ROUTING</div>', '')
 PAGE = PAGE.replace(
+    '.overall.bad{color:#ff453a}',
+    '.overall.bad{color:#ff453a}.overall.warn{color:#ffd60a}',
+    1,
+)
+PAGE = PAGE.replace(
+    'grid-template-columns:repeat(5,minmax(0,1fr))',
+    'grid-template-columns:repeat(auto-fit,minmax(150px,1fr))',
+    1,
+)
+PAGE = PAGE.replace(
+    "ready=summary.ready&&summary.netwatch==='up';devices=data.devices;",
+    "ready=summary.ready&&summary.netwatch==='up',drift=summary.drift||[],warn=ready&&(drift.length||summary.upnp_mappings>20);devices=data.devices;",
+    1,
+)
+PAGE = PAGE.replace(
+    "badge.className='overall '+(ready?'':'bad');badge.innerHTML=`<span class=\"dot\"></span><span>${ready?'旁路运行正常':'旁路需要检查'}</span>`;",
+    "badge.className='overall '+(!ready?'bad':warn?'warn':'');badge.innerHTML=`<span class=\"dot\"></span><span>${!ready?'旁路需要检查':warn?'运行正常，有项目待整理':'旁路运行正常'}</span>`;",
+    1,
+)
+PAGE = PAGE.replace(
+    "healthItem('自动回退',summary.netwatch==='up',summary.netwatch==='up'?'已启用':'未就绪');render()",
+    "healthItem('自动回退',summary.netwatch==='up',summary.netwatch==='up'?'已启用':'未就绪')+healthItem('配置对账',!drift.length,drift.join('；')||'页面、路由与状态一致')+healthItem('IPv6',true,summary.ipv6_policy)+healthItem('备份',!!summary.backup,summary.backup?summary.backup.time:'尚未配置')+healthItem('UPnP',summary.upnp_mappings<=20,summary.upnp_mappings+' 个动态映射')+healthItem('版本',true,summary.version);render()",
+    1,
+)
+PAGE = PAGE.replace(
+    "healthItem('DNS',checks.dns,'国内解析')",
+    "healthItem('DNS',checks.dns,summary.detail?.dns_samples?'P50 '+summary.detail.dns_p50_ms+' ms · P95 '+summary.detail.dns_p95_ms+' ms':'正在采样')",
+    1,
+)
+PAGE = PAGE.replace(
+    "${d.packets} 个包",
+    "${d.connections} 条连接 · ${d.packets} 个包",
+    1,
+)
+PAGE = PAGE.replace(
     'grid-template-columns:repeat(3,1fr)}.nav a{text-align:center;padding:7px 5px}',
     'grid-template-columns:repeat(4,1fr)}.nav a{text-align:center;padding:7px 5px;white-space:normal}',
     1,
@@ -847,10 +1030,11 @@ RULES_PAGE = RULES_PAGE.replace(
     "fetch(new URL(path,location.origin),{...opt,headers:",
     1,
 )
+RULES_PAGE = RULES_PAGE.replace('href="http://__FAMILY_PROXY_IP__:18091/"', 'href="/dns/"')
 PAGE = PAGE.replace(
     '<a href="/airport/">机场与候选池</a></nav>',
     '<a href="/airport/">机场与候选池</a>'
-    '<a href="http://__FAMILY_PROXY_IP__:18091/">DNS</a></nav>',
+    '<a href="/dns/">DNS</a></nav>',
     1,
 )
 PAGE = PAGE.replace(

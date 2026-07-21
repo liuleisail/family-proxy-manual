@@ -5,6 +5,9 @@ set -Eeuo pipefail
 CONFIG=/etc/family-proxy-ui/router.env
 STATE=/etc/family-proxy-ui/managed-ips
 CHAIN=FAMILY_MIHOMO_AUTO
+TABLE=family_mihomo_shared
+PREF=3000
+MARK=0x2000
 source_config() {
   while IFS='=' read -r key value; do
     [[ -z "$key" || "$key" == \#* ]] && continue
@@ -16,8 +19,10 @@ clear_runtime() {
   while iptables -t mangle -D PREROUTING -j "$CHAIN" 2>/dev/null; do :; done
   iptables -t mangle -F "$CHAIN" 2>/dev/null || true
   iptables -t mangle -X "$CHAIN" 2>/dev/null || true
-  ip -o rule show | awk -F: '$1 >= 3000 && $1 <= 3254 {gsub(/ /,"",$1); print $1}' | while read -r pref; do ip rule del pref "$pref" 2>/dev/null || true; done
+  ip -o rule show | awk '/lookup family_mihomo_(shared|auto_[0-9]+)/ {gsub(/:/,"",$1); print $1}' | while read -r pref; do ip rule del pref "$pref" 2>/dev/null || true; done
   awk '$2 ~ /^family_mihomo_auto_/ {print $2}' /etc/iproute2/rt_tables 2>/dev/null | while read -r table; do ip route flush table "$table" 2>/dev/null || true; done
+  ip route flush table "$TABLE" 2>/dev/null || true
+  sed -i -E '/[[:space:]]family_mihomo_(auto_)?[0-9]+$/d' /etc/iproute2/rt_tables
 }
 valid_ip() {
   [[ $1 == "$FAMILY_LAN_PREFIX"* ]] || return 1
@@ -31,17 +36,15 @@ sync() {
   clear_runtime
   iptables -t mangle -N "$CHAIN" 2>/dev/null || true
   iptables -t mangle -F "$CHAIN"
-  install -m 600 /dev/null "$STATE" 2>/dev/null || true
+  [[ -e "$STATE" ]] || install -m 600 /dev/null "$STATE"
+  grep -q "[[:space:]]$TABLE$" /etc/iproute2/rt_tables || printf '%s %s\n' "$PREF" "$TABLE" >> /etc/iproute2/rt_tables
+  ip route replace local 0.0.0.0/0 dev lo table "$TABLE"
+  ip rule del pref "$PREF" 2>/dev/null || true
+  ip rule add pref "$PREF" fwmark "$MARK/0xffffffff" lookup "$TABLE"
   while IFS= read -r ip; do
     valid_ip "$ip" || continue
-    local last=${ip##*.} table="family_mihomo_auto_$last" pref=$((3000 + last)) mark=$((0x2000 + last)) hex
-    hex=$(printf '%x' "$mark")
-    grep -q "[[:space:]]$table$" /etc/iproute2/rt_tables || printf '%s %s\n' "$pref" "$table" >> /etc/iproute2/rt_tables
     for cidr in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4; do iptables -t mangle -A "$CHAIN" -s "$ip" -d "$cidr" -j RETURN; done
-    for proto in tcp udp; do iptables -t mangle -A "$CHAIN" -s "$ip" -p "$proto" -m addrtype ! --dst-type LOCAL -j TPROXY --on-port 7893 --tproxy-mark "0x$hex/0xffffffff"; done
-    ip route replace local 0.0.0.0/0 dev lo table "$table"
-    ip rule del pref "$pref" 2>/dev/null || true
-    ip rule add pref "$pref" fwmark "0x$hex/0xffffffff" lookup "$table"
+    for proto in tcp udp; do iptables -t mangle -A "$CHAIN" -s "$ip" -p "$proto" -m addrtype ! --dst-type LOCAL -j TPROXY --on-port 7893 --tproxy-mark "$MARK/0xffffffff"; done
   done < "$STATE"
   iptables -t mangle -A PREROUTING -j "$CHAIN"
 }
