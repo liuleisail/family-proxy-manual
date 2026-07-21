@@ -109,7 +109,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
+    def legacy_dns_request(self, path):
+        referer_path = urlsplit(self.headers.get("Referer", "")).path
+        from_dns_page = referer_path == "/dns" or referer_path.startswith("/dns/")
+        return from_dns_page and path.startswith(
+            ("/api/v1/", "/api/v2/", "/plugins/", "/maintenance-api/")
+        )
+
     def target(self, path, query):
+        legacy_dns_request = self.legacy_dns_request(path)
         if path == "/airport":
             return ("redirect", "/airport/")
         if path == "/dns":
@@ -120,11 +128,15 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/dns/"):
             suffix = path[len("/dns"):]
             return ("backend", "__FAMILY_PROXY_IP__", 18091, suffix + ("?" + query if query else ""))
+        if legacy_dns_request and path.startswith("/maintenance-api/"):
+            return ("backend", "127.0.0.1", 18102, path[len("/maintenance-api"):] + ("?" + query if query else ""))
+        if legacy_dns_request and path.startswith(("/api/v1/", "/api/v2/", "/plugins/")):
+            return ("backend", "__FAMILY_PROXY_IP__", 18091, path + ("?" + query if query else ""))
         return ("backend", "127.0.0.1", 18093, path + ("?" + query if query else ""))
 
     def proxy(self, request_path=None):
         parsed = urlsplit(request_path or self.path)
-        is_dns = parsed.path.startswith("/dns/")
+        is_dns = parsed.path.startswith("/dns/") or self.legacy_dns_request(parsed.path)
         target = self.target(parsed.path, parsed.query)
         if target[0] == "redirect":
             self.redirect(target[1])
