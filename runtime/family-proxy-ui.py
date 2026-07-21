@@ -38,7 +38,7 @@ PROXY_IP = "__FAMILY_PROXY_IP__"
 FIXED_MANAGED_IPS = set()
 RESERVED_IPS = {"__FAMILY_ROUTER_IP__", "__FAMILY_RESERVED_GATEWAY_IP__", PROXY_IP}
 AUDIT_PATH = Path("/var/log/family-proxy-ui-audit.jsonl")
-BUILD_VERSION = "2026.07.21-z4pro-status"
+BUILD_VERSION = "2026.07.21-router-status"
 SHARED_LIST = "family_mihomo_devices"
 SHARED_TABLE = "family_mihomo_shared"
 SHARED_CONN_MARK = "family_mihomo_conn"
@@ -576,10 +576,34 @@ def update_device_preference(mac, alias=None, favorite=None):
 def router_summary(api):
     checks = api.print("/tool/netwatch")
     health = next((item for item in checks if item.get("name") == "family-mihomo-tproxy-health"), None)
+    router_resource = {"available": False}
+    try:
+        resources = api.print("/system/resource")
+        if resources:
+            resource = resources[0]
+            total_memory = int(resource.get("total-memory", 0))
+            free_memory = int(resource.get("free-memory", 0))
+            used_memory = max(0, total_memory - free_memory)
+            router_resource = {
+                "available": True,
+                "cpu_percent": int(resource.get("cpu-load", 0)),
+                "cpu_count": int(resource.get("cpu-count", 0)),
+                "cpu_frequency": int(resource.get("cpu-frequency", 0)),
+                "memory_percent": round(used_memory * 100 / total_memory, 1) if total_memory else 0,
+                "memory_used": used_memory,
+                "memory_free": free_memory,
+                "memory_total": total_memory,
+                "uptime": resource.get("uptime", ""),
+                "version": resource.get("version", ""),
+                "board_name": resource.get("board-name", "RB5009"),
+            }
+    except (RouterError, TypeError, ValueError):
+        pass
     summary = local_health()
     summary.update({
         "netwatch": health.get("status", "unknown") if health else "missing",
         "router": "connected",
+        "router_resource": router_resource,
         "version": BUILD_VERSION,
     })
     return summary
@@ -1090,6 +1114,9 @@ const csrf="__CSRF__",statusEl=document.querySelector('#status');let filter='man
 PAGE = PAGE.replace('<div class="eyebrow">SELECTIVE ROUTING</div>', '')
 PAGE = PAGE.replace(
     '.add-row{display:grid;',
+    '.router-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}'
+    '.router-grid .system-item,.router-grid .system-item:nth-child(3n),.router-grid .system-item:nth-last-child(-n+3){border-right:1px solid #38383a;border-bottom:0}'
+    '.router-grid .system-item:last-child{border-right:0}'
     '.system-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}'
     '.system-item{min-width:0;min-height:118px;padding:16px;border-right:1px solid #38383a;border-bottom:1px solid #38383a}'
     '.system-item:nth-child(3n){border-right:0}.system-item:nth-last-child(-n+3){border-bottom:0}'
@@ -1103,6 +1130,8 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     '<section class="section"><div class="section-title"><h2>运行状态</h2>',
+    '<section class="section"><div class="section-title"><h2>RB5009 运行状态</h2><span class="muted" id="routerUpdated">正在读取</span></div>'
+    '<div class="group router-grid" id="routerStatus"><div class="empty">正在读取路由器状态</div></div></section>'
     '<section class="section"><div class="section-title"><h2>Z4Pro 运行状态</h2><span class="muted" id="systemUpdated">正在读取</span></div>'
     '<div class="group system-grid" id="systemStatus"><div class="empty">正在读取系统状态</div></div></section>'
     '<section class="section"><div class="section-title"><h2>旁路运行状态</h2>',
@@ -1112,8 +1141,10 @@ PAGE = PAGE.replace(
     'function deviceActions(d){',
     '''function formatBytes(value){return `${(Number(value||0)/1073741824).toFixed(1)} GB`}
 function formatUptime(seconds){let total=Math.max(0,Math.floor(Number(seconds||0))),days=Math.floor(total/86400),hours=Math.floor(total%86400/3600),minutes=Math.floor(total%3600/60);return days?`${days} 天 ${hours} 小时`:hours?`${hours} 小时 ${minutes} 分钟`:`${minutes} 分钟`}
+function formatRouterUptime(value){let units={w:'周',d:'天',h:'小时',m:'分钟',s:'秒'},parts=[];String(value||'').replace(/([0-9]+)(w|d|h|m|s)/g,(all,count,unit)=>{if(parts.length<3)parts.push(count+units[unit]);return all});return parts.join(' ')||'不可用'}
 function systemTone(value,warn,bad){return Number(value)>=bad?'bad':Number(value)>=warn?'warn':''}
 function systemItem(label,value,detail,tone='',percent=null){let meter=percent===null?'':`<div class="meter"><span style="width:${Math.max(0,Math.min(100,Number(percent)||0))}%"></span></div>`;return `<div class="system-item ${tone}"><div class="system-label">${esc(label)}</div><div class="system-value">${esc(value)}</div>${meter}<div class="system-detail">${esc(detail)}</div></div>`}
+function renderRouter(r){let target=document.querySelector('#routerStatus'),updated=document.querySelector('#routerUpdated');if(!r?.available){target.innerHTML='<div class="empty">路由器资源暂时不可读</div>';updated.textContent='读取失败';return}target.innerHTML=systemItem('RouterOS',r.version||'不可用',r.board_name||'RB5009')+systemItem('CPU',`${Number(r.cpu_percent).toFixed(0)}%`,`${r.cpu_count} 核 · ${r.cpu_frequency} MHz`,systemTone(r.cpu_percent,75,90),r.cpu_percent)+systemItem('可用内存',formatBytes(r.memory_free),`总计 ${formatBytes(r.memory_total)} · 已用 ${Number(r.memory_percent).toFixed(1)}%`,systemTone(r.memory_percent,75,90),r.memory_percent)+systemItem('运行时间',formatRouterUptime(r.uptime),'RouterOS 持续运行');updated.textContent=new Date().toLocaleTimeString('zh-CN',{hour12:false})}
 async function loadSystem(){try{let s=await api('/api/system/status'),c=s.cpu,m=s.memory,t=s.temperature,d=s.disk,x=s.docker,tempValue=t.cpu_c==null?'不可用':`${Number(t.cpu_c).toFixed(1)}°C`,tempDetail=t.nvme_c==null?'NVMe 温度不可用':`NVMe ${Number(t.nvme_c).toFixed(1)}°C`,dockerValue=x.running==null?'不可用':`${x.running} / ${x.total}`,dockerDetail=x.unhealthy==null?'状态不可用':x.unhealthy?`${x.unhealthy} 个容器异常`:x.total>x.running?`运行中均正常 · ${x.total-x.running} 个已停止`:'运行中容器均正常';document.querySelector('#systemStatus').innerHTML=systemItem('CPU',`${Number(c.percent).toFixed(1)}%`,`${c.cores} 核 · 负载 ${c.load_1m} / ${c.load_5m}`,systemTone(c.percent,75,90),c.percent)+systemItem('内存',`${Number(m.percent).toFixed(1)}%`,`${formatBytes(m.used)} / ${formatBytes(m.total)} · Swap ${Number(m.swap_percent).toFixed(1)}%`,systemTone(m.percent,75,90),m.percent)+systemItem('温度',tempValue,tempDetail,systemTone(t.cpu_c||0,70,85))+systemItem('M.2 Docker 盘',`${Number(d.percent).toFixed(1)}%`,`${formatBytes(d.used)} / ${formatBytes(d.total)}`,systemTone(d.percent,75,90),d.percent)+systemItem('Docker',dockerValue,dockerDetail,x.unhealthy?'bad':'')+systemItem('运行时间',formatUptime(s.uptime_seconds),`内核 ${s.kernel}`);document.querySelector('#systemUpdated').textContent=`${s.healthy?'状态正常':'需要检查'} · ${new Date(s.updated_at*1000).toLocaleTimeString('zh-CN',{hour12:false})}`}catch(e){document.querySelector('#systemStatus').innerHTML=`<div class="empty">读取失败：${esc(e.message)}</div>`;document.querySelector('#systemUpdated').textContent='读取失败'}}
 function deviceActions(d){''',
     1,
@@ -1135,7 +1166,7 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     "ready=summary.ready&&summary.netwatch==='up';devices=data.devices;",
-    "ready=summary.ready&&summary.netwatch==='up',drift=summary.drift||[],warn=ready&&drift.length;devices=data.devices;",
+    "ready=summary.ready&&summary.netwatch==='up',drift=summary.drift||[],warn=ready&&drift.length;devices=data.devices;renderRouter(summary.router_resource);",
     1,
 )
 PAGE = PAGE.replace(
@@ -1151,6 +1182,11 @@ PAGE = PAGE.replace(
 PAGE = PAGE.replace(
     "healthItem('DNS',checks.dns,'国内解析')",
     "healthItem('DNS',checks.dns,summary.detail?.dns_samples?'P50 '+summary.detail.dns_p50_ms+' ms · P95 '+summary.detail.dns_p95_ms+' ms':'正在采样')",
+    1,
+)
+PAGE = PAGE.replace(
+    "healthItem('RB5009',summary.router==='connected','管理连接')",
+    "healthItem('RB5009',summary.router==='connected',summary.router_resource?.available?'管理连接 · 资源可读':'管理连接')",
     1,
 )
 PAGE = PAGE.replace(
@@ -1174,8 +1210,8 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     '</style></head>',
-    '''@media(max-width:820px){.system-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.system-item,.system-item:nth-child(3n),.system-item:nth-last-child(-n+3){border-right:1px solid #38383a;border-bottom:1px solid #38383a}.system-item:nth-child(2n){border-right:0}.system-item:nth-last-child(-n+2){border-bottom:0}}
-@media(max-width:420px){.system-grid{grid-template-columns:1fr}.system-item,.system-item:nth-child(2n),.system-item:nth-child(3n),.system-item:nth-last-child(-n+3),.system-item:nth-last-child(-n+2){border-right:0;border-bottom:1px solid #38383a}.system-item:last-child{border-bottom:0}}</style></head>''',
+    '''@media(max-width:820px){.system-grid,.router-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.system-item,.system-item:nth-child(3n),.system-item:nth-last-child(-n+3),.router-grid .system-item,.router-grid .system-item:nth-child(3n),.router-grid .system-item:nth-last-child(-n+3){border-right:1px solid #38383a;border-bottom:1px solid #38383a}.system-item:nth-child(2n),.router-grid .system-item:nth-child(2n){border-right:0}.system-item:nth-last-child(-n+2),.router-grid .system-item:nth-last-child(-n+2){border-bottom:0}}
+@media(max-width:420px){.system-grid,.router-grid{grid-template-columns:1fr}.system-item,.system-item:nth-child(2n),.system-item:nth-child(3n),.system-item:nth-last-child(-n+3),.system-item:nth-last-child(-n+2),.router-grid .system-item,.router-grid .system-item:nth-child(2n),.router-grid .system-item:nth-child(3n),.router-grid .system-item:nth-last-child(-n+3),.router-grid .system-item:nth-last-child(-n+2){border-right:0;border-bottom:1px solid #38383a}.system-item:last-child,.router-grid .system-item:last-child{border-bottom:0}}</style></head>''',
     1,
 )
 PAGE = PAGE.replace('@media(max-width:760px)', '@media(max-width:820px)')
