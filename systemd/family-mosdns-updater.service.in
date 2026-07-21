@@ -1,0 +1,23 @@
+[Unit]
+Description=Family MosDNS restricted maintenance service
+After=network-online.target docker.service family-proxy-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Environment="FAMILY_MOSDNS_COMPOSE_DIR=__COMPOSE_DIR__"
+Environment="FAMILY_MOSDNS_CORE_API=__CORE_API__"
+Environment="FAMILY_MOSDNS_DNS_SERVER=__DNS_SERVER__"
+Environment="FAMILY_MOSDNS_SOCKS5=__SOCKS5__"
+ExecStart=/usr/bin/python3 /opt/family-mosdns-updater/app.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/etc/family-proxy-ui __COMPOSE_DIR__
+
+[Install]
+WantedBy=multi-user.target

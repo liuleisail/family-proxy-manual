@@ -1,0 +1,602 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>家庭 DNS</title>
+  <style>
+    :root{color-scheme:dark;--bg:#000;--surface:#1c1c1e;--surface-2:#2c2c2e;--line:#38383a;--text:#f5f5f7;--muted:#98989d;--blue:#0a84ff;--blue-soft:rgba(10,132,255,.14);--green:#30d158;--green-soft:rgba(48,209,88,.12);--orange:#ffd60a;--orange-soft:rgba(255,214,10,.12);--red:#ff453a;--red-soft:rgba(255,69,58,.12)}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC","Segoe UI",sans-serif;font-size:14px;letter-spacing:0}
+    button,input,select,textarea{font:inherit;letter-spacing:0}button{cursor:pointer}.shell{min-height:100vh}
+    header{position:sticky;top:0;z-index:10;border-bottom:1px solid rgba(255,255,255,.1);background:rgba(18,18,20,.88);backdrop-filter:saturate(180%) blur(22px);-webkit-backdrop-filter:saturate(180%) blur(22px)}
+    .header-inner,main{width:min(1040px,calc(100% - 44px));margin:0 auto}.header-inner{min-height:58px;display:flex;align-items:center;justify-content:space-between;gap:18px}
+    .brand{font-size:17px;font-weight:650;color:#fff;white-space:nowrap}.global-nav,.view-tabs,.segments{display:flex;align-items:center;gap:4px;padding:3px;background:var(--surface-2);border-radius:8px}
+    .global-nav a{padding:7px 11px;border-radius:6px;color:#aeaeb2;text-decoration:none;font-size:13px;white-space:nowrap}.global-nav a.active{background:#636366;color:#fff}
+    main{padding:38px 0 64px}.intro{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:24px}.intro h1{margin:0;font-size:30px;line-height:1.15;font-weight:700}.intro p{margin:9px 0 0;color:var(--muted);line-height:1.55}
+    .status{display:inline-flex;align-items:center;gap:7px;padding:8px 11px;border:1px solid #2c2c2e;border-radius:8px;background:var(--surface);color:var(--green);font-size:13px;white-space:nowrap}.status.bad{color:#ff6961}.dot{width:8px;height:8px;border-radius:50%;background:#636366}.dot.ok{background:var(--green);box-shadow:0 0 0 3px rgba(48,209,88,.1)}.dot.bad{background:var(--red)}
+    .view-tabs{width:min(520px,100%);margin-bottom:24px}.tab{flex:1;height:34px;padding:0 14px;border:0;border-radius:6px;color:#aeaeb2;background:transparent;font-weight:550}.tab.active{color:#fff;background:#636366}
+    .toast{min-height:20px;margin:-13px 0 12px;color:transparent;font-size:13px;transition:color .15s ease}.toast.show{color:var(--green)}.toast.error.show{color:#ff6961}
+    .page{display:none}.page.active{display:block}.page-head,.section-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:10px}.page-title,h2{margin:0;font-size:16px;line-height:1.4;font-weight:650}.page-subtitle{margin:6px 0 18px;color:var(--muted);line-height:1.6}.section{margin-top:26px}.hint{color:var(--muted);font-size:12px}
+    .metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px}.metric{min-height:102px;padding:15px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}.metric-label{color:var(--muted);font-size:12px}.metric-value{margin-top:10px;font-size:25px;line-height:1.1;font-variant-numeric:tabular-nums;font-weight:700}.metric-foot{margin-top:9px;color:var(--muted);font-size:12px}
+    .route-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.route{padding:16px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}.route-top{display:flex;align-items:center;justify-content:space-between;gap:12px}.route-name{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:650}.route-icon{width:30px;height:30px;border-radius:7px;display:grid;place-items:center;background:var(--surface-2)}.route-icon svg{width:17px;height:17px}
+    .pill{display:inline-flex;align-items:center;min-height:23px;padding:3px 8px;border-radius:6px;font-size:12px;font-weight:600;white-space:nowrap}.pill.direct{color:var(--green);background:var(--green-soft)}.pill.proxy{color:var(--blue);background:var(--blue-soft)}.pill.slow{color:var(--orange);background:var(--orange-soft)}.pill.error{color:var(--red);background:var(--red-soft)}
+    .route-list{margin:13px 0 0;padding:0;list-style:none}.route-list li{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-top:1px solid var(--line)}.route-list span:first-child{color:var(--muted)}.route-list span:last-child{text-align:right;overflow-wrap:anywhere}
+    .split{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.list-panel,.data-table,.table-scroll{border:1px solid var(--line);border-radius:8px;background:var(--surface);overflow:hidden}.list-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;min-height:44px;padding:9px 12px;border-top:1px solid var(--line)}.list-row:first-child{border-top:0}.list-key{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.list-count{color:var(--muted);font-variant-numeric:tabular-nums}
+    .toolbar{display:flex;flex-wrap:wrap;gap:9px;align-items:center;margin-bottom:9px}.search{position:relative;flex:1 1 260px}.search svg{position:absolute;left:11px;top:10px;width:16px;height:16px;color:var(--muted);pointer-events:none}.search input{width:100%;height:36px;padding:0 12px 0 34px;border:1px solid #48484a;border-radius:7px;outline:none;background:var(--surface-2);color:var(--text)}.search input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(10,132,255,.18)}
+    .segments{margin-left:auto}.segment{height:30px;padding:0 10px;border:0;border-radius:5px;color:#aeaeb2;background:transparent;white-space:nowrap}.segment.active{color:#fff;background:#636366}.btn{height:36px;display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:0 13px;border:0;border-radius:7px;background:var(--surface-2);color:var(--text);font-weight:600}.btn:hover{background:#3a3a3c}.btn:disabled{opacity:.5;cursor:default}.btn svg{width:15px;height:15px}.btn.primary{color:#fff;background:var(--blue)}.btn.primary:hover{background:#0077ed}.btn.danger{color:var(--red);background:var(--surface-2)}
+    .table-scroll{overflow-x:auto}table{width:100%;min-width:940px;border-collapse:collapse}th,td{padding:11px 12px;border-top:1px solid var(--line);text-align:left;vertical-align:middle}thead th{border-top:0}th{color:var(--muted);background:#242426;font-size:12px;font-weight:600}td{font-size:13px}.mono{font-variant-numeric:tabular-nums;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}.domain{max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.empty{padding:36px 16px;color:var(--muted);text-align:center}.table-foot{display:flex;justify-content:space-between;gap:16px;padding:10px 2px;color:var(--muted);font-size:12px}
+    .data-layout{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(280px,.7fr);gap:18px;align-items:start}.data-block{margin-bottom:24px}.data-row{display:grid;grid-template-columns:minmax(140px,1.1fr) minmax(120px,1fr) auto;gap:14px;align-items:center;min-height:50px;padding:9px 12px;border-top:1px solid var(--line)}.data-row:first-child{border-top:0}.data-row strong{font-size:13px}.data-row .muted{color:var(--muted);overflow-wrap:anywhere}.maintenance{padding:16px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}.action{padding:15px 0;border-top:1px solid var(--line)}.action:first-of-type{border-top:0;padding-top:4px}.action-title{font-weight:650}.action p{margin:6px 0 11px;color:var(--muted);line-height:1.55}
+    .update-card{border:1px solid var(--line);border-radius:8px;background:var(--surface);overflow:hidden}.update-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0}.update-item{min-height:76px;padding:14px;border-left:1px solid var(--line)}.update-item:first-child{border-left:0}.update-label{display:block;color:var(--muted);font-size:12px;margin-bottom:8px}.update-value{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:650}.update-detail{padding:13px 14px;border-top:1px solid var(--line);color:var(--muted);line-height:1.55}.update-actions{display:flex;flex-wrap:wrap;gap:8px;padding:0 14px 14px}.update-actions .btn{min-width:112px}
+    .upstream-scope{display:flex;align-items:flex-start;gap:9px;margin-bottom:10px;padding:11px 12px;border:1px solid rgba(10,132,255,.3);border-radius:8px;background:var(--blue-soft);color:#c7e2ff;line-height:1.55}.upstream-scope svg{width:17px;height:17px;flex:0 0 auto;margin-top:2px}.upstream-editor{margin-top:10px;padding:16px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}.upstream-editor[hidden]{display:none}.upstream-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.field-label{display:block;margin-bottom:7px;font-weight:650}.field-hint{display:block;margin-top:7px;color:var(--muted);font-size:12px;line-height:1.5}.upstream-editor textarea{width:100%;min-height:142px;resize:vertical;padding:11px 12px;border:1px solid #48484a;border-radius:7px;outline:none;background:var(--surface-2);color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.65}.upstream-editor textarea:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(10,132,255,.18)}.upstream-editor textarea:disabled{opacity:.55}.editor-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}.upstream-list{display:flex;flex-wrap:wrap;gap:6px}.upstream-chip{display:inline-flex;align-items:center;max-width:100%;min-height:27px;padding:4px 8px;border-radius:6px;background:var(--surface-2);color:#d1d1d6;font-size:12px;overflow-wrap:anywhere}
+    @media(max-width:800px){.header-inner{min-height:auto;padding:10px 0;align-items:flex-start;flex-direction:column;gap:8px}.global-nav{width:100%;display:grid;grid-template-columns:repeat(4,1fr)}.global-nav a{text-align:center;padding:7px 5px;white-space:normal}.intro{align-items:flex-start;flex-direction:column}.status{max-width:100%;white-space:normal}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.route-grid,.split,.data-layout,.upstream-fields{grid-template-columns:1fr}.segments{order:3;width:100%;margin-left:0}.segment{flex:1}.maintenance{margin-top:0}}
+    @media(max-width:520px){.header-inner,main{width:min(100% - 28px,1040px)}main{padding:28px 0 50px}.intro h1{font-size:28px}.view-tabs{width:100%}.tab{padding:0 7px}.metrics{gap:7px}.metric{min-height:92px;padding:13px}.metric-value{font-size:22px}.toolbar{align-items:stretch}.search{flex-basis:100%}.toolbar>.btn{width:100%}.data-row{grid-template-columns:1fr auto}.data-row .muted{grid-column:1/-1;grid-row:2}.update-summary{grid-template-columns:1fr}.update-item{min-height:62px;border-left:0;border-top:1px solid var(--line)}.update-item:first-child{border-top:0}.update-actions .btn{flex:1 1 100%}}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div class="header-inner">
+        <div class="brand">家庭旁路</div>
+        <nav class="global-nav" aria-label="家庭旁路主功能"><a href="/">设备</a><a href="/rules">规则</a><a href="/airport/">机场与候选池</a><a class="active" href="/dns/">DNS</a></nav>
+      </div>
+    </header>
+
+    <main>
+      <div class="intro"><div><h1>DNS 管理</h1><p>查看解析状态与查询记录，日常维护不会改变现有分流规则。</p></div><div class="status"><span id="health-dot" class="dot"></span><span id="health-text">正在连接</span></div></div>
+      <nav class="view-tabs" aria-label="DNS 功能">
+        <button class="tab active" data-page="overview">概览</button>
+        <button class="tab" data-page="logs">查询日志</button>
+        <button class="tab" data-page="data">数据管理</button>
+      </nav>
+      <div id="toast" class="toast" role="status" aria-live="polite"></div>
+      <section id="page-overview" class="page active">
+        <div class="page-head"><h2 class="page-title">运行概览</h2><button id="global-refresh" class="btn">重新载入</button></div>
+        <p class="page-subtitle">国内域名直接解析，国外域名经 Mihomo 解析。这里展示真实查询结果，不修改现有分流。</p>
+        <div class="metrics">
+          <div class="metric"><div class="metric-label">累计查询</div><div id="metric-total" class="metric-value">--</div><div class="metric-foot">审计记录总量</div></div>
+          <div class="metric"><div class="metric-label">平均处理时间</div><div id="metric-avg" class="metric-value">--</div><div class="metric-foot">越低越好</div></div>
+          <div class="metric"><div class="metric-label">P95 处理时间</div><div id="metric-p95" class="metric-value">--</div><div class="metric-foot">最近 2000 条</div></div>
+          <div class="metric"><div class="metric-label">P99 处理时间</div><div id="metric-p99" class="metric-value">--</div><div class="metric-foot">识别尾部延迟</div></div>
+          <div class="metric"><div class="metric-label">最近 1 小时</div><div id="metric-1h" class="metric-value">--</div><div id="metric-1h-foot" class="metric-foot">--</div></div>
+          <div class="metric"><div class="metric-label">最近 24 小时</div><div id="metric-24h" class="metric-value">--</div><div id="metric-24h-foot" class="metric-foot">--</div></div>
+        </div>
+
+        <div class="section">
+          <div class="section-head"><h2>解析路径</h2><span class="hint">依据当前运行配置</span></div>
+          <div class="route-grid">
+            <article class="route">
+              <div class="route-top"><div class="route-name"><span class="route-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M12 3v18"/><path d="m8 7 4-4 4 4M8 17l4 4 4-4"/></svg></span>国内解析</div><span class="pill direct">直接连接</span></div>
+              <ul id="route-domestic" class="route-list"><li><span>状态</span><span>载入中</span></li></ul>
+            </article>
+            <article class="route">
+              <div class="route-top"><div class="route-name"><span class="route-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3Z"/></svg></span>国外解析</div><span class="pill proxy">经 Mihomo</span></div>
+              <ul id="route-foreign" class="route-list"><li><span>状态</span><span>载入中</span></li></ul>
+            </article>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-head"><h2>解析上游</h2><button id="upstream-edit" class="btn">编辑服务器</button></div>
+          <div class="upstream-scope"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg><span id="upstream-notice">只影响主动使用 Z4Pro MosDNS 的查询，不修改 RouterOS、DHCP DNS 或设备接管状态。</span></div>
+          <div id="upstream-summary" class="data-table"><div class="empty">正在读取上游配置</div></div>
+          <div id="upstream-editor" class="upstream-editor" hidden>
+            <div class="upstream-fields">
+              <label><span class="field-label">国内解析服务器</span><textarea id="upstream-domestic" spellcheck="false" placeholder="udp://223.5.5.5&#10;https://dns.alidns.com/dns-query | 223.5.5.5"></textarea><span class="field-hint">直连。每行一个地址，可在竖线后填写指定连接 IP。</span></label>
+              <label><span class="field-label">国外解析服务器</span><textarea id="upstream-foreign" spellcheck="false" placeholder="https://dns.google/dns-query | 8.8.8.8&#10;h3://cloudflare-dns.com/dns-query | 1.1.1.1"></textarea><span class="field-hint">强制经 Mihomo。仅接受 DoT、DoH、DoH3 或 DoQ。</span></label>
+            </div>
+            <div class="editor-actions"><button id="upstream-cancel" class="btn">取消</button><button id="upstream-save" class="btn primary">校验并应用</button></div>
+          </div>
+        </div>
+
+        <div class="section split">
+          <div><div class="section-head"><h2>常用域名</h2><span class="hint">查询次数</span></div><div id="rank-domains" class="list-panel"><div class="empty">载入中</div></div></div>
+          <div><div class="section-head"><h2>活跃设备</h2><span class="hint">查询次数</span></div><div id="rank-clients" class="list-panel"><div class="empty">载入中</div></div></div>
+        </div>
+        <div class="section split">
+          <div><div class="section-head"><h2>分流结果</h2><span class="hint">实际命中标签</span></div><div id="rank-effective" class="list-panel"><div class="empty">载入中</div></div></div>
+          <div><div class="section-head"><h2>较慢查询</h2><span class="hint">最近记录</span></div><div id="rank-slowest" class="list-panel"><div class="empty">载入中</div></div></div>
+        </div>
+      </section>
+
+      <section id="page-logs" class="page">
+        <h2 class="page-title">查询日志</h2>
+        <p class="page-subtitle">按域名、设备或流量方向查找近期 DNS 请求。默认只读取最近 500 条，不会读取全部历史。</p>
+        <div class="toolbar">
+          <label class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="log-search" type="search" placeholder="搜索域名或设备 IP" autocomplete="off"></label>
+          <div class="segments" aria-label="日志筛选">
+            <button class="segment active" data-filter="all">全部</button>
+            <button class="segment" data-filter="direct">直连</button>
+            <button class="segment" data-filter="proxy">代理</button>
+            <button class="segment" data-filter="slow">慢查询</button>
+            <button class="segment" data-filter="error">错误</button>
+          </div>
+          <button id="logs-refresh" class="btn">重新载入</button>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>时间</th><th>域名</th><th>设备</th><th>类型</th><th>分流</th><th>上游</th><th>耗时</th><th>结果</th></tr></thead>
+            <tbody id="logs-body"><tr><td colspan="8" class="empty">载入中</td></tr></tbody>
+          </table>
+        </div>
+        <div class="table-foot"><span id="logs-count">--</span><span>慢查询：≥ 100 ms</span></div>
+      </section>
+
+      <section id="page-data" class="page">
+        <h2 class="page-title">数据管理</h2>
+        <p class="page-subtitle">查看分流数据、上游状态与软件版本。规则数据和 MosDNS 软件分别维护，软件更新具备备份、验证与自动回滚。</p>
+        <div class="data-layout">
+          <div>
+            <div class="data-block"><div class="section-head"><h2>规则数据</h2><span id="capture-state" class="hint">--</span></div><div id="rule-data" class="data-table"><div class="empty">载入中</div></div></div>
+            <div class="data-block"><div class="section-head"><h2>上游服务器</h2><span class="hint">当前生效配置</span></div><div id="upstream-data" class="data-table"><div class="empty">载入中</div></div></div>
+            <div class="data-block">
+              <div class="section-head"><h2>规则自动更新</h2><span id="rule-update-state" class="pill direct">读取中</span></div>
+              <div class="update-card">
+                <div class="update-summary">
+                  <div class="update-item"><span class="update-label">更新范围</span><span class="update-value">官方国内/国外/国内 IP</span></div>
+                  <div class="update-item"><span class="update-label">更新周期</span><span id="rule-auto" class="update-value">--</span></div>
+                  <div class="update-item"><span class="update-label">最近结果</span><span id="rule-last" class="update-value">--</span></div>
+                </div>
+                <div id="rule-update-detail" class="update-detail">正在读取规则更新状态。</div>
+                <div class="update-actions">
+                  <button id="rule-update-now" class="btn primary">立即检查并更新</button>
+                  <button id="rule-auto-toggle" class="btn">--</button>
+                </div>
+              </div>
+            </div>
+            <div class="data-block">
+              <div class="section-head"><h2>软件更新</h2><span id="software-update-state" class="pill direct">读取中</span></div>
+              <div class="update-card">
+                <div class="update-summary">
+                  <div class="update-item"><span class="update-label">当前内核</span><span id="software-version" class="update-value mono">--</span></div>
+                  <div class="update-item"><span class="update-label">官方镜像</span><span id="software-image" class="update-value mono">--</span></div>
+                  <div class="update-item"><span class="update-label">自动更新</span><span id="software-auto" class="update-value">--</span></div>
+                </div>
+                <div id="software-update-detail" class="update-detail">正在读取更新状态。</div>
+                <div class="update-actions">
+                  <button id="software-check" class="btn">检查更新</button>
+                  <button id="software-apply" class="btn primary" disabled>立即更新</button>
+                  <button id="software-auto-toggle" class="btn">--</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <aside class="maintenance">
+            <div class="section-head"><h2>维护操作</h2></div>
+            <div class="action"><div class="action-title">刷新页面数据</div><p>重新读取状态、规则数量与上游配置，不改变 DNS 服务。</p><button id="data-refresh" class="btn">重新载入</button></div>
+            <div class="action"><div class="action-title">清空 DNS 缓存</div><p>用于排查旧解析结果。清空后首次打开网站可能稍慢，随后会恢复。</p><button id="flush-cache" class="btn">清空缓存</button></div>
+            <div class="action"><div class="action-title">查询记录采集</div><p id="capture-description">正在读取采集状态。</p><button id="toggle-capture" class="btn">--</button></div>
+            <div class="action"><div class="action-title">清空查询日志</div><p>删除当前审计记录，无法撤销，不影响 DNS 解析。</p><button id="clear-logs" class="btn danger">清空日志</button></div>
+          </aside>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script>
+    const state = { page: 'overview', logs: [], filter: 'all', capture: null, softwareUpdate: null, ruleUpdate: null, upstreams: null };
+    const $ = (s) => document.querySelector(s);
+    const $$ = (s) => [...document.querySelectorAll(s)];
+    const icons = { ok: 'ok', bad: 'bad' };
+
+    function apiUrl(path) { return new URL(path, window.location.origin).toString(); }
+    async function api(path, options = {}) {
+      const response = await fetch(apiUrl(path), { cache: 'no-store', ...options });
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      const type = response.headers.get('content-type') || '';
+      return type.includes('json') ? response.json() : response.text();
+    }
+    function esc(value) { return String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
+    function num(value) { return new Intl.NumberFormat('zh-CN').format(Number(value || 0)); }
+    function ms(value) { const n = Number(value || 0); return `${n < 10 ? n.toFixed(2) : n.toFixed(1)} ms`; }
+    function clientIp(value) { return String(value || '--').replace(/^::ffff:/i, ''); }
+    function toast(message, error = false) {
+      const el = $('#toast'); el.textContent = message; el.className = `toast show${error ? ' error' : ''}`;
+      clearTimeout(toast.timer); toast.timer = setTimeout(() => el.className = 'toast', 2800);
+    }
+    function setHealth(ok, text) { const dot = $('#health-dot'); dot.className = `dot ${ok ? icons.ok : icons.bad}`; dot.parentElement.className = `status${ok ? '' : ' bad'}`; $('#health-text').textContent = text; }
+    function rows(container, items, formatter) {
+      container.innerHTML = items?.length ? items.map(formatter).join('') : '<div class="empty">暂无数据</div>';
+    }
+    function routeName(log) {
+      const raw = `${log.effective_tag || ''} ${log.domain_set || ''} ${log.matched_rule_source || ''}`.toLowerCase();
+      if (raw.includes('foreign') || raw.includes('nocn') || raw.includes('代理')) return '代理';
+      if (raw.includes('domestic') || raw.includes('cn') || raw.includes('直连') || raw.includes('白名单')) return '直连';
+      return log.effective_tag || '默认';
+    }
+    function routeClass(log) { return routeName(log) === '代理' ? 'proxy' : 'direct'; }
+    function upstreamLabel(item) {
+      if (typeof item === 'string') return item;
+      return item.name || item.addr || item.address || item.url || item.tag || '已配置';
+    }
+
+    async function loadHealth() {
+      try {
+        const health = await api('/api/v1/system/health');
+        setHealth(Boolean(health.ready), health.ready ? `运行正常 · ${health.version || ''}` : '尚未就绪');
+        return health;
+      } catch (error) { setHealth(false, '连接失败'); throw error; }
+    }
+
+    async function loadOverview() {
+      try {
+        const [stats, windows, domains, clients, effective, slowest, domestic, foreign, performance] = await Promise.all([
+          api('/api/v2/audit/stats'), api('/api/v2/audit/stats/windows'),
+          api('/api/v2/audit/rank/domain?limit=6'), api('/api/v2/audit/rank/client?limit=6'),
+          api('/api/v2/audit/rank/effective?limit=6'), api('/api/v2/audit/rank/slowest?limit=6'),
+          api('/api/v1/upstream/runtime/domestic'), api('/api/v1/upstream/runtime/foreign'),
+          maintenanceApi('/metrics')
+        ]);
+        const total = stats.total ?? stats.total_queries ?? stats.request_count ?? 0;
+        const avg = stats.average_duration_ms ?? stats.average_ms ?? 0;
+        $('#metric-total').textContent = num(total);
+        $('#metric-avg').textContent = ms(avg);
+        $('#metric-p95').textContent = ms(performance.p95_ms);
+        $('#metric-p99').textContent = ms(performance.p99_ms);
+        const win = Object.fromEntries((windows.items || []).map(x => [x.key, x]));
+        for (const key of ['1h','24h']) {
+          const item = win[key] || {};
+          $(`#metric-${key}`).textContent = num(item.request_count || 0);
+          $(`#metric-${key}-foot`).textContent = `平均 ${ms(item.average_duration_ms || 0)}`;
+        }
+        renderRuntime($('#route-domestic'), domestic, false);
+        renderRuntime($('#route-foreign'), foreign, true);
+        rows($('#rank-domains'), domains, x => `<div class="list-row"><span class="list-key" title="${esc(x.key)}">${esc(x.key)}</span><span class="list-count">${num(x.count)}</span></div>`);
+        rows($('#rank-clients'), clients, x => `<div class="list-row"><span class="list-key mono">${esc(clientIp(x.key))}</span><span class="list-count">${num(x.count)}</span></div>`);
+        rows($('#rank-effective'), effective, x => `<div class="list-row"><span class="list-key">${esc(x.key || '默认')}</span><span class="list-count">${num(x.count)}</span></div>`);
+        rows($('#rank-slowest'), slowest, x => `<div class="list-row"><span class="list-key" title="${esc(x.query_name || x.key || '')}">${esc(x.query_name || x.key || '未知')}</span><span class="pill slow">${ms(x.duration_ms || x.value || 0)}</span></div>`);
+        await loadUpstreams(true);
+        return true;
+      } catch (error) { toast(`概览读取失败：${error.message}`, true); return false; }
+    }
+    function renderRuntime(container, data, proxy) {
+      const targets = data.runtime_targets || data.targets || data.upstreams || data.items || (Array.isArray(data) ? data : []);
+      const list = Array.isArray(targets) ? targets : Object.values(targets || {});
+      const names = list.map(upstreamLabel).filter(Boolean);
+      const configured = data.override_config || [];
+      const viaProxy = [...list, ...configured].some(x => x && typeof x === 'object' && (x.use_socks_proxy || x.socks5 || x.socks_proxy));
+      container.innerHTML = [
+        `<li><span>上游</span><span>${esc(names.join('、') || '已配置')}</span></li>`,
+        `<li><span>出口</span><span>${proxy || viaProxy ? 'Mihomo SOCKS' : '本地网络'}</span></li>`,
+        `<li><span>状态</span><span class="pill ${proxy ? 'proxy' : 'direct'}">配置已载入</span></li>`
+      ].join('');
+    }
+
+    function upstreamText(items) {
+      return (items || []).map(item => `${item.addr}${item.dial_addr ? ` | ${item.dial_addr}` : ''}`).join('\n');
+    }
+    function renderUpstreamConfig(data) {
+      state.upstreams = data;
+      $('#upstream-notice').textContent = data.notice || '只影响主动使用 Z4Pro MosDNS 的查询。';
+      const line = (label, items, mode) => {
+        const chips = (items || []).map(item => `<span class="upstream-chip" title="${esc(item.dial_addr ? `连接 IP ${item.dial_addr}` : '')}">${esc(item.addr)}${item.dial_addr ? ` · ${esc(item.dial_addr)}` : ''}</span>`).join('');
+        return `<div class="data-row"><strong>${label}</strong><span class="upstream-list">${chips || '<span class="muted">未配置</span>'}</span><span class="pill ${mode === '代理' ? 'proxy' : 'direct'}">${mode}</span></div>`;
+      };
+      $('#upstream-summary').innerHTML = line('国内上游', data.domestic, '直连') + line('国外上游', data.foreign, '代理');
+      if ($('#upstream-editor').hidden) {
+        $('#upstream-domestic').value = upstreamText(data.domestic);
+        $('#upstream-foreign').value = upstreamText(data.foreign);
+      }
+    }
+    async function loadUpstreams(silent = false) {
+      try {
+        const data = await maintenanceApi('/upstreams');
+        renderUpstreamConfig(data);
+        return data;
+      } catch (error) {
+        $('#upstream-summary').innerHTML = `<div class="empty">上游配置读取失败：${esc(error.message)}</div>`;
+        if (!silent) toast(`上游配置读取失败：${error.message}`, true);
+        return null;
+      }
+    }
+    function toggleUpstreamEditor(show) {
+      const editor = $('#upstream-editor');
+      editor.hidden = !show;
+      $('#upstream-edit').textContent = show ? '正在编辑' : '编辑服务器';
+      $('#upstream-edit').disabled = show;
+      if (show && state.upstreams) {
+        $('#upstream-domestic').value = upstreamText(state.upstreams.domestic);
+        $('#upstream-foreign').value = upstreamText(state.upstreams.foreign);
+        $('#upstream-domestic').focus();
+      }
+    }
+    async function saveUpstreams() {
+      const domestic = $('#upstream-domestic').value.trim();
+      const foreign = $('#upstream-foreign').value.trim();
+      if (!domestic || !foreign) { toast('国内和国外至少各保留一个上游服务器', true); return; }
+      const button = $('#upstream-save');
+      const cancel = $('#upstream-cancel');
+      button.disabled = true; cancel.disabled = true;
+      $('#upstream-domestic').disabled = true; $('#upstream-foreign').disabled = true;
+      button.textContent = '正在验证';
+      try {
+        const result = await maintenanceApi('/upstreams', {method:'POST', body:JSON.stringify({domestic, foreign})});
+        renderUpstreamConfig(result.config);
+        toggleUpstreamEditor(false);
+        toast(result.message || '上游已保存并通过验证');
+        await loadOverview();
+      } catch (error) {
+        toast(error.message, true);
+      } finally {
+        button.disabled = false; cancel.disabled = false;
+        $('#upstream-domestic').disabled = false; $('#upstream-foreign').disabled = false;
+        button.textContent = '校验并应用';
+      }
+    }
+
+    async function loadLogs() {
+      $('#logs-body').innerHTML = '<tr><td colspan="8" class="empty">正在读取最近记录</td></tr>';
+      try {
+        const result = await api('/api/v2/audit/logs?limit=500');
+        state.logs = result.logs || (Array.isArray(result) ? result : []);
+        renderLogs();
+        return true;
+      } catch (error) { $('#logs-body').innerHTML = `<tr><td colspan="8" class="empty">读取失败：${esc(error.message)}</td></tr>`; toast(`日志读取失败：${error.message}`, true); return false; }
+    }
+    function renderLogs() {
+      const query = $('#log-search').value.trim().toLowerCase();
+      const filtered = state.logs.filter(log => {
+        const matchText = !query || `${log.query_name || ''} ${log.client_ip || ''}`.toLowerCase().includes(query);
+        if (!matchText) return false;
+        if (state.filter === 'direct') return routeName(log) === '直连';
+        if (state.filter === 'proxy') return routeName(log) === '代理';
+        if (state.filter === 'slow') return Number(log.duration_ms || 0) >= 100;
+        if (state.filter === 'error') return String(log.response_code || '').toUpperCase() !== 'NOERROR';
+        return true;
+      });
+      const html = filtered.map(log => {
+        const time = log.query_time ? new Date(log.query_time).toLocaleTimeString('zh-CN', {hour12:false}) : '--';
+        const result = log.response_code || (log.answers?.length ? 'NOERROR' : '--');
+        return `<tr><td class="mono">${esc(time)}</td><td class="domain" title="${esc(log.query_name)}">${esc(log.query_name)}</td><td class="mono">${esc(clientIp(log.client_ip))}</td><td>${esc(log.query_type || '--')}</td><td><span class="pill ${routeClass(log)}">${esc(routeName(log))}</span></td><td title="${esc(log.final_upstream || log.selected_upstream || '')}">${esc(log.final_upstream || log.selected_upstream || '--')}</td><td class="mono">${ms(log.duration_ms)}</td><td>${esc(result)}</td></tr>`;
+      }).join('');
+      $('#logs-body').innerHTML = html || '<tr><td colspan="8" class="empty">没有符合条件的记录</td></tr>';
+      $('#logs-count').textContent = `显示 ${num(filtered.length)} 条，共读取 ${num(state.logs.length)} 条`;
+    }
+
+    async function loadData() {
+      try {
+        const [capture, capacity, geoCn, geoNoCn, geoIp, adguard, domestic, foreign, rules, performance] = await Promise.all([
+          api('/api/v1/audit/status'), api('/api/v1/audit/capacity'),
+          api('/plugins/geosite_cn/config'), api('/plugins/geosite_no_cn/config'), api('/plugins/geoip_cn/config'),
+          api('/plugins/adguard/rules'), api('/api/v1/upstream/runtime/domestic'), api('/api/v1/upstream/runtime/foreign'),
+          maintenanceApi('/rules/status'), maintenanceApi('/metrics')
+        ]);
+        state.capture = Boolean(capture.capturing);
+        $('#capture-state').textContent = `日志容量 ${num(capacity.capacity)} 条`;
+        $('#capture-description').textContent = state.capture ? '当前正在采集查询记录，可随时暂停。' : '当前已暂停采集，解析服务仍然正常。';
+        $('#toggle-capture').textContent = state.capture ? '暂停采集' : '开始采集';
+        const first = value => Array.isArray(value) ? (value[0] || {}) : value;
+        const cnRule = first(geoCn), noCnRule = first(geoNoCn), cnIpRule = first(geoIp);
+        const ruleMeta = Object.fromEntries((rules.sources || []).map(x => [x.tag, x]));
+        const ageText = value => {
+          if (!value) return '更新时间未知';
+          const days = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 86400000));
+          return days === 0 ? '今天更新' : `${days} 天前更新`;
+        };
+        const baseRules = [
+          ['国内域名', cnRule.rule_count, ageText(ruleMeta.geosite_cn?.last_updated)],
+          ['国外域名', noCnRule.rule_count, ageText(ruleMeta.geosite_no_cn?.last_updated)],
+          ['国内 IP', cnIpRule.rule_count, ageText(ruleMeta.geoip_cn?.last_updated)]
+        ];
+        const extra = (adguard || []).map(x => [x.name || x.tag || '附加规则', x.rule_count, x.auto_update]);
+        $('#rule-data').innerHTML = baseRules.map(x => `<div class="data-row"><strong>${esc(x[0])}</strong><span class="muted">${num(x[1])} 条规则</span><span class="pill direct">${esc(x[2])}</span></div>`).join('') + extra.map(x => `<div class="data-row"><strong>${esc(x[0])}</strong><span class="muted">${num(x[1])} 条规则</span><span class="pill ${x[2] ? 'proxy' : 'direct'}">${x[2] ? '独立更新' : '手动维护'}</span></div>`).join('');
+        renderRuleUpdate(rules);
+        renderUpstreamData(domestic, foreign, performance);
+        return true;
+      } catch (error) { toast(`数据读取失败：${error.message}`, true); return false; }
+    }
+    function renderUpstreamData(domestic, foreign, performance) {
+      const getItems = x => x.runtime_targets || x.targets || x.upstreams || x.items || (Array.isArray(x) ? x : []);
+      const make = (label, data, mode) => {
+        const items = getItems(data); const values = Array.isArray(items) ? items : Object.values(items || {});
+        return `<div class="data-row"><strong>${label}</strong><span class="muted">${esc(values.map(upstreamLabel).join('、') || '已配置')}</span><span class="pill ${mode === '代理' ? 'proxy' : 'direct'}">${mode}</span></div>`;
+      };
+      const metrics = (performance?.upstreams || []).map(item => {
+        const tone = item.error_rate >= 1 ? 'error' : item.error_rate > 0 ? 'slow' : 'direct';
+        return `<div class="data-row"><strong>${esc(item.name)}</strong><span class="muted">平均 ${ms(item.average_ms)} · P95 ${ms(item.p95_ms)} · P99 ${ms(item.p99_ms)}</span><span class="pill ${tone}">错误 ${item.error_rate.toFixed(2)}%</span></div>`;
+      }).join('');
+      $('#upstream-data').innerHTML = make('国内上游', domestic, '直连') + make('国外上游', foreign, '代理') + metrics;
+    }
+
+    async function maintenanceApi(path, options = {}) {
+      const response = await fetch(apiUrl(`/maintenance-api${path}`), {
+        cache: 'no-store', ...options,
+        headers: {'Content-Type': 'application/json', 'X-Requested-With': 'family-dns', ...(options.headers || {})}
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || data.message || `${response.status} ${response.statusText}`);
+      return data;
+    }
+    function shortDigest(value) {
+      const text = String(value || '');
+      return text.startsWith('sha256:') ? text.slice(7, 19) : (text || '--');
+    }
+    function updateTime(value) {
+      if (!value) return '尚无记录';
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', {hour12:false});
+    }
+    function renderRuleUpdate(data) {
+      state.ruleUpdate = data;
+      const busy = Boolean(data.busy) || ['updating','rolling_back'].includes(data.phase);
+      const phase = data.phase || 'idle';
+      const labels = {idle:'尚未执行',updating:'更新中',updated:'更新完成',rolling_back:'正在回滚',rolled_back:'已自动回滚',error:'需要检查'};
+      const badge = $('#rule-update-state');
+      badge.textContent = labels[phase] || phase;
+      badge.className = `pill ${['error','rolled_back'].includes(phase) ? 'error' : busy ? 'proxy' : 'direct'}`;
+      const auto = Boolean(data.config?.rule_auto_enabled);
+      const hours = Number(data.config?.rule_interval_hours || 24);
+      $('#rule-auto').textContent = auto ? `已开启 · 每 ${hours} 小时` : '已关闭';
+      $('#rule-last').textContent = updateTime(data.completed_at || data.updated_at);
+      $('#rule-update-detail').textContent = `${data.message || '尚未执行规则更新'}。更新前备份，数量或探针异常时自动回滚。`;
+      $('#rule-update-now').disabled = busy;
+      $('#rule-auto-toggle').disabled = busy;
+      $('#rule-auto-toggle').textContent = auto ? '关闭自动更新' : '开启自动更新';
+    }
+    async function loadRuleUpdate(silent = false) {
+      try { const data = await maintenanceApi('/rules/status'); renderRuleUpdate(data); return data; }
+      catch (error) { if (!silent) toast(`规则状态读取失败：${error.message}`, true); return null; }
+    }
+    async function pollRuleUpdate() {
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        const data = await loadRuleUpdate(true);
+        if (!data || (!data.busy && !['updating','rolling_back'].includes(data.phase))) return data;
+      }
+      toast('规则任务仍在后台运行，可稍后查看结果', true);
+      return null;
+    }
+    async function updateRulesNow() {
+      try { await maintenanceApi('/rules/update', {method:'POST', body:'{}'}); toast('已开始下载并校验官方规则'); await pollRuleUpdate(); await loadData(); }
+      catch (error) { toast(`规则更新启动失败：${error.message}`, true); await loadRuleUpdate(true); }
+    }
+    async function toggleRuleAutoUpdate() {
+      const enabled = !Boolean(state.ruleUpdate?.config?.rule_auto_enabled);
+      try {
+        const result = await maintenanceApi('/rules/auto', {method:'POST', body:JSON.stringify({enabled})});
+        toast(result.message || (enabled ? '规则自动更新已开启' : '规则自动更新已关闭'));
+        await loadRuleUpdate(true);
+      } catch (error) { toast(`设置失败：${error.message}`, true); }
+    }
+    function renderSoftwareUpdate(data) {
+      state.softwareUpdate = data;
+      const busy = Boolean(data.busy) || ['checking','updating','rolling_back'].includes(data.phase);
+      const available = Boolean(data.update_available);
+      const phase = data.phase || 'idle';
+      const labels = {idle:'尚未检查',checking:'检查中',available:'有可用更新',up_to_date:'已是最新',updating:'更新中',updated:'更新完成',rolling_back:'正在回滚',rolled_back:'已自动回滚',error:'需要检查',busy:'任务运行中'};
+      const tone = ['error','rolled_back'].includes(phase) ? 'error' : available ? 'slow' : busy ? 'proxy' : 'direct';
+      const badge = $('#software-update-state');
+      badge.textContent = labels[phase] || phase;
+      badge.className = `pill ${tone}`;
+      $('#software-version').textContent = data.current_version || '--';
+      $('#software-version').title = data.current_version || '';
+      $('#software-image').textContent = data.latest_image ? shortDigest(data.latest_image) : '等待检查';
+      $('#software-image').title = data.latest_image || '';
+      const auto = Boolean(data.config?.auto_enabled);
+      const hours = Number(data.config?.interval_hours || 168);
+      $('#software-auto').textContent = auto ? `已开启 · 每 ${Math.round(hours / 24)} 天` : '已关闭';
+      $('#software-update-detail').textContent = `${data.message || '尚未检查软件更新'} · ${updateTime(data.completed_at || data.checked_at || data.updated_at)}`;
+      $('#software-check').disabled = busy;
+      $('#software-apply').disabled = busy || !available;
+      $('#software-auto-toggle').disabled = busy;
+      $('#software-auto-toggle').textContent = auto ? '关闭自动更新' : '开启自动更新';
+      if (phase === 'updated' && data.completed_at) {
+        const notice = `updated:${data.completed_at}`;
+        if (localStorage.getItem('familyMosdnsUpdateNotice') !== notice) {
+          localStorage.setItem('familyMosdnsUpdateNotice', notice);
+          toast('MosDNS 已自动更新并通过健康检查');
+        }
+      }
+      if (phase === 'rolled_back' && data.completed_at) {
+        const notice = `rolled_back:${data.completed_at}`;
+        if (localStorage.getItem('familyMosdnsUpdateNotice') !== notice) {
+          localStorage.setItem('familyMosdnsUpdateNotice', notice);
+          toast('MosDNS 新版本验证失败，已自动恢复旧版本', true);
+        }
+      }
+    }
+    async function loadSoftwareUpdate(silent = false) {
+      try { const data = await maintenanceApi('/status'); renderSoftwareUpdate(data); return data; }
+      catch (error) {
+        $('#software-update-state').textContent = '入口不可用';
+        $('#software-update-state').className = 'pill error';
+        $('#software-update-detail').textContent = '请从家庭旁路统一管理入口打开 DNS 页面。';
+        if (!silent) toast(`更新状态读取失败：${error.message}`, true);
+        return null;
+      }
+    }
+    async function pollSoftwareUpdate() {
+      for (let attempt = 0; attempt < 180; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        const data = await loadSoftwareUpdate(true);
+        if (!data || (!data.busy && !['checking','updating','rolling_back'].includes(data.phase))) return data;
+      }
+      toast('更新任务仍在后台运行，可稍后重新打开页面查看', true);
+      return null;
+    }
+    async function checkSoftwareUpdate() {
+      try { await maintenanceApi('/check', {method:'POST', body:'{}'}); toast('已开始检查官方镜像'); await pollSoftwareUpdate(); }
+      catch (error) { toast(`检查失败：${error.message}`, true); await loadSoftwareUpdate(true); }
+    }
+    async function applySoftwareUpdate() {
+      if (!confirm('更新会短暂重启 MosDNS 容器。配置将先备份，验证失败会自动回滚，是否继续？')) return;
+      try { await maintenanceApi('/update', {method:'POST', body:'{}'}); toast('更新已开始，页面会持续显示进度'); await pollSoftwareUpdate(); }
+      catch (error) { toast(`更新启动失败：${error.message}`, true); await loadSoftwareUpdate(true); }
+    }
+    async function toggleSoftwareAutoUpdate() {
+      const enabled = !Boolean(state.softwareUpdate?.config?.auto_enabled);
+      try {
+        const result = await maintenanceApi('/auto', {method:'POST', body:JSON.stringify({enabled})});
+        toast(result.message || (enabled ? '自动更新已开启' : '自动更新已关闭'));
+        await loadSoftwareUpdate(true);
+      } catch (error) { toast(`设置失败：${error.message}`, true); }
+    }
+
+    async function postAction(path, message) {
+      const result = await api(path, { method: 'POST' }); toast(message); return result;
+    }
+    async function flushCaches() {
+      if (!confirm('确定清空 DNS 缓存吗？首次重新访问网站时会重新解析。')) return;
+      const btn = $('#flush-cache'); btn.disabled = true;
+      const tags = ['cache_all','cache_cn','cache_all_noleak','cache_cnmihomo','cache_google','cache_google_node','cache_node'];
+      const results = await Promise.allSettled(tags.map(tag => api(`/plugins/${tag}/flush`)));
+      btn.disabled = false;
+      const ok = results.filter(x => x.status === 'fulfilled').length;
+      ok ? toast(`已清理 ${ok} 组 DNS 缓存`) : toast('缓存清理失败', true);
+    }
+    async function toggleCapture() {
+      const next = state.capture ? 'stop' : 'start';
+      try { await postAction(`/api/v1/audit/${next}`, state.capture ? '已暂停查询记录采集' : '已开始查询记录采集'); await loadData(); }
+      catch (error) { toast(`操作失败：${error.message}`, true); }
+    }
+    async function clearLogs() {
+      if (!confirm('确定清空全部查询日志吗？此操作无法撤销。')) return;
+      if (!confirm('请再次确认：只删除查询记录，不影响 DNS 解析。')) return;
+      try { await postAction('/api/v1/audit/clear', '查询日志已清空'); state.logs = []; renderLogs(); await loadOverview(); }
+      catch (error) { toast(`清空失败：${error.message}`, true); }
+    }
+    async function refreshCurrent() {
+      const button = $('#global-refresh'); button.disabled = true;
+      try { await loadHealth(); const ok = state.page === 'overview' ? await loadOverview() : state.page === 'logs' ? await loadLogs() : await loadData(); if (ok) toast('页面数据已重新载入'); }
+      catch (error) { toast(`重新载入失败：${error.message}`, true); }
+      finally { button.disabled = false; }
+    }
+    async function reloadFrom(button, loader, message) {
+      button.disabled = true;
+      try { if (await loader()) toast(message); }
+      finally { button.disabled = false; }
+    }
+    function showPage(page) {
+      state.page = page;
+      $$('.tab').forEach(x => x.classList.toggle('active', x.dataset.page === page));
+      $$('.page').forEach(x => x.classList.toggle('active', x.id === `page-${page}`));
+      history.replaceState(null, '', `#${page}`);
+      if (page === 'logs' && !state.logs.length) loadLogs();
+      if (page === 'data') { loadData(); loadSoftwareUpdate(true); loadRuleUpdate(true); }
+    }
+    $$('.tab').forEach(x => x.addEventListener('click', () => showPage(x.dataset.page)));
+    $$('.segment').forEach(x => x.addEventListener('click', () => { $$('.segment').forEach(y => y.classList.remove('active')); x.classList.add('active'); state.filter = x.dataset.filter; renderLogs(); }));
+    $('#log-search').addEventListener('input', renderLogs);
+    $('#global-refresh').addEventListener('click', refreshCurrent);
+    $('#logs-refresh').addEventListener('click', event => reloadFrom(event.currentTarget, loadLogs, '查询日志已重新载入'));
+    $('#data-refresh').addEventListener('click', event => reloadFrom(event.currentTarget, loadData, '规则与上游状态已重新载入'));
+    $('#flush-cache').addEventListener('click', flushCaches);
+    $('#toggle-capture').addEventListener('click', toggleCapture);
+    $('#clear-logs').addEventListener('click', clearLogs);
+    $('#software-check').addEventListener('click', checkSoftwareUpdate);
+    $('#software-apply').addEventListener('click', applySoftwareUpdate);
+    $('#software-auto-toggle').addEventListener('click', toggleSoftwareAutoUpdate);
+    $('#rule-update-now').addEventListener('click', updateRulesNow);
+    $('#rule-auto-toggle').addEventListener('click', toggleRuleAutoUpdate);
+    $('#upstream-edit').addEventListener('click', () => toggleUpstreamEditor(true));
+    $('#upstream-cancel').addEventListener('click', () => toggleUpstreamEditor(false));
+    $('#upstream-save').addEventListener('click', saveUpstreams);
+    const initial = ['overview','logs','data'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'overview';
+    showPage(initial);
+    Promise.all([loadHealth(), loadOverview()]).catch(() => {});
+    loadSoftwareUpdate(true);
+    loadRuleUpdate(true);
+    setInterval(() => { if (state.page === 'overview' && !document.hidden) Promise.all([loadHealth(), loadOverview()]); }, 30000);
+    setInterval(() => { if (state.page === 'data' && !document.hidden) { loadSoftwareUpdate(true); loadRuleUpdate(true); } }, 30000);
+  </script>
+</body>
+</html>
