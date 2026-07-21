@@ -39,7 +39,7 @@ PROXY_IP = "__FAMILY_PROXY_IP__"
 FIXED_MANAGED_IPS = set()
 RESERVED_IPS = {"__FAMILY_ROUTER_IP__", "__FAMILY_RESERVED_GATEWAY_IP__", PROXY_IP}
 AUDIT_PATH = Path("/var/log/family-proxy-ui-audit.jsonl")
-BUILD_VERSION = "2026.07.21-device-capture"
+BUILD_VERSION = "2026.07.21-capture-live"
 SHARED_LIST = "family_mihomo_devices"
 SHARED_TABLE = "family_mihomo_shared"
 SHARED_CONN_MARK = "family_mihomo_conn"
@@ -586,6 +586,33 @@ def cleanup_captures():
         total -= size
 
 
+def capture_live_reader(record):
+    stream = record["live_process"].stdout
+    if not stream:
+        return
+    for raw_line in stream:
+        line = " ".join(raw_line.strip().split())[-320:]
+        if not line:
+            continue
+        with CAPTURE_LOCK:
+            record["live_packets"] += 1
+            record["live_lines"].append({
+                "seq": record["live_packets"],
+                "text": line,
+            })
+
+
+def stop_capture_process(process):
+    if not process or process.poll() is not None:
+        return
+    try:
+        process.send_signal(signal.SIGINT)
+        process.wait(timeout=3)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        process.kill()
+        process.wait(timeout=3)
+
+
 def capture_monitor(record):
     process = record["process"]
     deadline = record["started_monotonic"] + record["metadata"]["duration"]
@@ -600,13 +627,8 @@ def capture_monitor(record):
             reason = "completed"
             break
         time.sleep(0.2)
-    if process.poll() is None:
-        try:
-            process.send_signal(signal.SIGINT)
-            process.wait(timeout=3)
-        except (ProcessLookupError, subprocess.TimeoutExpired):
-            process.kill()
-            process.wait(timeout=3)
+    stop_capture_process(process)
+    stop_capture_process(record.get("live_process"))
     stderr = process.stderr.read().strip()[-500:] if process.stderr else ""
     return_code = process.returncode
     with CAPTURE_LOCK:
@@ -626,6 +648,8 @@ def capture_monitor(record):
             metadata["status"] = "failed"
             metadata["message"] = stderr or f"tcpdump 退出码 {return_code}"
         metadata["finished_at"] = int(time.time())
+        metadata["live_packets"] = record["live_packets"]
+        metadata["recent_lines"] = list(record["live_lines"])[-30:]
         write_capture_metadata(metadata)
         if CAPTURE_STATE.get("active") is record:
             CAPTURE_STATE["active"] = None
@@ -662,6 +686,14 @@ def start_capture(ip, duration, scope):
             command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE, text=True, start_new_session=True,
         )
+        live_command = [
+            "/usr/bin/tcpdump", "-i", CAPTURE_INTERFACE, "-nn", "-tt", "-q", "-l",
+            "-s", "128", "host", ip, *scope_filter,
+        ]
+        live_process = subprocess.Popen(
+            live_command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, bufsize=1, start_new_session=True,
+        )
         now = int(time.time())
         metadata = {
             "id": capture_id,
@@ -675,10 +707,14 @@ def start_capture(ip, duration, scope):
             "expires_at": now + CAPTURE_RETENTION_SECONDS,
             "message": "正在抓取",
         }
-        record = {"id": capture_id, "process": process, "metadata": metadata,
-                  "started_monotonic": time.monotonic(), "stop_reason": None}
+        record = {
+            "id": capture_id, "process": process, "live_process": live_process,
+            "live_packets": 0, "live_lines": deque(maxlen=60), "metadata": metadata,
+            "started_monotonic": time.monotonic(), "stop_reason": None,
+        }
         CAPTURE_STATE["active"] = record
         write_capture_metadata(metadata)
+        threading.Thread(target=capture_live_reader, args=(record,), daemon=True).start()
         threading.Thread(target=capture_monitor, args=(record,), daemon=True).start()
     time.sleep(0.15)
     if process.poll() is not None:
@@ -715,9 +751,28 @@ def list_captures(ip=None):
                 records.append(public_capture(metadata))
         records.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
         active = CAPTURE_STATE.get("active")
+        live = None
+        if active and active["process"].poll() is None and (ip is None or active["metadata"]["ip"] == ip):
+            live = {
+                "id": active["id"],
+                "packets": active["live_packets"],
+                "lines": list(active["live_lines"]),
+                "running": True,
+            }
+        elif records:
+            _, metadata_path = capture_paths(records[0]["id"])
+            latest = read_capture_metadata(metadata_path) or {}
+            if latest.get("recent_lines"):
+                live = {
+                    "id": records[0]["id"],
+                    "packets": latest.get("live_packets", 0),
+                    "lines": latest["recent_lines"],
+                    "running": False,
+                }
         return {
             "captures": records[:20],
             "active_id": active["id"] if active and active["process"].poll() is None else None,
+            "live": live,
             "limits": {"file_bytes": CAPTURE_MAX_BYTES, "total_bytes": CAPTURE_TOTAL_BYTES,
                        "retention_seconds": CAPTURE_RETENTION_SECONDS},
         }
@@ -1515,12 +1570,12 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     '</main><dialog id="renameDialog">',
-    '''</main><dialog id="captureDialog"><div class="dialog-body"><h2>网络诊断</h2><p id="captureTarget">选择抓包范围和时长。HTTPS 内容保持加密，只记录流向、握手和重传等元数据。</p><div class="capture-options"><label>抓包范围<select id="captureScope"><option value="all">全部流量</option><option value="dns">仅 DNS</option><option value="tcp">仅 TCP</option><option value="udp">仅 UDP</option></select></label><label>最长时长<select id="captureDuration"><option value="30">30 秒</option><option value="60" selected>1 分钟</option><option value="180">3 分钟</option></select></label></div><div class="capture-note">文件保存在服务器内存盘；单次最多 50 MB、总计最多 200 MB，24 小时后自动删除。</div><div class="capture-status" id="captureStatus"></div><div class="capture-list" id="captureList"><div class="empty">正在读取诊断记录</div></div></div><div class="dialog-actions"><button type="button" class="dialog-cancel" onclick="closeCapture()">关闭</button><button type="button" class="dialog-save" id="captureStart" onclick="startCapture()">开始抓包</button></div></dialog><dialog id="renameDialog">''',
+    '''</main><dialog id="captureDialog"><div class="dialog-body"><h2>网络诊断</h2><p id="captureTarget">选择抓包范围和时长。HTTPS 内容保持加密，只记录流向、握手和重传等元数据。</p><div class="capture-options"><label>抓包范围<select id="captureScope"><option value="all">全部流量</option><option value="dns">仅 DNS</option><option value="tcp">仅 TCP</option><option value="udp">仅 UDP</option></select></label><label>最长时长<select id="captureDuration"><option value="30">30 秒</option><option value="60" selected>1 分钟</option><option value="180">3 分钟</option></select></label></div><div class="capture-note">文件保存在服务器内存盘；单次最多 50 MB、总计最多 200 MB，24 小时后自动删除。</div><div class="capture-status" id="captureStatus"></div><div class="capture-live"><div class="capture-live-head"><b>实时流量</b><span id="captureLiveMeta">尚未开始</span></div><div class="capture-live-lines" id="captureLiveLines"><div class="empty">开始抓包后在这里实时显示最近连接</div></div></div><div class="capture-list" id="captureList"><div class="empty">正在读取诊断记录</div></div></div><div class="dialog-actions"><button type="button" class="dialog-cancel" onclick="closeCapture()">关闭</button><button type="button" class="dialog-save" id="captureStart" onclick="startCapture()">开始抓包</button></div></dialog><dialog id="renameDialog">''',
     1,
 )
 PAGE = PAGE.replace(
     '</style></head>',
-    '''.capture-options{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:17px}.capture-options label{color:#8e8e93;font-size:12px}.capture-options select{display:block;width:100%;height:38px;margin-top:6px;border:1px solid #48484a;border-radius:7px;background:#2c2c2e;color:#fff;padding:0 10px;font:14px inherit}.capture-note{margin-top:13px;padding:10px 12px;border-radius:7px;background:#2c2c2e;color:#aeaeb2;font-size:12px;line-height:1.5}.capture-status{min-height:18px;margin-top:12px;color:#30d158;font-size:13px}.capture-status.error{color:#ff6961}.capture-list{margin-top:10px;border:1px solid #38383a;border-radius:7px;overflow:hidden}.capture-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:11px 12px;border-top:1px solid #38383a}.capture-row:first-child{border-top:0}.capture-title{font-size:13px}.capture-meta{margin-top:4px;color:#8e8e93;font-size:11px}.capture-actions{display:flex;align-items:center;gap:3px}.capture-download{color:#0a84ff;text-decoration:none;font-size:13px;font-weight:600;padding:7px 8px;border-radius:6px}.capture-download:hover{background:rgba(10,132,255,.12)}@media(max-width:420px){.capture-options{grid-template-columns:1fr}.capture-row{grid-template-columns:1fr}.capture-actions{justify-content:flex-end}}</style></head>''',
+    '''.capture-options{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:17px}.capture-options label{color:#8e8e93;font-size:12px}.capture-options select{display:block;width:100%;height:38px;margin-top:6px;border:1px solid #48484a;border-radius:7px;background:#2c2c2e;color:#fff;padding:0 10px;font:14px inherit}.capture-note{margin-top:13px;padding:10px 12px;border-radius:7px;background:#2c2c2e;color:#aeaeb2;font-size:12px;line-height:1.5}.capture-status{min-height:18px;margin-top:12px;color:#30d158;font-size:13px}.capture-status.error{color:#ff6961}.capture-live{margin-top:10px;border:1px solid #38383a;border-radius:7px;background:#111;overflow:hidden}.capture-live-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 11px;border-bottom:1px solid #38383a;font-size:12px}.capture-live-head span{color:#8e8e93}.capture-live-lines{height:156px;overflow:auto;padding:6px 0;font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}.capture-line{padding:3px 10px;color:#d1d1d6;border-top:1px solid rgba(255,255,255,.04);overflow-wrap:anywhere}.capture-line:first-child{border-top:0}.capture-list{margin-top:10px;border:1px solid #38383a;border-radius:7px;overflow:hidden}.capture-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:11px 12px;border-top:1px solid #38383a}.capture-row:first-child{border-top:0}.capture-title{font-size:13px}.capture-meta{margin-top:4px;color:#8e8e93;font-size:11px}.capture-actions{display:flex;align-items:center;gap:3px}.capture-download{color:#0a84ff;text-decoration:none;font-size:13px;font-weight:600;padding:7px 8px;border-radius:6px}.capture-download:hover{background:rgba(10,132,255,.12)}@media(max-width:420px){.capture-options{grid-template-columns:1fr}.capture-row{grid-template-columns:1fr}.capture-actions{justify-content:flex-end}}</style></head>''',
     1,
 )
 PAGE = PAGE.replace(
@@ -1529,7 +1584,8 @@ PAGE = PAGE.replace(
 function captureSize(bytes){let n=Number(bytes||0);return n<1048576?`${Math.max(0,Math.round(n/1024))} KB`:`${(n/1048576).toFixed(1)} MB`}
 function captureTime(value){return value?new Date(Number(value)*1000).toLocaleString('zh-CN',{hour12:false}):'--'}
 function captureLabel(item){return item.running?'正在抓取':({completed:'已完成',stopped:'已停止',limit:'达到容量上限',failed:'失败',interrupted:'服务重启中断'}[item.status]||item.status)}
-function captureRows(data){let active=data.active_id;document.querySelector('#captureStart').disabled=Boolean(active);document.querySelector('#captureList').innerHTML=data.captures.length?data.captures.map(item=>`<div class="capture-row"><div><div class="capture-title">${esc(item.scope_label)} · ${captureLabel(item)}</div><div class="capture-meta">${captureTime(item.created_at)} · ${captureSize(item.size)} · 最长 ${item.duration} 秒</div></div><div class="capture-actions">${item.running?`<button class="secondary danger" onclick="stopCapture('${item.id}')">停止</button>`:item.downloadable?`<a class="capture-download" href="/api/capture/download?id=${encodeURIComponent(item.id)}">下载</a><button class="secondary danger" onclick="deleteCapture('${item.id}')">删除</button>`:`<button class="secondary danger" onclick="deleteCapture('${item.id}')">删除</button>`}</div></div>`).join(''):'<div class="empty">暂无抓包记录</div>'}
+function captureLive(data){let live=data.live,latest=data.captures[0],meta=document.querySelector('#captureLiveMeta'),lines=document.querySelector('#captureLiveLines');if(!live){meta.textContent='尚未开始';lines.innerHTML='<div class="empty">开始抓包后在这里实时显示最近连接</div>';return}meta.textContent=`${live.running?'实时更新':'最近一次'} · ${live.packets} 个包 · ${captureSize(latest?.size||0)}`;lines.innerHTML=live.lines.length?live.lines.map(item=>`<div class="capture-line">${esc(item.text)}</div>`).join(''):'<div class="empty">等待设备产生新流量</div>';lines.scrollTop=lines.scrollHeight}
+function captureRows(data){let active=data.active_id;document.querySelector('#captureStart').disabled=Boolean(active);document.querySelector('#captureList').innerHTML=data.captures.length?data.captures.map(item=>`<div class="capture-row"><div><div class="capture-title">${esc(item.scope_label)} · ${captureLabel(item)}</div><div class="capture-meta">${captureTime(item.created_at)} · ${captureSize(item.size)} · 最长 ${item.duration} 秒</div></div><div class="capture-actions">${item.running?`<button class="secondary danger" onclick="stopCapture('${item.id}')">停止</button>`:item.downloadable?`<a class="capture-download" href="/api/capture/download?id=${encodeURIComponent(item.id)}">下载</a><button class="secondary danger" onclick="deleteCapture('${item.id}')">删除</button>`:`<button class="secondary danger" onclick="deleteCapture('${item.id}')">删除</button>`}</div></div>`).join(''):'<div class="empty">暂无抓包记录</div>';captureLive(data)}
 async function loadCaptures(){if(!captureIp)return;clearTimeout(captureTimer);try{let data=await api(`/api/captures?ip=${encodeURIComponent(captureIp)}`);captureRows(data);if(document.querySelector('#captureDialog').open)captureTimer=setTimeout(loadCaptures,data.active_id?1000:5000)}catch(e){document.querySelector('#captureStatus').textContent=e.message;document.querySelector('#captureStatus').className='capture-status error'}}
 function openCapture(ip){let device=devices.find(item=>item.ip===ip);captureIp=ip;document.querySelector('#captureTarget').textContent=`${device?.name||ip} · ${ip}。HTTPS 内容保持加密，只记录流向、握手和重传等元数据。`;document.querySelector('#captureStatus').textContent='';document.querySelector('#captureStatus').className='capture-status';document.querySelector('#captureDialog').showModal();loadCaptures()}
 function closeCapture(){clearTimeout(captureTimer);captureTimer=0;captureIp='';document.querySelector('#captureDialog').close()}
