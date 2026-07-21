@@ -37,7 +37,7 @@ PROXY_IP = "__FAMILY_PROXY_IP__"
 FIXED_MANAGED_IPS = set()
 RESERVED_IPS = {"__FAMILY_ROUTER_IP__", "__FAMILY_RESERVED_GATEWAY_IP__", PROXY_IP}
 AUDIT_PATH = Path("/var/log/family-proxy-ui-audit.jsonl")
-BUILD_VERSION = "2026.07.21-seven-point"
+BUILD_VERSION = "2026.07.21-ui-fix1"
 SHARED_LIST = "family_mihomo_devices"
 SHARED_TABLE = "family_mihomo_shared"
 SHARED_CONN_MARK = "family_mihomo_conn"
@@ -695,9 +695,12 @@ def list_devices():
         drift = configuration_drift(api, leases, address_list_managed(api), file_managed)
         upnp = [item for item in api.print("/ip/firewall/nat")
                 if item.get("dynamic") == "true" and item.get("comment", "").startswith("upnp ")]
+        upnp_settings = api.print("/ip/upnp")
+        upnp_enabled = bool(upnp_settings and upnp_settings[0].get("enabled") == "true")
         summary.update({
             "drift": drift,
             "upnp_mappings": len(upnp),
+            "upnp_enabled": upnp_enabled,
             "last_change": last_audit_event(),
             "backup": latest_backup(load_config()),
             "ipv6_policy": "纳管设备阻断",
@@ -991,17 +994,17 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     "ready=summary.ready&&summary.netwatch==='up';devices=data.devices;",
-    "ready=summary.ready&&summary.netwatch==='up',drift=summary.drift||[],warn=ready&&(drift.length||summary.upnp_mappings>20);devices=data.devices;",
+    "ready=summary.ready&&summary.netwatch==='up',drift=summary.drift||[],warn=ready&&drift.length;devices=data.devices;",
     1,
 )
 PAGE = PAGE.replace(
     "badge.className='overall '+(ready?'':'bad');badge.innerHTML=`<span class=\"dot\"></span><span>${ready?'旁路运行正常':'旁路需要检查'}</span>`;",
-    "badge.className='overall '+(!ready?'bad':warn?'warn':'');badge.innerHTML=`<span class=\"dot\"></span><span>${!ready?'旁路需要检查':warn?'运行正常，有项目待整理':'旁路运行正常'}</span>`;",
+    "badge.className='overall '+(!ready?'bad':warn?'warn':'');badge.innerHTML=`<span class=\"dot\"></span><span>${!ready?'旁路需要检查':warn?'运行正常 · 配置需核对':'旁路运行正常'}</span>`;",
     1,
 )
 PAGE = PAGE.replace(
     "healthItem('自动回退',summary.netwatch==='up',summary.netwatch==='up'?'已启用':'未就绪');render()",
-    "healthItem('自动回退',summary.netwatch==='up',summary.netwatch==='up'?'已启用':'未就绪')+healthItem('配置对账',!drift.length,drift.join('；')||'页面、路由与状态一致')+healthItem('IPv6',true,summary.ipv6_policy)+healthItem('备份',!!summary.backup,summary.backup?summary.backup.time:'尚未配置')+healthItem('UPnP',summary.upnp_mappings<=20,summary.upnp_mappings+' 个动态映射')+healthItem('版本',true,summary.version);render()",
+    "healthItem('自动回退',summary.netwatch==='up',summary.netwatch==='up'?'已启用，故障时自动切换':'未就绪')+healthItem('配置对账',!drift.length,drift.join('；')||'页面、路由与状态一致')+healthItem('IPv6',true,summary.ipv6_policy+' IPv6 绕行')+healthItem('备份',!!summary.backup,summary.backup?'最近备份 '+summary.backup.time:'尚未配置')+healthItem('UPnP',!summary.upnp_enabled,summary.upnp_enabled?'当前已开启 · '+summary.upnp_mappings+' 个动态映射':'已关闭 · '+summary.upnp_mappings+' 条历史映射等待自然过期')+healthItem('版本',true,summary.version);render()",
     1,
 )
 PAGE = PAGE.replace(
@@ -1019,6 +1022,16 @@ PAGE = PAGE.replace(
     'grid-template-columns:repeat(4,1fr)}.nav a{text-align:center;padding:7px 5px;white-space:normal}',
     1,
 )
+PAGE = PAGE.replace(
+    '</style></head>',
+    '''.health-grid{display:flex;flex-wrap:wrap;background:#1c1c1e}
+.health-item,.health-item:last-child{flex:1 1 220px;min-width:220px;border:0;background:#1c1c1e;min-height:92px;box-shadow:inset -1px -1px 0 #38383a}
+.health-item span{white-space:normal;overflow:visible;text-overflow:clip;line-height:1.45;overflow-wrap:anywhere}
+@media(max-width:760px){.health-item,.health-item:nth-child(2n),.health-item:last-child{flex-basis:calc(50% - 1px);min-width:calc(50% - 1px);border:0}}
+@media(max-width:420px){.health-item,.health-item:nth-child(2n),.health-item:last-child{flex-basis:100%;min-width:100%;min-height:0}}</style></head>''',
+    1,
+)
+PAGE = PAGE.replace('@media(max-width:760px)', '@media(max-width:820px)')
 
 RULES_PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>代理规则</title><style>
 :root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC","Segoe UI",sans-serif;background:#000;color:#f5f5f7;letter-spacing:0}*{box-sizing:border-box}body{margin:0;background:#000;color:#f5f5f7}.topbar{position:sticky;top:0;z-index:10;border-bottom:1px solid rgba(255,255,255,.1);background:rgba(18,18,20,.88);backdrop-filter:saturate(180%) blur(22px);-webkit-backdrop-filter:saturate(180%) blur(22px)}.topbar-inner{max-width:1040px;min-height:58px;margin:auto;padding:0 22px;display:flex;align-items:center;justify-content:space-between;gap:18px}.brand{font-size:17px;font-weight:650;color:#fff;white-space:nowrap}.nav{display:flex;align-items:center;gap:4px;padding:3px;background:#2c2c2e;border-radius:8px}.nav a{padding:7px 11px;border-radius:6px;color:#aeaeb2;text-decoration:none;font-size:13px;white-space:nowrap}.nav a.active{background:#636366;color:#fff}.wrap{max-width:1040px;margin:auto;padding:38px 22px 64px}.intro{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:25px}.intro h1{font-size:30px;line-height:1.15;margin:0;font-weight:700}.intro p{margin:9px 0 0;color:#98989d;font-size:14px}.count{padding:8px 11px;border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;color:#30d158;font-size:13px;white-space:nowrap}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:9px}.toolbar h2{font-size:13px;color:#8e8e93;font-weight:600;margin:0}.actions{display:flex;gap:7px}.group{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.rule-row{display:grid;grid-template-columns:34px minmax(0,1fr) auto;align-items:center;gap:9px;padding:9px 12px;border-top:1px solid #38383a}.rule-row:first-child{border-top:0}.rule-index{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#636366;text-align:right}.rule-input{min-width:0;width:100%;height:38px;border:1px solid transparent;border-radius:7px;background:#2c2c2e;color:#f5f5f7;padding:0 10px;font:13px ui-monospace,SFMono-Regular,Menlo,monospace;outline:none}.rule-input:focus{border-color:#0a84ff;box-shadow:0 0 0 3px rgba(10,132,255,.18)}.rule-input.protected{color:#aeaeb2}.icon-set{display:flex;gap:3px}.icon{width:34px;height:34px;border:0;border-radius:6px;background:transparent;color:#0a84ff;font-size:17px;cursor:pointer}.icon:hover{background:rgba(10,132,255,.12)}.icon.danger{color:#ff453a}.icon:disabled{color:#48484a;cursor:default;background:transparent}.button{height:36px;border:0;border-radius:7px;padding:0 13px;font:600 13px inherit;cursor:pointer}.primary{background:#0a84ff;color:#fff}.secondary{background:#2c2c2e;color:#f5f5f7}.button:disabled{opacity:.5;cursor:default}.footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px}.status{min-height:20px;color:#30d158;font-size:13px}.status.error{color:#ff6961}.empty{padding:28px;text-align:center;color:#8e8e93}.dirty .count{color:#ffd60a}@media(max-width:760px){.topbar-inner{height:auto;padding:10px 14px;align-items:flex-start;flex-direction:column;gap:8px}.nav{width:100%;display:grid;grid-template-columns:repeat(4,1fr)}.nav a{text-align:center;padding:7px 5px;white-space:normal}.wrap{padding:28px 14px 50px}.intro{align-items:flex-start;flex-direction:column}.rule-row{grid-template-columns:28px minmax(0,1fr);padding:9px}.icon-set{grid-column:2;justify-content:flex-end}.footer{align-items:stretch;flex-direction:column}.footer .button{width:100%}.actions{width:100%}.actions .button{flex:1}}
