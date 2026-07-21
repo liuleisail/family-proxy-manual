@@ -58,6 +58,14 @@
     add chain=forward action=accept connection-mark=$sharedMark comment=($sharedTag . " FastTrack exclude")
   }
 }
+:local policyAnchor [find where comment=($sharedTag . " FastTrack exclude")]
+:if ([:len [find where comment=($sharedTag . " block external DoT TCP")]] = 0) do={
+  add chain=forward action=reject reject-with=tcp-reset protocol=tcp src-address-list=$sharedList dst-address-list=!local_lan_ipv4 dst-port=853 comment=($sharedTag . " block external DoT TCP") place-before=$policyAnchor
+}
+:set policyAnchor [find where comment=($sharedTag . " FastTrack exclude")]
+:if ([:len [find where comment=($sharedTag . " block external DoT UDP")]] = 0) do={
+  add chain=forward action=drop protocol=udp src-address-list=$sharedList dst-address-list=!local_lan_ipv4 dst-port=853 comment=($sharedTag . " block external DoT UDP") place-before=$policyAnchor
+}
 
 /ipv6 firewall filter
 :if ([:len [find where comment="family-mihomo-auto IPv6 drop"]] = 0) do={
