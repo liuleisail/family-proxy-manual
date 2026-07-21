@@ -150,9 +150,11 @@ def clean_provider(data):
 def slot_state(slot):
     meta = PROVIDERS / f"{slot}.json"
     try:
-        return json.loads(meta.read_text())
+        state = json.loads(meta.read_text())
     except (OSError, json.JSONDecodeError):
-        return {"slot": slot, "label": source_map()[slot]["label"], "imported": False, "nodes": 0}
+        state = {"slot": slot, "label": source_map()[slot]["label"], "imported": False, "nodes": 0}
+    state["removable"] = slot != "primary"
+    return state
 
 
 def nodes():
@@ -487,6 +489,28 @@ def clear_slot(slot):
     return slot_state(slot)
 
 
+def delete_source(slot):
+    if slot == "primary":
+        raise ValueError("主力机场不能删除")
+    current = sources()
+    if slot not in {item["slot"] for item in current}:
+        raise ValueError("无效机场槽位")
+    path = provider_path(slot)
+    try:
+        document = yaml.safe_load(path.read_text()) or {} if path.exists() else {}
+        has_nodes = bool(document.get("proxies"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ValueError("无法读取待删除机场的节点文件") from exc
+    if has_nodes:
+        # This validates all active candidate pools and rolls back on failure.
+        clear_slot(slot)
+    path.unlink(missing_ok=True)
+    (PROVIDERS / f"{slot}.json").unlink(missing_ok=True)
+    atomic_json(SOURCES, [item for item in current if item["slot"] != slot])
+    SUGGESTIONS.unlink(missing_ok=True)
+    return {"slot": slot, "removed": True}
+
+
 def validate_pools(value):
     indexed = node_index()
     cleaned = {}
@@ -774,7 +798,12 @@ PAGE = PAGE.replace("poolNames=['HK-视频','JP-AI','SG-AI','US-AI','TG','Proxy'
 PAGE = PAGE.replace("async function load(){let d=await api('/api/state');", "async function load(){let d=await api('/api/nodes');")
 PAGE = PAGE.replace("renderPools()}function options", "catalogLoaded=true;renderPools()}async function loadSummary(){let d=await api('/api/state');document.querySelector('#slots').innerHTML=d.slots.map(slotCard).join('');pools=d.pools;if(d.tests&&d.tests.tested_at)document.querySelector('#testStatus').textContent='上次稳定性测速：'+d.tests.tested_at}async function loadPools(){if(catalogLoaded)return;try{await load();await refreshTestStatus()}catch(e){pageError(e)}}function pageError(e){let box=document.querySelector('#pageStatus');if(!box){box=document.createElement('div');box.id='pageStatus';box.className='status bad';document.querySelector('.intro').append(box)}box.innerHTML='页面数据加载失败。<button class=\"btn\" onclick=\"loadSummary().catch(pageError)\">重试</button>';console.error(e)}function options")
 PAGE = PAGE.replace("}load()", "}loadSummary().catch(pageError)")
-PAGE = PAGE.replace("async function imp(s){", "async function addSource(){try{await api('/api/sources',{method:'POST',body:'{}'});await loadSummary()}catch(e){pageError(e)}}async function imp(s){")
+PAGE = PAGE.replace("async function imp(s){", "async function addSource(){try{await api('/api/sources',{method:'POST',body:'{}'});await loadSummary()}catch(e){pageError(e)}}async function deleteSource(s){if(!confirm('删除机场会清空该来源的节点；若节点正在被当前候选池使用，操作将被拒绝。确定删除？'))return;try{await api('/api/source-remove',{method:'POST',body:JSON.stringify({slot:s})});await loadSummary()}catch(e){alert(e.message)}}async function imp(s){")
+PAGE = PAGE.replace(
+    '''<button class="btn danger" onclick="dropSlot(\''+s.slot+'\')">清空</button>''',
+    '''<button class="btn danger" onclick="dropSlot(\''+s.slot+'\')">清空节点</button>'+
+    (s.removable?'<button class="btn danger" onclick="deleteSource(\''+s.slot+'\')">删除机场</button>':'')+'''
+)
 PAGE = PAGE.replace("all=d.nodes;pools=d.pools;", "all=d.nodes;activePools=d.pools;suggestion=d.suggestions||null;pools=suggestion&&suggestion.generated_at?suggestion.pools:activePools;")
 PAGE = PAGE.replace('<button class="btn primary" onclick="testAll()">稳定性测速</button><button class="btn" onclick="save()">校验并应用</button>', '<button class="btn primary" onclick="testAll()">全量稳定性测速</button><button class="btn" onclick="confirmApply()">复测并生效</button>')
 PAGE = PAGE.replace('<div class="section-title"><h2>业务候选池</h2></div>', '<div class="section-title"><h2>待生效候选池</h2><span class="muted">测速建议不会自动替换当前出口</span></div>')
@@ -845,6 +874,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/import": result = import_slot(body["slot"], body.get("url", ""))
             elif path == "/api/remove": result = clear_slot(body["slot"])
             elif path == "/api/sources": result = add_source()
+            elif path == "/api/source-remove": result = delete_source(body["slot"])
             elif path == "/api/pools": result = save_pools(body.get("pools", {}))
             elif path == "/api/retest-apply": result = start_retest_apply(body.get("pools", {}))
             elif path == "/api/rollback": result = rollback_pools()
