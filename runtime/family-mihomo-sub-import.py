@@ -35,9 +35,13 @@ POOLS = {
     "JP-AI": ("jp", "日本", "jpn"),
     "SG-AI": ("sg", "新加坡", "sgp"),
     "US-AI": ("us", "美国", "usa"),
+    "其他-AI": (),
     "TG": ("jp", "日本", "jpn", "sg", "新加坡", "sgp"),
     "Proxy": ("hk", "香港", "hkg"),
 }
+AI_REGIONAL_POOLS = ("JP-AI", "SG-AI", "US-AI")
+HK_NODE = re.compile(r"(?:香港|hong[ -]?kong|(?<![a-z])hkg?(?![a-z]))", re.I)
+SUGGESTION_SCHEMA = 2
 CANDIDATES = PROVIDERS / "candidates.json"
 PREVIOUS = PROVIDERS / "candidates.previous.json"
 LAST_TESTS = PROVIDERS / "last-tests.json"
@@ -54,7 +58,7 @@ NOISE = re.compile(
     re.I,
 )
 OPENER = build_opener(ProxyHandler({}))
-MONITORED_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "TG-Auto", "Proxy-Auto")
+MONITORED_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto")
 SOURCE_ORDER = {"[主力] ": 0, "[备用1] ": 1, "[备用2] ": 2}
 TEST_JOB_LOCK = threading.Lock()
 TEST_STATE_LOCK = threading.Lock()
@@ -144,6 +148,13 @@ def pools():
 
 def suggestions():
     data = read_json(SUGGESTIONS, {})
+    if data.get("schema") != SUGGESTION_SCHEMA:
+        return {
+            "pools": {name: [] for name in POOLS},
+            "generated_at": None,
+            "ready": False,
+            "reason": "AI 候选地域规则已更新，请重新进行全量稳定性测速",
+        }
     proposal = data.get("pools") if isinstance(data.get("pools"), dict) else {}
     return {
         "pools": {name: list(proposal.get(name, []))[:5] for name in POOLS},
@@ -158,6 +169,10 @@ def node_index():
 
 
 def pool_matches(pool, node):
+    if pool == "其他-AI":
+        return not HK_NODE.search(node["raw"]) and not any(
+            pool_matches(regional_pool, node) for regional_pool in AI_REGIONAL_POOLS
+        )
     return any(word.casefold() in node["raw"].casefold() for word in POOLS[pool])
 
 
@@ -195,6 +210,7 @@ def build_suggestions(results):
     return {
         "pools": proposed,
         "generated_at": datetime.now().astimezone().isoformat(),
+        "schema": SUGGESTION_SCHEMA,
         "ready": not missing,
         "reason": ("、".join(missing) + " 没有连续三次成功的节点") if missing else None,
     }
@@ -272,6 +288,7 @@ def save_config_version(content, label):
 
 def generate_config(selected=None):
     selected = selected or pools()
+    selected = {name: list(selected.get(name, [])) for name in POOLS}
     config = yaml.safe_load(MIHOMO_CONFIG.read_text())
     flattened = []
     for slot in SLOTS:
@@ -286,7 +303,9 @@ def generate_config(selected=None):
             item["name"] = PREFIX[slot] + str(item["name"])
             flattened.append(item)
     config["proxies"] = flattened
-    hk, jp, sg, us, tg, proxy = (selected[name] for name in POOLS)
+    hk, jp, sg, us, other_ai, tg, proxy = (selected[name] for name in POOLS)
+    ai_groups = ["JP-AI", "SG-AI", "US-AI"] + (["其他-AI"] if other_ai else [])
+    ai_nodes = jp + sg + us + other_ai
     groups = [
         {"name": "Apple", "type": "select", "proxies": ["DIRECT", "Proxy-Auto"] + proxy},
         {"name": "MicroSoft", "type": "select", "proxies": ["DIRECT", "Proxy-Auto"] + proxy},
@@ -297,15 +316,17 @@ def generate_config(selected=None):
         fallback("TG-Auto", tg, "https://core.telegram.org", 300),
         fallback("Proxy-Auto", proxy, "https://www.gstatic.com/generate_204", 300, "204"),
         fallback("DNS-Resolve", proxy, "https://dns.google/dns-query", 300),
-        fallback("AI-Auto", ["JP-AI", "SG-AI", "US-AI"], "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
-        {"name": "AI", "type": "select", "proxies": ["AI-Auto", "JP-AI", "SG-AI", "US-AI"] + jp + sg + us},
-        {"name": "Gemini", "type": "select", "proxies": ["AI-Auto", "SG-AI", "JP-AI", "US-AI"] + sg + jp + us},
+        fallback("AI-Auto", ai_groups, "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
+        {"name": "AI", "type": "select", "proxies": ["AI-Auto"] + ai_groups + ai_nodes},
+        {"name": "Gemini", "type": "select", "proxies": ["AI-Auto", "SG-AI", "JP-AI", "US-AI"] + (["其他-AI"] if other_ai else []) + sg + jp + us + other_ai},
         {"name": "Telegram", "type": "select", "proxies": ["TG-Auto"] + tg},
         {"name": "TikTok", "type": "select", "proxies": ["Proxy-Auto"] + proxy},
         {"name": "Youtube", "type": "select", "proxies": ["HK-视频"] + hk},
         {"name": "Google", "type": "select", "proxies": ["Proxy-Auto"] + proxy},
         {"name": "Others", "type": "select", "proxies": ["Proxy-Auto"] + proxy},
     ]
+    if other_ai:
+        groups.insert(6, fallback("其他-AI", other_ai, "https://chatgpt.com/cdn-cgi/trace", 180, "200"))
     config["proxy-groups"] = groups
     previous = MIHOMO_CONFIG.read_bytes()
     temporary = MIHOMO_CONFIG.with_suffix(".candidate")
@@ -426,8 +447,9 @@ def validate_pools(value):
     cleaned = {}
     for pool in POOLS:
         entries = value.get(pool, [])
-        if not isinstance(entries, list) or not 1 <= len(entries) <= 5 or len(entries) != len(set(entries)):
-            raise ValueError(f"{pool} 必须是 1 至 5 个不重复节点")
+        minimum = 0 if pool == "其他-AI" else 1
+        if not isinstance(entries, list) or not minimum <= len(entries) <= 5 or len(entries) != len(set(entries)):
+            raise ValueError(f"{pool} 必须是 {minimum} 至 5 个不重复节点")
         if any(item not in indexed for item in entries):
             raise ValueError(f"{pool} 含有不存在的节点")
         if any(not pool_matches(pool, indexed[item]) for item in entries):
@@ -667,7 +689,7 @@ def status():
     result = {}
     events = read_json(RUNTIME_EVENTS, [])
     runtime = read_json(RUNTIME_STATE, {})
-    for group in ("AI", "AI-Auto", "JP-AI", "SG-AI", "US-AI", "Youtube", "HK-视频", "Telegram", "TG-Auto", "Google", "Others", "Proxy-Auto"):
+    for group in ("AI", "AI-Auto", "JP-AI", "SG-AI", "US-AI", "其他-AI", "Youtube", "HK-视频", "Telegram", "TG-Auto", "Google", "Others", "Proxy-Auto"):
         try:
             data = proxy_api("/proxies/" + quote(group, safe=""))
             leaf = resolve_leaf(group)
@@ -701,6 +723,7 @@ PAGE = PAGE.replace(_history_marker, _stable_marker + _history_marker, 1)
 # needed once the user opens the candidate-pool tab.
 PAGE = PAGE.replace("if(id==='runtime')loadStatus()", "if(id==='pools')loadPools();if(id==='runtime')loadStatus()")
 PAGE = PAGE.replace("let all=[],pools={},delays={};", "let all=[],pools={},activePools={},suggestion=null,delays={},catalogLoaded=false,testPoll=null;")
+PAGE = PAGE.replace("poolNames=['HK-视频','JP-AI','SG-AI','US-AI','TG','Proxy']", "poolNames=['HK-视频','JP-AI','SG-AI','US-AI','其他-AI','TG','Proxy']")
 PAGE = PAGE.replace("async function load(){let d=await api('/api/state');", "async function load(){let d=await api('/api/nodes');")
 PAGE = PAGE.replace("renderPools()}function options", "catalogLoaded=true;renderPools()}async function loadSummary(){let d=await api('/api/state');document.querySelector('#slots').innerHTML=d.slots.map(slotCard).join('');pools=d.pools;if(d.tests&&d.tests.tested_at)document.querySelector('#testStatus').textContent='上次稳定性测速：'+d.tests.tested_at}async function loadPools(){if(catalogLoaded)return;try{await load();await refreshTestStatus()}catch(e){pageError(e)}}function pageError(e){let box=document.querySelector('#pageStatus');if(!box){box=document.createElement('div');box.id='pageStatus';box.className='status bad';document.querySelector('.intro').append(box)}box.innerHTML='页面数据加载失败。<button class=\"btn\" onclick=\"loadSummary().catch(pageError)\">重试</button>';console.error(e)}function options")
 PAGE = PAGE.replace("}load()", "}loadSummary().catch(pageError)")
