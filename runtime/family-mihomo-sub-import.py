@@ -90,8 +90,11 @@ def clean_provider(data):
     if not isinstance(proxies, list):
         raise ValueError("仅接受机场原生 Clash/Mihomo YAML")
     kept = [item for item in proxies if isinstance(item, dict) and item.get("name") and not NOISE.search(str(item["name"]))]
-    document["proxies"] = kept
-    return yaml.safe_dump(document, allow_unicode=True, sort_keys=False).encode(), len(kept)
+    if not kept:
+        raise ValueError("订阅中没有可用代理节点")
+    # Airport profiles often include policy groups that reference traffic and
+    # expiry notice entries. Only proxies belong in a Mihomo provider file.
+    return yaml.safe_dump({"proxies": kept}, allow_unicode=True, sort_keys=False).encode(), len(kept)
 
 
 def slot_state(slot):
@@ -220,6 +223,7 @@ def generate_config(selected=None):
         fallback("US-AI", us, "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
         fallback("TG-Auto", tg, "https://core.telegram.org", 300),
         fallback("Proxy-Auto", proxy, "https://www.gstatic.com/generate_204", 300, "204"),
+        fallback("DNS-Resolve", proxy, "https://dns.google/dns-query", 300),
         fallback("AI-Auto", ["JP-AI", "SG-AI", "US-AI"], "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
         {"name": "AI", "type": "select", "proxies": ["AI-Auto", "JP-AI", "SG-AI", "US-AI"] + jp + sg + us},
         {"name": "Gemini", "type": "select", "proxies": ["AI-Auto", "SG-AI", "JP-AI", "US-AI"] + sg + jp + us},
@@ -259,19 +263,8 @@ def generate_config(selected=None):
     return version.name
 
 
-def import_slot(slot, url):
+def apply_provider(slot, cleaned, count):
     path = provider_path(slot)
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname:
-        raise ValueError("仅接受 HTTPS 订阅链接")
-    try:
-        with OPENER.open(Request(url, headers={"User-Agent": "Mihomo-Direct-Subscription"}), timeout=75) as response:
-            raw = response.read(MAX_BYTES + 1)
-    except Exception as exc:
-        raise ValueError("订阅直连拉取失败") from exc
-    if len(raw) > MAX_BYTES:
-        raise ValueError("订阅文件过大")
-    cleaned, count = clean_provider(raw)
     temporary = path.with_suffix(".candidate")
     temporary.write_bytes(cleaned)
     os.chmod(temporary, 0o600)
@@ -308,6 +301,21 @@ def import_slot(slot, url):
             restart_mihomo()
         raise
     return meta
+
+
+def import_slot(slot, url):
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("仅接受 HTTPS 订阅链接")
+    try:
+        with OPENER.open(Request(url, headers={"User-Agent": "Mihomo-Direct-Subscription"}), timeout=75) as response:
+            raw = response.read(MAX_BYTES + 1)
+    except Exception as exc:
+        raise ValueError("订阅直连拉取失败") from exc
+    if len(raw) > MAX_BYTES:
+        raise ValueError("订阅文件过大")
+    cleaned, count = clean_provider(raw)
+    return apply_provider(slot, cleaned, count)
 
 
 def clear_slot(slot):
