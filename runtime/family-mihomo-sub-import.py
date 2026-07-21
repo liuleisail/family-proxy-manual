@@ -288,10 +288,6 @@ def import_slot(slot, url):
             "updated_at": datetime.now().astimezone().isoformat()}
     try:
         current = pools()
-        # First import has no saved candidates yet; seed a bounded pool from
-        # the newly imported source before validating and generating Mihomo.
-        if not all(current.values()):
-            current = seed_pools()
         valid = {node["name"] for node in nodes()}
         reconciled = {pool: [name for name in current[pool] if name in valid] for pool in POOLS}
         validate_pools(reconciled)
@@ -460,8 +456,13 @@ def monitor_once():
             selected = data.get("now")
         except Exception:
             selected = None
-        current[group] = {"node": selected, "checked_at": now}
-        old = (previous.get(group) or {}).get("node")
+        old_state = previous.get(group) or {}
+        old = old_state.get("node")
+        current[group] = {
+            "node": selected,
+            "checked_at": now,
+            "since": old_state.get("since", now) if old == selected else now,
+        }
         if old and selected and old != selected:
             events.append({"time": now, "group": group, "from": old, "to": selected,
                            "reason": "健康检查触发 fallback"})
@@ -481,6 +482,7 @@ def monitor_loop():
 def status():
     result = {}
     events = read_json(RUNTIME_EVENTS, [])
+    runtime = read_json(RUNTIME_STATE, {})
     for group in ("AI", "AI-Auto", "JP-AI", "SG-AI", "US-AI", "Youtube", "HK-视频", "Telegram", "TG-Auto", "Google", "Others", "Proxy-Auto"):
         try:
             data = proxy_api("/proxies/" + quote(group, safe=""))
@@ -488,10 +490,10 @@ def status():
             latest = next((event for event in reversed(events) if event.get("group") == group), None)
             result[group] = {"now": data.get("now"), "leaf": leaf, "source": source_label(leaf),
                              "type": data.get("type"), "history": data.get("history", [])[-3:],
-                             "last_change": latest}
+                             "last_change": latest, "since": (runtime.get(group) or {}).get("since")}
         except Exception:
             result[group] = {"now": None, "leaf": None, "source": "不可用", "type": "unavailable",
-                             "history": [], "last_change": None}
+                             "history": [], "last_change": None, "since": None}
     return {"groups": result, "events": events[-20:], "versions": [path.name for path in sorted(VERSIONS.glob("*.yaml"), reverse=True)[:5]]}
 
 
@@ -505,6 +507,12 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta n
 const csrf='__CSRF__',poolNames=['HK-视频','JP-AI','SG-AI','US-AI','TG','Proxy'];let all=[],pools={},delays={};async function api(path,opt={}){let r=await fetch(new URL("/airport"+path,location.origin),{...opt,headers:{'Content-Type':'application/json','X-CSRF':csrf}}),d=await r.json();if(!r.ok)throw Error(d.error||'请求失败');return d}function esc(s){return String(s??'').replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}function metric(name){let x=delays[name];return x&&x.delay!=null?x.delay+' ms · 抖动 '+x.jitter+' · '+x.success+'/3':''}function tab(id,b){document.querySelectorAll('.panel').forEach(function(x){x.classList.remove('on')});document.querySelectorAll('.tabs button').forEach(function(x){x.classList.remove('on')});document.querySelector('#'+id).classList.add('on');b.classList.add('on');if(id==='runtime')loadStatus()}function slotCard(s){let imported=s.imported;return '<article class="card"><div class="card-head"><h2>'+esc(s.label)+'</h2><div class="source-state '+(imported?'':'empty')+'">'+(imported?'已导入 '+s.nodes+' 个有效节点':'尚未导入')+'</div><div class="muted">'+(imported?esc(s.updated_at):'导入后可在候选池中选择节点')+'</div></div><div class="form"><input id="url-'+s.slot+'" type="url" autocomplete="off" placeholder="HTTPS 原生 Clash/Mihomo 订阅链接"><div class="actions"><button class="btn primary" onclick="imp(\''+s.slot+'\')">直连导入或替换</button><button class="btn danger" onclick="dropSlot(\''+s.slot+'\')">清空</button></div><div id="msg-'+s.slot+'" class="status"></div></div></article>'}async function load(){let d=await api('/api/state');document.querySelector('#slots').innerHTML=d.slots.map(slotCard).join('');all=d.nodes;pools=d.pools;delays=Object.fromEntries((d.tests&&d.tests.results||[]).map(function(x){return [x.name,x]}));if(d.tests&&d.tests.tested_at)document.querySelector('#testStatus').textContent='上次稳定性测速：'+d.tests.tested_at;renderPools()}function options(pool){let q=(document.querySelector('#filter')&&document.querySelector('#filter').value.toLowerCase())||'';return all.filter(function(n){return !pools[pool].includes(n.name)&&n.name.toLowerCase().includes(q)}).map(function(n){return '<option value="'+encodeURIComponent(n.name)+'">'+esc(n.name)+(metric(n.name)?' · '+metric(n.name):'')+'</option>'}).join('')}function renderPools(){document.querySelector('#poolGrid').innerHTML=poolNames.map(function(pool){let rows=pools[pool].map(function(name,i){return '<div class="node"><div class="node-name">'+esc(name)+(metric(name)?'<span class="delay">'+metric(name)+'</span>':'')+'</div><div class="node-tools"><button class="icon-btn" aria-label="上移" title="上移" onclick="move(\''+pool+'\','+i+',-1)">↑</button><button class="icon-btn" aria-label="下移" title="下移" onclick="move(\''+pool+'\','+i+',1)">↓</button><button class="icon-btn remove" aria-label="移除" title="移除" onclick="removeNode(\''+pool+'\','+i+')">×</button></div></div>'}).join('');return '<article class="card pool-card"><div class="card-head"><h2>'+esc(pool)+'</h2><span class="count">'+pools[pool].length+'/5</span></div><div class="add-node"><select id="sel-'+pool+'">'+options(pool)+'</select><button class="btn" onclick="add(\''+pool+'\')">加入</button></div>'+rows+'</article>'}).join('')}function add(p){if(pools[p].length>=5)return alert('每个池最多 5 个节点');let e=document.querySelector('#sel-'+p);if(e.value)pools[p].push(decodeURIComponent(e.value));renderPools()}function move(p,i,d){let j=i+d;if(j<0||j>=pools[p].length)return;let x=pools[p][i];pools[p][i]=pools[p][j];pools[p][j]=x;renderPools()}function removeNode(p,i){if(pools[p].length===1)return alert('候选池至少保留一个节点');pools[p].splice(i,1);renderPools()}document.querySelector('#filter').addEventListener('input',renderPools);async function imp(s){let m=document.querySelector('#msg-'+s);try{m.textContent='正在直连拉取、过滤并验证…';m.className='status';await api('/api/import',{method:'POST',body:JSON.stringify({slot:s,url:document.querySelector('#url-'+s).value.trim()})});m.textContent='导入和配置验证已完成';await load()}catch(e){m.textContent=e.message;m.className='status bad'}}async function dropSlot(s){if(!confirm('清空后仍须保证每个业务池至少有一个节点，确定继续？'))return;try{await api('/api/remove',{method:'POST',body:JSON.stringify({slot:s})});await load()}catch(e){alert(e.message)}}async function testAll(){let status=document.querySelector('#testStatus');try{status.textContent='正在对每个节点连续测试三次，本次操作完成后即停止…';status.className='status';let d=await api('/api/test-all',{method:'POST',body:'{}'});delays=Object.fromEntries(d.results.map(function(x){return [x.name,x]}));status.textContent='测速完成：'+d.results.filter(function(x){return x.ok}).length+'/'+d.results.length+' 稳定可用';renderPools()}catch(e){status.textContent=e.message;status.className='status bad'}}async function save(){let status=document.querySelector('#testStatus');try{pools=await api('/api/pools',{method:'POST',body:JSON.stringify({pools:pools})});status.textContent='配置校验和重启验证均通过，主力节点已排在备用前';status.className='status';renderPools();await loadStatus()}catch(e){status.textContent=e.message;status.className='status bad'}}async function rollback(){try{pools=await api('/api/rollback',{method:'POST',body:'{}'});document.querySelector('#testStatus').textContent='已验证并恢复上一版候选池';renderPools()}catch(e){alert(e.message)}}async function loadStatus(){let d=await api('/api/status');document.querySelector('#runtimeGrid').innerHTML=Object.entries(d.groups).map(function(entry){let k=entry[0],v=entry[1];return '<article class="card runtime-card"><h2>'+esc(k)+'</h2><div><span class="pill">'+esc(v.type)+'</span><span class="pill">'+esc(v.source)+'</span></div><div class="runtime-line muted">策略</div><div class="runtime-line"><b>'+esc(v.now||'未选择')+'</b></div><div class="runtime-line muted">实际节点</div><div class="runtime-line"><b>'+esc(v.leaf||'未选择')+'</b></div><div class="runtime-line muted">'+(v.history.map(function(x){return x.delay+' ms'}).join(' · ')||'暂无探测记录')+'</div></article>'}).join('');document.querySelector('#events').innerHTML=d.events.length?d.events.slice().reverse().map(function(e){return '<div class="event"><b>'+esc(e.group)+'</b>：'+esc(e.from)+' → '+esc(e.to)+'<div class="muted">'+esc(e.time)+' · '+esc(e.reason)+'</div></div>'}).join(''):'<div class="event muted">尚无自动切换记录</div>'}load()
 </script></body></html>'''
 PAGE = PAGE.replace('<div class="eyebrow">PROXY SOURCES</div>', '')
+PAGE = PAGE.replace('href="http://__FAMILY_PROXY_IP__:18091/"', 'href="/dns/"')
+_history_marker = "<div class=\"runtime-line muted\">'+(v.history.map"
+_stable_marker = "<div class=\"runtime-line muted\">稳定保持：'+esc(v.since||'等待记录')+'</div>"
+if _history_marker not in PAGE:
+    raise RuntimeError("runtime status marker missing from page template")
+PAGE = PAGE.replace(_history_marker, _stable_marker + _history_marker, 1)
 # Keep the subscription landing page small. The full node catalogue is only
 # needed once the user opens the candidate-pool tab.
 PAGE = PAGE.replace("if(id==='runtime')loadStatus()", "if(id==='pools')loadPools();if(id==='runtime')loadStatus()")

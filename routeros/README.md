@@ -1,6 +1,6 @@
 # RouterOS 手工操作
 
-这些脚本对应控制器自动创建的带 `family-mihomo-auto` 注释的对象。每次变更只能选择一种方式：管理页面，或本目录的手工模板。不要对同一设备混用两种方式。
+这些脚本对应控制器的共享 IPv4 策略和每设备 IPv6 防漏对象。每次变更只能选择一种方式：管理页面，或本目录的手工模板。不要对同一设备混用两种方式。
 
 执行顺序：
 
@@ -17,4 +17,4 @@ sudo systemctl status family-mihomo-tproxy-auto
 
 6. 验证国内应用、局域网服务和外网策略。异常时先运行 `99-remove-device-template.rsc`，再在旁路主机删除对应 IP 并重新同步 TPROXY。
 
-不要执行会全局禁用 FastTrack、重写默认路由、全网 DNS 劫持或直接删除全部 mangle/NAT 的命令。这里的规则只应作用于单个明确的设备 IP。
+不要执行会全局禁用 FastTrack、重写默认路由、全网 DNS 劫持或直接删除全部 mangle/NAT 的命令。共享规则只匹配 `family_mihomo_devices`，单设备撤出只删除它的地址列表成员和 IPv6 防漏项。
