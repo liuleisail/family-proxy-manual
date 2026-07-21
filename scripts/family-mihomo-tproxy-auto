@@ -103,7 +103,7 @@ sync_rules() {
 
   nft add table inet "$NFT_TABLE" 2>/dev/null || true
   local rules
-  rules=$(mktemp /run/family-mihomo-direct.XXXXXX.nft)
+  rules=$(mktemp /etc/family-proxy-ui/.family-mihomo-direct.XXXXXX.nft)
   trap 'rm -f "$rules"' RETURN
   write_nft_rules "$rules"
   nft -c -f "$rules"
