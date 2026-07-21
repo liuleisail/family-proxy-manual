@@ -66,7 +66,7 @@ write_nft_rules() {
   }
 
   {
-    echo "flush table inet $NFT_TABLE"
+    echo "delete table inet $NFT_TABLE"
     echo "table inet $NFT_TABLE {"
     echo "  set managed4 { type ipv4_addr; elements = {"
     if (( managed_count )); then
