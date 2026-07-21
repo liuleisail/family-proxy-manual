@@ -32,6 +32,8 @@ for port, path in checks:
                         'retention_seconds': 86_400}
             if payload.get('limits') != expected:
                 raise SystemExit(f'capture limits are unexpected: {payload.get("limits")}')
+            if 'live' not in payload:
+                raise SystemExit('capture live-view payload is missing')
 
 capture_dir = Path('/run/family-proxy-captures')
 if not capture_dir.is_dir():
