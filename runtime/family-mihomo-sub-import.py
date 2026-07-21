@@ -783,6 +783,12 @@ const csrf='__CSRF__',poolNames=['HK-视频','JP-AI','SG-AI','US-AI','TG','Proxy
 </script></body></html>'''
 PAGE = PAGE.replace('<div class="eyebrow">PROXY SOURCES</div>', '')
 PAGE = PAGE.replace('href="http://__FAMILY_PROXY_IP__:18091/"', 'href="/dns/"')
+_slot_card_start = PAGE.find("function slotCard(s){")
+_slot_card_end = PAGE.find("async function load(){", _slot_card_start)
+if _slot_card_start < 0 or _slot_card_end < 0:
+    raise RuntimeError("subscription card template marker missing")
+_slot_card_js = r'''function slotCard(s){let imported=s.imported;let removeButton=s.removable?'<button class="btn danger" onclick="deleteSource(\''+s.slot+'\')">删除机场</button>':'';return '<article class="card"><div class="card-head"><h2>'+esc(s.label)+'</h2><div class="source-state '+(imported?'':'empty')+'">'+(imported?'已导入 '+s.nodes+' 个有效节点':'尚未导入')+'</div><div class="muted">'+(imported?esc(s.updated_at):'导入后可在候选池中选择节点')+'</div></div><div class="form"><input id="url-'+s.slot+'" type="url" autocomplete="off" placeholder="HTTPS 原生 Clash/Mihomo 订阅链接"><div class="actions"><button class="btn primary" onclick="imp(\''+s.slot+'\')">直连导入或替换</button><button class="btn danger" onclick="dropSlot(\''+s.slot+'\')">清空节点</button>'+removeButton+'</div><div id="msg-'+s.slot+'" class="status"></div></div></article>'}'''
+PAGE = PAGE[:_slot_card_start] + _slot_card_js + PAGE[_slot_card_end:]
 PAGE = PAGE.replace('<div class="section-title"><h2>订阅来源</h2></div>',
                     '<div class="section-title"><h2>订阅来源</h2><button class="icon-btn" title="添加备用机场" aria-label="添加备用机场" onclick="addSource()">+</button></div>')
 _history_marker = "<div class=\"runtime-line muted\">'+(v.history.map"
@@ -799,10 +805,6 @@ PAGE = PAGE.replace("async function load(){let d=await api('/api/state');", "asy
 PAGE = PAGE.replace("renderPools()}function options", "catalogLoaded=true;renderPools()}async function loadSummary(){let d=await api('/api/state');document.querySelector('#slots').innerHTML=d.slots.map(slotCard).join('');pools=d.pools;if(d.tests&&d.tests.tested_at)document.querySelector('#testStatus').textContent='上次稳定性测速：'+d.tests.tested_at}async function loadPools(){if(catalogLoaded)return;try{await load();await refreshTestStatus()}catch(e){pageError(e)}}function pageError(e){let box=document.querySelector('#pageStatus');if(!box){box=document.createElement('div');box.id='pageStatus';box.className='status bad';document.querySelector('.intro').append(box)}box.innerHTML='页面数据加载失败。<button class=\"btn\" onclick=\"loadSummary().catch(pageError)\">重试</button>';console.error(e)}function options")
 PAGE = PAGE.replace("}load()", "}loadSummary().catch(pageError)")
 PAGE = PAGE.replace("async function imp(s){", "async function addSource(){try{await api('/api/sources',{method:'POST',body:'{}'});await loadSummary()}catch(e){pageError(e)}}async function deleteSource(s){if(!confirm('删除机场会清空该来源的节点；若节点正在被当前候选池使用，操作将被拒绝。确定删除？'))return;try{await api('/api/source-remove',{method:'POST',body:JSON.stringify({slot:s})});await loadSummary()}catch(e){alert(e.message)}}async function imp(s){")
-PAGE = PAGE.replace(
-    '''>清空</button></div><div id="msg-'+s.slot+'"''',
-    '''>清空节点</button>'+(s.removable?'<button class="btn danger" onclick="deleteSource(\''+s.slot+'\')">删除机场</button>':'')+'</div><div id="msg-'+s.slot+'"'''
-)
 PAGE = PAGE.replace("all=d.nodes;pools=d.pools;", "all=d.nodes;activePools=d.pools;suggestion=d.suggestions||null;pools=suggestion&&suggestion.generated_at?suggestion.pools:activePools;")
 PAGE = PAGE.replace('<button class="btn primary" onclick="testAll()">稳定性测速</button><button class="btn" onclick="save()">校验并应用</button>', '<button class="btn primary" onclick="testAll()">全量稳定性测速</button><button class="btn" onclick="confirmApply()">复测并生效</button>')
 PAGE = PAGE.replace('<div class="section-title"><h2>业务候选池</h2></div>', '<div class="section-title"><h2>待生效候选池</h2><span class="muted">测速建议不会自动替换当前出口</span></div>')
