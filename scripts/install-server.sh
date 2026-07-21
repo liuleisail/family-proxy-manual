@@ -43,12 +43,16 @@ install -m 755 /opt/family-proxy-ui/rendered/family-proxy-ui.py /opt/family-prox
 install -m 755 /opt/family-proxy-ui/rendered/family-mihomo-sub-import.py /opt/family-proxy-ui/family-mihomo-sub-import.py
 install -m 755 /opt/family-proxy-ui/rendered/family-proxy-gateway.py /opt/family-proxy-ui/family-proxy-gateway.py
 install -m 755 "$REPO_DIR/scripts/family-mihomo-tproxy-auto" /usr/local/sbin/family-mihomo-tproxy-auto
+install -m 755 "$REPO_DIR/scripts/refresh-cn-ipv4" /usr/local/sbin/refresh-family-cn-ipv4
 install -d -m 700 /etc/family-proxy-ui /var/lib/family-proxy/docker/family-mihomo-sub-import/providers
 install -m 600 /dev/null /etc/family-proxy-ui/managed-ips 2>/dev/null || true
+[[ -s /etc/family-proxy-ui/cn-ipv4.txt ]] || /usr/local/sbin/refresh-family-cn-ipv4 --no-sync
 [[ -s /etc/family-proxy-ui/gateway.secret ]] || { umask 077; head -c 48 /dev/urandom | base64 > /etc/family-proxy-ui/gateway.secret; }
 for unit in "$REPO_DIR"/systemd/*.service; do install -m 644 "$unit" /etc/systemd/system/; done
+for unit in "$REPO_DIR"/systemd/*.timer; do install -m 644 "$unit" /etc/systemd/system/; done
 systemctl daemon-reload
 systemctl enable family-proxy-ui family-mihomo-sub-import family-proxy-gateway family-mihomo-tproxy-auto
+systemctl enable --now family-cn-ipv4-refresh.timer
 echo "Installed control plane. Backup: $backup"
 if (( START )); then
   systemctl restart family-proxy-ui family-mihomo-sub-import family-proxy-gateway

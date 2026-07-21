@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Refresh the direct-routing IPv4 set from APNIC over the local, non-proxy path.
+set -Eeuo pipefail
+
+URL=https://ftp.apnic.net/stats/apnic/delegated-apnic-latest
+DEST=/etc/family-proxy-ui/cn-ipv4.txt
+raw=$(mktemp /tmp/delegated-apnic.XXXXXX)
+out=$(mktemp /tmp/cn-ipv4.XXXXXX)
+trap 'rm -f "$raw" "$out"' EXIT
+
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+  curl --noproxy '*' --fail --silent --show-error --location \
+  --connect-timeout 10 --max-time 300 "$URL" -o "$raw"
+
+python3 - "$raw" "$out" <<'PY'
+import ipaddress
+import pathlib
+import sys
+
+source, output = map(pathlib.Path, sys.argv[1:])
+networks = []
+for line in source.read_text(encoding="utf-8", errors="replace").splitlines():
+    fields = line.split("|")
+    if len(fields) < 7 or fields[1:3] != ["CN", "ipv4"]:
+        continue
+    if fields[6] not in {"allocated", "assigned"}:
+        continue
+    start = ipaddress.IPv4Address(fields[3])
+    count = int(fields[4])
+    end = ipaddress.IPv4Address(int(start) + count - 1)
+    networks.extend(ipaddress.summarize_address_range(start, end))
+
+collapsed = list(ipaddress.collapse_addresses(networks))
+if len(collapsed) < 1000:
+    raise SystemExit(f"APNIC validation failed: only {len(collapsed)} CN IPv4 networks")
+output.write_text("".join(f"{network}\n" for network in collapsed), encoding="ascii")
+print(f"CN IPv4 networks: {len(collapsed)}")
+PY
+
+install -d -m 700 "$(dirname "$DEST")"
+install -m 600 "$out" "$DEST"
+if [[ ${1:-} != --no-sync ]] && systemctl is-active --quiet family-mihomo-tproxy-auto; then
+  /usr/local/sbin/family-mihomo-tproxy-auto sync
+fi

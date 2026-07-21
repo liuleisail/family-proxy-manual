@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh family proxy China IPv4 direct-routing set
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=360
+ExecStart=/usr/local/sbin/refresh-family-cn-ipv4
