@@ -28,8 +28,11 @@ BASE = Path("__FAMILY_DOCKER_ROOT__")
 ROOT = BASE / "family-mihomo-sub-import"
 PROVIDERS = ROOT / "providers"
 MIHOMO_CONFIG = BASE / "family-mihomo-fallback/config.yaml"
-SLOTS = {"primary": "主力机场", "backup1": "备用机场 1", "backup2": "备用机场 2"}
-PREFIX = {"primary": "[主力] ", "backup1": "[备用1] ", "backup2": "[备用2] "}
+DEFAULT_SOURCES = [
+    {"slot": "primary", "label": "主力机场", "prefix": "[主力] "},
+    {"slot": "backup1", "label": "备用机场 1", "prefix": "[备用1] "},
+    {"slot": "backup2", "label": "备用机场 2", "prefix": "[备用2] "},
+]
 POOLS = {
     "HK-视频": ("hk", "香港", "hkg"),
     "JP-AI": ("jp", "日本", "jpn"),
@@ -47,6 +50,7 @@ PREVIOUS = PROVIDERS / "candidates.previous.json"
 LAST_TESTS = PROVIDERS / "last-tests.json"
 CONFIRM_TESTS = PROVIDERS / "last-confirm-tests.json"
 SUGGESTIONS = PROVIDERS / "pool-suggestions.json"
+SOURCES = PROVIDERS / "sources.json"
 RUNTIME_STATE = PROVIDERS / "runtime-state.json"
 RUNTIME_EVENTS = PROVIDERS / "runtime-events.json"
 VERSIONS = BASE / "family-mihomo-fallback/config-versions"
@@ -59,7 +63,6 @@ NOISE = re.compile(
 )
 OPENER = build_opener(ProxyHandler({}))
 MONITORED_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto")
-SOURCE_ORDER = {"[主力] ": 0, "[备用1] ": 1, "[备用2] ": 2}
 TEST_JOB_LOCK = threading.Lock()
 TEST_STATE_LOCK = threading.Lock()
 TEST_STATE = {
@@ -97,8 +100,36 @@ def atomic_json(path, value):
     os.replace(temporary, path)
 
 
+def sources():
+    data = read_json(SOURCES, DEFAULT_SOURCES)
+    if not isinstance(data, list) or not data:
+        return list(DEFAULT_SOURCES)
+    valid = []
+    seen = set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        slot = item.get("slot", "")
+        label = item.get("label", "")
+        prefix = item.get("prefix", "")
+        if (not isinstance(slot, str) or not re.fullmatch(r"(?:primary|backup[1-9][0-9]*)", slot)
+                or slot in seen or not isinstance(label, str) or not isinstance(prefix, str)):
+            continue
+        valid.append({"slot": slot, "label": label[:40], "prefix": prefix[:40]})
+        seen.add(slot)
+    return valid or list(DEFAULT_SOURCES)
+
+
+def source_map():
+    return {item["slot"]: item for item in sources()}
+
+
+def source_slots():
+    return [item["slot"] for item in sources()]
+
+
 def provider_path(slot):
-    if slot not in SLOTS:
+    if slot not in source_map():
         raise ValueError("无效机场槽位")
     return PROVIDERS / f"{slot}.yaml"
 
@@ -121,12 +152,13 @@ def slot_state(slot):
     try:
         return json.loads(meta.read_text())
     except (OSError, json.JSONDecodeError):
-        return {"slot": slot, "label": SLOTS[slot], "imported": False, "nodes": 0}
+        return {"slot": slot, "label": source_map()[slot]["label"], "imported": False, "nodes": 0}
 
 
 def nodes():
     result = []
-    for slot in SLOTS:
+    sources_by_slot = source_map()
+    for slot in source_slots():
         path = provider_path(slot)
         if not path.exists():
             continue
@@ -134,7 +166,8 @@ def nodes():
         for item in document.get("proxies", []):
             name = str(item.get("name", ""))
             if name and not NOISE.search(name):
-                result.append({"name": PREFIX[slot] + name, "raw": name, "source": slot, "label": SLOTS[slot]})
+                result.append({"name": sources_by_slot[slot]["prefix"] + name, "raw": name,
+                               "source": slot, "label": sources_by_slot[slot]["label"]})
     return result
 
 
@@ -184,7 +217,8 @@ def test_score(result):
 def rank_pool_candidates(entries):
     """Keep stable primary nodes first, then fill with stable backups."""
     chosen = []
-    for source, limit in (("primary", 3), ("backup1", 1), ("backup2", 1)):
+    for position, source in enumerate(source_slots()):
+        limit = 3 if position == 0 else 1
         chosen.extend(sorted((entry for entry in entries if entry["source"] == source),
                              key=lambda entry: (entry["score"], entry["name"]))[:limit])
     for entry in sorted(entries, key=lambda entry: (source_rank(entry["name"]), entry["score"], entry["name"])):
@@ -220,18 +254,16 @@ def seed_pools():
     available = nodes()
     seeded = {}
     for pool, words in POOLS.items():
-        matches = [n for n in available if any(word.casefold() in n["raw"].casefold() for word in words)]
-        primary = [n for n in matches if n["source"] == "primary"]
-        primary.sort(key=lambda n: ("高级" not in n["raw"], "标准" not in n["raw"], n["raw"]))
-        backup1 = [n for n in matches if n["source"] == "backup1"]
-        backup2 = [n for n in matches if n["source"] == "backup2"]
-        seeded[pool] = [n["name"] for n in (primary[:3] + backup1[:1] + backup2[:1])][:5]
+        matches = [n for n in available if pool_matches(pool, n)]
+        seeded[pool] = rank_pool_candidates([
+            {"name": n["name"], "source": n["source"], "score": 0} for n in matches
+        ])
     atomic_json(CANDIDATES, seeded)
     return seeded
 
 
 def source_rank(name):
-    return next((rank for prefix, rank in SOURCE_ORDER.items() if name.startswith(prefix)), 99)
+    return next((rank for rank, source in enumerate(sources()) if name.startswith(source["prefix"])), 99)
 
 
 def fallback(name, selected, url, interval, expected_status=None):
@@ -291,7 +323,8 @@ def generate_config(selected=None):
     selected = {name: list(selected.get(name, [])) for name in POOLS}
     config = yaml.safe_load(MIHOMO_CONFIG.read_text())
     flattened = []
-    for slot in SLOTS:
+    sources_by_slot = source_map()
+    for slot in source_slots():
         path = provider_path(slot)
         if not path.exists():
             continue
@@ -300,7 +333,7 @@ def generate_config(selected=None):
             if not isinstance(original, dict) or not original.get("name") or NOISE.search(str(original["name"])):
                 continue
             item = dict(original)
-            item["name"] = PREFIX[slot] + str(item["name"])
+            item["name"] = sources_by_slot[slot]["prefix"] + str(item["name"])
             flattened.append(item)
     config["proxies"] = flattened
     hk, jp, sg, us, other_ai, tg, proxy = (selected[name] for name in POOLS)
@@ -371,7 +404,7 @@ def apply_provider(slot, cleaned, count):
     previous_candidates = CANDIDATES.read_bytes() if CANDIDATES.exists() else b"{}"
     previous_config = MIHOMO_CONFIG.read_bytes()
     os.replace(temporary, path)
-    meta = {"slot": slot, "label": SLOTS[slot], "imported": True, "nodes": count,
+    meta = {"slot": slot, "label": source_map()[slot]["label"], "imported": True, "nodes": count,
             "updated_at": datetime.now().astimezone().isoformat()}
     try:
         current = pools()
@@ -411,6 +444,18 @@ def import_slot(slot, url):
         raise ValueError("订阅文件过大")
     cleaned, count = clean_provider(raw)
     return apply_provider(slot, cleaned, count)
+
+
+def add_source():
+    current = sources()
+    used = {item["slot"] for item in current}
+    number = 1
+    while f"backup{number}" in used:
+        number += 1
+    source = {"slot": f"backup{number}", "label": f"备用机场 {number}", "prefix": f"[备用{number}] "}
+    current.append(source)
+    atomic_json(SOURCES, current)
+    return {**source, "imported": False, "nodes": 0}
 
 
 def clear_slot(slot):
@@ -714,6 +759,8 @@ const csrf='__CSRF__',poolNames=['HK-视频','JP-AI','SG-AI','US-AI','TG','Proxy
 </script></body></html>'''
 PAGE = PAGE.replace('<div class="eyebrow">PROXY SOURCES</div>', '')
 PAGE = PAGE.replace('href="http://__FAMILY_PROXY_IP__:18091/"', 'href="/dns/"')
+PAGE = PAGE.replace('<div class="section-title"><h2>订阅来源</h2></div>',
+                    '<div class="section-title"><h2>订阅来源</h2><button class="icon-btn" title="添加备用机场" aria-label="添加备用机场" onclick="addSource()">+</button></div>')
 _history_marker = "<div class=\"runtime-line muted\">'+(v.history.map"
 _stable_marker = "<div class=\"runtime-line muted\">稳定保持：'+esc(v.since||'等待记录')+'</div>"
 if _history_marker not in PAGE:
@@ -727,6 +774,7 @@ PAGE = PAGE.replace("poolNames=['HK-视频','JP-AI','SG-AI','US-AI','TG','Proxy'
 PAGE = PAGE.replace("async function load(){let d=await api('/api/state');", "async function load(){let d=await api('/api/nodes');")
 PAGE = PAGE.replace("renderPools()}function options", "catalogLoaded=true;renderPools()}async function loadSummary(){let d=await api('/api/state');document.querySelector('#slots').innerHTML=d.slots.map(slotCard).join('');pools=d.pools;if(d.tests&&d.tests.tested_at)document.querySelector('#testStatus').textContent='上次稳定性测速：'+d.tests.tested_at}async function loadPools(){if(catalogLoaded)return;try{await load();await refreshTestStatus()}catch(e){pageError(e)}}function pageError(e){let box=document.querySelector('#pageStatus');if(!box){box=document.createElement('div');box.id='pageStatus';box.className='status bad';document.querySelector('.intro').append(box)}box.innerHTML='页面数据加载失败。<button class=\"btn\" onclick=\"loadSummary().catch(pageError)\">重试</button>';console.error(e)}function options")
 PAGE = PAGE.replace("}load()", "}loadSummary().catch(pageError)")
+PAGE = PAGE.replace("async function imp(s){", "async function addSource(){try{await api('/api/sources',{method:'POST',body:'{}'});await loadSummary()}catch(e){pageError(e)}}async function imp(s){")
 PAGE = PAGE.replace("all=d.nodes;pools=d.pools;", "all=d.nodes;activePools=d.pools;suggestion=d.suggestions||null;pools=suggestion&&suggestion.generated_at?suggestion.pools:activePools;")
 PAGE = PAGE.replace('<button class="btn primary" onclick="testAll()">稳定性测速</button><button class="btn" onclick="save()">校验并应用</button>', '<button class="btn primary" onclick="testAll()">全量稳定性测速</button><button class="btn" onclick="confirmApply()">复测并生效</button>')
 PAGE = PAGE.replace('<div class="section-title"><h2>业务候选池</h2></div>', '<div class="section-title"><h2>待生效候选池</h2><span class="muted">测速建议不会自动替换当前出口</span></div>')
@@ -769,10 +817,10 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/api/state":
             tests = read_json(LAST_TESTS, {})
-            self.reply(200, {"slots": [slot_state(s) for s in SLOTS], "pools": pools(),
+            self.reply(200, {"slots": [slot_state(s) for s in source_slots()], "pools": pools(),
                              "tests": {"tested_at": tests.get("tested_at")}, "suggestions": suggestions()})
         elif path == "/api/nodes":
-            self.reply(200, {"slots": [slot_state(s) for s in SLOTS], "nodes": nodes(), "pools": pools(),
+            self.reply(200, {"slots": [slot_state(s) for s in source_slots()], "nodes": nodes(), "pools": pools(),
                              "tests": read_json(LAST_TESTS, {}), "suggestions": suggestions()})
         elif path == "/api/test-status":
             self.reply(200, test_status())
@@ -796,6 +844,7 @@ class Handler(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
             if path == "/api/import": result = import_slot(body["slot"], body.get("url", ""))
             elif path == "/api/remove": result = clear_slot(body["slot"])
+            elif path == "/api/sources": result = add_source()
             elif path == "/api/pools": result = save_pools(body.get("pools", {}))
             elif path == "/api/retest-apply": result = start_retest_apply(body.get("pools", {}))
             elif path == "/api/rollback": result = rollback_pools()
@@ -808,7 +857,9 @@ class Handler(BaseHTTPRequestHandler):
 
 def migrate():
     PROVIDERS.mkdir(parents=True, exist_ok=True)
-    for slot in SLOTS:
+    if not SOURCES.exists():
+        atomic_json(SOURCES, DEFAULT_SOURCES)
+    for slot in source_slots():
         path = provider_path(slot)
         if path.exists():
             cleaned, count = clean_provider(path.read_bytes())
