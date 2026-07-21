@@ -2,9 +2,47 @@
 
 这是一套面向家庭网络的选择性旁路代理运维说明。它的目标是：只让手工选中的设备使用旁路服务，其余设备保持原有网络行为；订阅、候选节点、DNS 和规则均可在局域网管理页面中独立维护。
 
-可重复部署与 RouterOS 手工命令见 [DEPLOYMENT.md](DEPLOYMENT.md)。
-
 > 本文只描述操作流程，不包含可用订阅、账户密码、私钥、Cookie、真实公网域名或家庭网络地址。
+
+## 人工部署快速开始
+
+首次部署应在一台已安装 Docker、Docker Compose 插件和 `systemd` 的旁路服务器上完成。安装器只部署控制平面，不会自动改 RouterOS、导入订阅、接管设备或覆盖已有同名 Docker 容器。
+
+### 1. 获取项目并填写本地私密配置
+
+```bash
+git clone https://github.com/liuleisail/family-proxy-manual.git
+cd family-proxy-manual
+sudo install -d -m 700 /etc/family-proxy-ui
+sudo install -m 600 config/router.env.example /etc/family-proxy-ui/router.env
+sudoedit /etc/family-proxy-ui/router.env
+```
+
+只需要填写本机 LAN、旁路主机 IP、RouterOS API 地址/账号/密码和管理页账号/密码。`router.env` 不会被提交；首次安装后明文 `UI_PASSWORD` 会自动转换为哈希并删除。
+
+### 2. 部署控制平面与 Mihomo
+
+```bash
+sudo ./scripts/install-server.sh
+sudo ./scripts/install-mihomo-container.sh
+sudo ./scripts/install-server.sh --start
+sudo ./scripts/verify-server.sh
+```
+
+第一条命令会生成带时间戳的本地备份、渲染程序、安装 systemd 服务，但不启动服务。第二条命令只在不存在 `family-mihomo-fallback` 容器时创建基础 Mihomo 容器。第三、四条命令启动服务并做本机检查。
+
+DNS 必须先由服务器上现有的 MosDNS/DNS 服务监听旁路主机的 `53` 端口；本项目故意不自动接管端口 `53`，避免影响现有家庭 DNS。
+
+### 3. 准备 RouterOS，再接管测试设备
+
+1. 先在 RouterOS 运行 `routeros/01-preflight-and-backup.rsc`，保存文本导出和二进制备份。
+2. 填写 LAN 网段和旁路主机 IP 后，运行 `routeros/02-prepare-controller.rsc`。它只创建禁用锚点和本地网段地址列表，不接管任何设备。
+3. 确保 RouterOS API 仅允许旁路主机访问，再打开局域网管理页导入订阅、筛选候选池。
+4. 仅加入一台测试设备，验证国内 App、局域网服务和外网服务；通过后再加入其它设备。
+
+管理页不可用时才使用 `routeros/03-enable-device-template.rsc` 手工接管单台设备；回滚使用 `routeros/99-remove-device-template.rsc`。同一设备不能同时由网页和手工 RouterOS 模板管理。
+
+完整的部署、升级与恢复流程见 [DEPLOYMENT.md](DEPLOYMENT.md)，RouterOS 命令说明见 [routeros/README.md](routeros/README.md)。
 
 ## 一、使用边界
 
