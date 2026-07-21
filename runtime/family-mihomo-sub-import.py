@@ -800,9 +800,8 @@ PAGE = PAGE.replace("renderPools()}function options", "catalogLoaded=true;render
 PAGE = PAGE.replace("}load()", "}loadSummary().catch(pageError)")
 PAGE = PAGE.replace("async function imp(s){", "async function addSource(){try{await api('/api/sources',{method:'POST',body:'{}'});await loadSummary()}catch(e){pageError(e)}}async function deleteSource(s){if(!confirm('删除机场会清空该来源的节点；若节点正在被当前候选池使用，操作将被拒绝。确定删除？'))return;try{await api('/api/source-remove',{method:'POST',body:JSON.stringify({slot:s})});await loadSummary()}catch(e){alert(e.message)}}async function imp(s){")
 PAGE = PAGE.replace(
-    '''<button class="btn danger" onclick="dropSlot(\''+s.slot+'\')">清空</button>''',
-    '''<button class="btn danger" onclick="dropSlot(\''+s.slot+'\')">清空节点</button>'+
-    (s.removable?'<button class="btn danger" onclick="deleteSource(\''+s.slot+'\')">删除机场</button>':'')+'''
+    '''>清空</button></div><div id="msg-'+s.slot+'"''',
+    '''>清空节点</button>'+(s.removable?'<button class="btn danger" onclick="deleteSource(\''+s.slot+'\')">删除机场</button>':'')+'</div><div id="msg-'+s.slot+'"'''
 )
 PAGE = PAGE.replace("all=d.nodes;pools=d.pools;", "all=d.nodes;activePools=d.pools;suggestion=d.suggestions||null;pools=suggestion&&suggestion.generated_at?suggestion.pools:activePools;")
 PAGE = PAGE.replace('<button class="btn primary" onclick="testAll()">稳定性测速</button><button class="btn" onclick="save()">校验并应用</button>', '<button class="btn primary" onclick="testAll()">全量稳定性测速</button><button class="btn" onclick="confirmApply()">复测并生效</button>')
