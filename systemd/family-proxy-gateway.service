@@ -1,0 +1,20 @@
+[Unit]
+Description=Family proxy unified management gateway
+After=network-online.target family-proxy-ui.service family-mihomo-sub-import.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/family-proxy-ui/router.env
+ExecStart=/usr/bin/python3 /opt/family-proxy-ui/family-proxy-gateway.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/family-proxy-ui
+
+[Install]
+WantedBy=multi-user.target

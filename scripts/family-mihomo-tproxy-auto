@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Synchronize only IPs listed in /etc/family-proxy-ui/managed-ips.
+set -Eeuo pipefail
+
+CONFIG=/etc/family-proxy-ui/router.env
+STATE=/etc/family-proxy-ui/managed-ips
+CHAIN=FAMILY_MIHOMO_AUTO
+source_config() {
+  while IFS='=' read -r key value; do
+    [[ -z "$key" || "$key" == \#* ]] && continue
+    case "$key" in FAMILY_LAN_PREFIX) FAMILY_LAN_PREFIX=$value;; esac
+  done < "$CONFIG"
+  [[ ${FAMILY_LAN_PREFIX:-} == *\. ]] || { echo "FAMILY_LAN_PREFIX invalid" >&2; exit 1; }
+}
+clear_runtime() {
+  while iptables -t mangle -D PREROUTING -j "$CHAIN" 2>/dev/null; do :; done
+  iptables -t mangle -F "$CHAIN" 2>/dev/null || true
+  iptables -t mangle -X "$CHAIN" 2>/dev/null || true
+  ip -o rule show | awk -F: '$1 >= 3000 && $1 <= 3254 {gsub(/ /,"",$1); print $1}' | while read -r pref; do ip rule del pref "$pref" 2>/dev/null || true; done
+  awk '$2 ~ /^family_mihomo_auto_/ {print $2}' /etc/iproute2/rt_tables 2>/dev/null | while read -r table; do ip route flush table "$table" 2>/dev/null || true; done
+}
+valid_ip() {
+  [[ $1 == "$FAMILY_LAN_PREFIX"* ]] || return 1
+  local last=${1##*.}
+  [[ $last =~ ^[0-9]+$ && $last -ge 2 && $last -le 254 ]]
+}
+sync() {
+  source_config
+  for _ in $(seq 1 30); do ss -lnt | grep -Eq '(:|\.)7893\b' && break; sleep 2; done
+  ss -lnt | grep -Eq '(:|\.)7893\b' || { echo "Mihomo TPROXY listener not ready" >&2; exit 1; }
+  clear_runtime
+  iptables -t mangle -N "$CHAIN" 2>/dev/null || true
+  iptables -t mangle -F "$CHAIN"
+  install -m 600 /dev/null "$STATE" 2>/dev/null || true
+  while IFS= read -r ip; do
+    valid_ip "$ip" || continue
+    local last=${ip##*.} table="family_mihomo_auto_$last" pref=$((3000 + last)) mark=$((0x2000 + last)) hex
+    hex=$(printf '%x' "$mark")
+    grep -q "[[:space:]]$table$" /etc/iproute2/rt_tables || printf '%s %s\n' "$pref" "$table" >> /etc/iproute2/rt_tables
+    for cidr in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4; do iptables -t mangle -A "$CHAIN" -s "$ip" -d "$cidr" -j RETURN; done
+    for proto in tcp udp; do iptables -t mangle -A "$CHAIN" -s "$ip" -p "$proto" -m addrtype ! --dst-type LOCAL -j TPROXY --on-port 7893 --tproxy-mark "0x$hex/0xffffffff"; done
+    ip route replace local 0.0.0.0/0 dev lo table "$table"
+    ip rule del pref "$pref" 2>/dev/null || true
+    ip rule add pref "$pref" fwmark "0x$hex/0xffffffff" lookup "$table"
+  done < "$STATE"
+  iptables -t mangle -A PREROUTING -j "$CHAIN"
+}
+case "${1:-sync}" in sync) sync;; stop) clear_runtime;; *) exit 2;; esac

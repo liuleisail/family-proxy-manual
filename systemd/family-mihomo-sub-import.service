@@ -1,0 +1,21 @@
+[Unit]
+Description=Family Mihomo direct subscription importer
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/family-proxy-ui/router.env
+Environment="http_proxy=" "https_proxy=" "all_proxy=" "HTTP_PROXY=" "HTTPS_PROXY=" "ALL_PROXY="
+ExecStart=/usr/bin/python3 /opt/family-proxy-ui/family-mihomo-sub-import.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/family-proxy-ui /var/lib/family-proxy
+
+[Install]
+WantedBy=multi-user.target

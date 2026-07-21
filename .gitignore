@@ -2,6 +2,9 @@
 .env
 *.env
 router.env
+gateway.secret
+managed-ips
+device-preferences.json
 *.secret
 *.key
 *.pem
@@ -21,3 +24,6 @@ logs/
 volumes/
 zdocker/
 docker-data/
+cache.db
+__pycache__/
+*.pyc

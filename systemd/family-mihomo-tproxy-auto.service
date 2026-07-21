@@ -1,0 +1,13 @@
+[Unit]
+Description=TPROXY interception for Family Proxy UI managed devices
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/family-mihomo-tproxy-auto sync
+ExecStop=/usr/local/sbin/family-mihomo-tproxy-auto stop
+
+[Install]
+WantedBy=multi-user.target
