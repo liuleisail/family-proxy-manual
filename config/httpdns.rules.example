@@ -1,0 +1,19 @@
+# Curated HTTPDNS endpoints. Extend only after application regression testing.
+||aedns.weixin.qq.com^
+||dns.weixin.qq.com^
+||dns.weixin.qq.com.cn^
+||dns.jd.com^
+||httpdns.alicdn.com^
+||httpdns-api.aliyuncs.com^
+||httpdns-sc.aliyuncs.com^
+||resolvers-cn.httpdns.aliyuncs.com^
+||httpdns.baidu.com^
+||httpdns.baidubce.com^
+||httpdns.n.shifen.com^
+||httpsdns.baidu.com^
+||dig.bdurl.net^
+||dig.zjurl.cn^
+||httpdns.volcengineapi.com^
+||httpdns.meituan.com^
+||httpdnsmultiapi.meituan.com^
+||resolver.msg.xiaomi.net^

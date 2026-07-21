@@ -33,6 +33,8 @@ sudo ./scripts/verify-server.sh
 
 DNS 必须先由服务器上现有的 MosDNS/DNS 服务监听旁路主机的 `53` 端口；本项目故意不自动接管端口 `53`，避免影响现有家庭 DNS。
 
+MosDNS-T 的推荐加固配置见 [MOSDNS.md](MOSDNS.md)。其中包含分流前总缓存的处理、国内外独立缓存、规则优先级、HTTPDNS 精简清单、自动更新校验和回滚要求。
+
 ### 3. 准备 RouterOS，再接管测试设备
 
 1. 先在 RouterOS 运行 `routeros/01-preflight-and-backup.rsc`，保存文本导出和二进制备份。
@@ -156,6 +158,8 @@ DNS 是独立功能页，但与其它页面共用管理入口和登录状态。�
 2. 接管设备的 DNS 是否真正经过本地 DNS 服务；
 3. 路由器是否有遗留的 DNS 重定向或旧代理规则；
 4. IPv6 是否绕过或与当前规则面冲突。
+
+可用 `scripts/verify-dns-routing.sh` 对固定国内外域名执行只读回归。脚本要求 MosDNS 审计 API 可访问，用实际 `effective_tag` 与 `final_upstream` 判断方向，而不只检查是否返回 IP。
 
 ## 七、日常健康检查
 
