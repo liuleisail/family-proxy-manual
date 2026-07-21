@@ -122,6 +122,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/airport/"):
             suffix = path[len("/airport"):]
             return ("backend", "127.0.0.1", 18090, suffix + ("?" + query if query else ""))
+        if path.startswith("/dns/maintenance-api/"):
+            suffix = path[len("/dns/maintenance-api"):]
+            return ("backend", "127.0.0.1", 18102, suffix + ("?" + query if query else ""))
         if path.startswith("/dns/"):
             suffix = path[len("/dns"):]
             return ("backend", "__FAMILY_PROXY_IP__", 18091, suffix + ("?" + query if query else ""))

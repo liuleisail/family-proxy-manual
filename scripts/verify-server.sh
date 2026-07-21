@@ -30,6 +30,7 @@ spec.loader.exec_module(gateway)
 handler = gateway.Handler.__new__(gateway.Handler)
 handler.headers = {}
 legacy_routes = {
+    '/dns/maintenance-api/metrics': 18102,
     '/api/v1/system/health': 18091,
     '/api/v2/audit/stats': 18091,
     '/plugins/geosite_cn/config': 18091,
