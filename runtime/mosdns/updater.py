@@ -2,6 +2,7 @@
 """Restricted Docker image updater for the family MosDNS service."""
 
 import fcntl
+import hashlib
 import ipaddress
 import json
 import os
@@ -36,10 +37,16 @@ DEFAULT_CONFIG = {
     "rule_auto_enabled": True,
     "rule_interval_hours": 24,
     "last_rule_check": 0,
+    "adblock_mode": "off",
+    "adblock_auto_enabled": True,
+    "adblock_interval_hours": 24,
+    "last_adblock_check": 0,
 }
 CORE_API = os.environ.get("FAMILY_MOSDNS_CORE_API", "http://172.31.53.2:9099").rstrip("/")
 DNS_SERVER = os.environ.get("FAMILY_MOSDNS_DNS_SERVER", "127.0.0.1")
 DEFAULT_SOCKS5 = os.environ.get("FAMILY_MOSDNS_SOCKS5", "172.31.53.1:7890")
+ADBLOCK_RULES_HOST = os.environ.get("FAMILY_MOSDNS_RULES_HOST", DEFAULT_SOCKS5.rsplit(":", 1)[0])
+ADBLOCK_RULES_PORT = int(os.environ.get("FAMILY_MOSDNS_RULES_PORT", "18103"))
 RULE_SOURCES = {
     "geosite_cn": {"label": "国内域名", "minimum": 80000, "minimum_ratio": 0.7},
     "geosite_no_cn": {"label": "国外域名", "minimum": 15000, "minimum_ratio": 0.7},
@@ -63,6 +70,42 @@ ROUTE_TAGS = {
     "domestic": ("白名单", "记忆直连", "订阅直连"),
     "foreign": ("灰名单", "记忆代理", "订阅代理", "!CN fakeip filter"),
 }
+
+ADBLOCK_STATUS_PATH = STATE_DIR / "mosdns-adblock-status.json"
+ADBLOCK_PENDING_ALLOWLIST_PATH = STATE_DIR / "mosdns-adblock-allow.pending"
+ADBLOCK_ALLOWLIST_PATH = COMPOSE_DIR / "web/family-adblock-allow.txt"
+ADBLOCK_SOURCES = {
+    "cn_ads": {
+        "label": "国内精简广告",
+        "name": "family-cn-ads-lite",
+        "url": "https://adrules.top/adblock_lite.txt",
+        "project": "https://github.com/Cats-Team/AdRules",
+        "file": COMPOSE_DIR / "web/family-cn-ads-lite.rules",
+        "local_url": f"http://{ADBLOCK_RULES_HOST}:{ADBLOCK_RULES_PORT}/family-cn-ads-lite.rules",
+        "minimum": 5000,
+        "maximum": 50000,
+    },
+    "adult": {
+        "label": "成人内容",
+        "name": "family-adult-filter",
+        "url": "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/nsfw.txt",
+        "project": "https://github.com/hagezi/dns-blocklists",
+        "file": COMPOSE_DIR / "web/family-adult-filter.rules",
+        "local_url": f"http://{ADBLOCK_RULES_HOST}:{ADBLOCK_RULES_PORT}/family-adult-filter.rules",
+        "minimum": 50000,
+        "maximum": 200000,
+    },
+}
+DEFAULT_ADBLOCK_ALLOWLIST = (
+    "360buyimg.com", "alipay.com", "alicdn.com", "apple.com", "bilibili.com",
+    "byteimg.com", "bytedance.com", "chatgpt.com", "douyin.com", "douyinvod.com",
+    "github.com", "google.com", "gstatic.com", "gtimg.cn", "home-assistant.io",
+    "icloud.com", "jd.com", "jdcloud.com", "jdpay.com", "jdwl.com", "mi.com",
+    "mzstatic.com", "openai.com", "pddpic.com", "pinduoduo.com", "qpic.cn",
+    "qq.com", "snssdk.com", "taobao.com", "tbcdn.cn", "telegram.org",
+    "tmall.com", "wechat.com", "xiaomi.com", "yangkeduo.com", "youtube.com",
+)
+ABP_DOMAIN_RULE = re.compile(r"^\|\|([A-Za-z0-9._-]+)\^$")
 
 worker_lock = threading.Lock()
 worker_state_lock = threading.Lock()
@@ -90,6 +133,9 @@ def load_json(path, default):
 
 def config():
     value = load_json(CONFIG_PATH, DEFAULT_CONFIG)
+    adblock_mode = str(value.get("adblock_mode", "off"))
+    if adblock_mode not in ("off", "observe", "block"):
+        adblock_mode = "off"
     return {
         "auto_enabled": bool(value.get("auto_enabled", True)),
         "interval_hours": max(24, min(720, int(value.get("interval_hours", 168)))),
@@ -97,6 +143,10 @@ def config():
         "rule_auto_enabled": bool(value.get("rule_auto_enabled", True)),
         "rule_interval_hours": max(12, min(168, int(value.get("rule_interval_hours", 24)))),
         "last_rule_check": max(0, int(value.get("last_rule_check", 0))),
+        "adblock_mode": adblock_mode,
+        "adblock_auto_enabled": bool(value.get("adblock_auto_enabled", True)),
+        "adblock_interval_hours": max(24, min(168, int(value.get("adblock_interval_hours", 24)))),
+        "last_adblock_check": max(0, int(value.get("last_adblock_check", 0))),
     }
 
 
@@ -110,6 +160,10 @@ def status():
 
 def rule_status():
     return load_json(RULE_STATUS_PATH, {"phase": "idle", "message": "尚未执行规则更新"})
+
+
+def adblock_status_file():
+    return load_json(ADBLOCK_STATUS_PATH, {"phase": "idle", "message": "尚未准备精简过滤规则"})
 
 
 def set_status(phase, message, **extra):
@@ -126,6 +180,13 @@ def set_rule_status(phase, message, **extra):
     return value
 
 
+def set_adblock_status(phase, message, **extra):
+    value = adblock_status_file()
+    value.update({"phase": phase, "message": message, "updated_at": now_iso(), **extra})
+    atomic_json(ADBLOCK_STATUS_PATH, value)
+    return value
+
+
 def core_request(path, method="GET", timeout=15):
     request = urllib.request.Request(CORE_API + path, method=method)
     if method != "GET":
@@ -135,14 +196,20 @@ def core_request(path, method="GET", timeout=15):
         return json.loads(body) if body else {}
 
 
-def core_json_request(path, payload, timeout=30):
+def core_json_request(path, payload, timeout=30, method="POST"):
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(CORE_API + path, data=body, method="POST")
+    request = urllib.request.Request(CORE_API + path, data=body, method=method)
     request.add_header("Content-Type", "application/json")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             value = response.read()
-            return json.loads(value) if value else {}
+            if not value:
+                return {}
+            text = value.decode("utf-8", "replace").strip()
+            try:
+                return json.loads(text)
+            except ValueError:
+                return {"response": text}
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")
         try:
@@ -261,6 +328,365 @@ def current_rule_sources():
             "source": item.get("url", ""),
         })
     return result
+
+
+def direct_download(url, limit=12 * 1024 * 1024):
+    environment = os.environ.copy()
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        environment.pop(name, None)
+    result = subprocess.run(
+        [
+            "curl", "--fail", "--silent", "--show-error", "--location", "--noproxy", "*",
+            "--connect-timeout", "10", "--max-time", "60", "--speed-time", "20",
+            "--speed-limit", "1024", "--max-filesize", str(limit),
+            "--user-agent", "family-mosdns-adblock/1.0", url,
+        ],
+        capture_output=True,
+        timeout=70,
+        env=environment,
+    )
+    if result.returncode:
+        detail = result.stderr.decode("utf-8", "replace").strip() or "直连下载失败"
+        raise RuntimeError(detail)
+    content = result.stdout
+    if len(content) > limit:
+        raise RuntimeError("规则文件超过安全大小限制")
+    return content.decode("utf-8", "replace")
+
+
+def normalize_domain(value):
+    domain = str(value).strip().lower().rstrip(".")
+    if not domain or len(domain) > 253 or "." not in domain:
+        raise ValueError(f"无效域名：{value}")
+    try:
+        ipaddress.ip_address(domain)
+        raise ValueError(f"白名单不能填写 IP：{value}")
+    except ValueError as exc:
+        if "不能填写 IP" in str(exc):
+            raise
+    if not re.fullmatch(r"[a-z0-9._-]+", domain) or any(not label or len(label) > 63 for label in domain.split(".")):
+        raise ValueError(f"无效域名：{value}")
+    return domain
+
+
+def parse_allowlist(value):
+    lines = value.splitlines() if isinstance(value, str) else value
+    domains = set()
+    for raw in lines:
+        text = str(raw).strip()
+        if not text or text.startswith("#"):
+            continue
+        domains.add(normalize_domain(text))
+    if len(domains) > 300:
+        raise ValueError("放行名单最多 300 个域名")
+    return sorted(domains)
+
+
+def load_adblock_allowlist():
+    if not ADBLOCK_ALLOWLIST_PATH.exists():
+        ADBLOCK_ALLOWLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ADBLOCK_ALLOWLIST_PATH.write_text("\n".join(DEFAULT_ADBLOCK_ALLOWLIST) + "\n", encoding="utf-8")
+    return parse_allowlist(ADBLOCK_ALLOWLIST_PATH.read_text(encoding="utf-8"))
+
+
+def rule_conflicts_with_allowlist(domain, allowlist):
+    return any(
+        domain == allowed
+        or domain.endswith("." + allowed)
+        or allowed.endswith("." + domain)
+        for allowed in allowlist
+    )
+
+
+def compile_adblock_source(source_key, content, allowlist):
+    domains = set()
+    for raw in content.splitlines():
+        match = ABP_DOMAIN_RULE.fullmatch(raw.strip())
+        if not match:
+            continue
+        try:
+            domain = normalize_domain(match.group(1))
+        except ValueError:
+            continue
+        if not rule_conflicts_with_allowlist(domain, allowlist):
+            domains.add(domain)
+    metadata = ADBLOCK_SOURCES[source_key]
+    if not metadata["minimum"] <= len(domains) <= metadata["maximum"]:
+        raise RuntimeError(
+            f"{metadata['label']}规则数量异常：{len(domains)}，允许范围 "
+            f"{metadata['minimum']}–{metadata['maximum']}"
+        )
+    previous = read_compiled_domains(metadata["file"])
+    if previous and not int(len(previous) * 0.7) <= len(domains) <= int(len(previous) * 1.4):
+        raise RuntimeError(f"{metadata['label']}相比上一版变化过大：{len(previous)} -> {len(domains)}")
+    body = "! Family MosDNS compiled domain list\n" + "\n".join(f"||{domain}^" for domain in sorted(domains)) + "\n"
+    return domains, body
+
+
+def read_compiled_domains(path):
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+    result = set()
+    for line in lines:
+        match = ABP_DOMAIN_RULE.fullmatch(line.strip())
+        if match:
+            result.add(match.group(1).lower())
+    return result
+
+
+def atomic_text(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(value, encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def family_adguard_rules():
+    rules = core_request("/plugins/adguard/rules")
+    return {
+        source_key: next((item for item in rules if item.get("name") == metadata["name"]), None)
+        for source_key, metadata in ADBLOCK_SOURCES.items()
+    }
+
+
+def ensure_family_adguard_rules(enabled):
+    existing = family_adguard_rules()
+    result = {}
+    for source_key, metadata in ADBLOCK_SOURCES.items():
+        current = existing.get(source_key)
+        payload = {
+            "name": metadata["name"],
+            "url": metadata["local_url"],
+            "enabled": bool(enabled),
+            "auto_update": False,
+            "update_interval_hours": 24,
+        }
+        if current:
+            payload = {**current, **payload}
+            result[source_key] = core_json_request(
+                f"/plugins/adguard/rules/{current['id']}", payload, method="PUT"
+            )
+        else:
+            result[source_key] = core_json_request("/plugins/adguard/rules", payload)
+    if enabled:
+        for item in result.values():
+            core_action(f"/plugins/adguard/update/{item['id']}", method="POST")
+    return result
+
+
+def wait_family_adguard_rules(expected_counts, enabled, timeout=90):
+    deadline = time.time() + timeout
+    last = {}
+    while time.time() < deadline:
+        last = family_adguard_rules()
+        ready = True
+        for source_key, expected in expected_counts.items():
+            item = last.get(source_key) or {}
+            if bool(item.get("enabled")) != bool(enabled):
+                ready = False
+            if enabled and int(item.get("rule_count", 0)) != expected:
+                ready = False
+        if ready:
+            return last
+        time.sleep(1)
+    raise RuntimeError(f"MosDNS 附加规则载入超时：{last}")
+
+
+def set_adblock_switch(enabled):
+    core_json_request("/plugins/switch7/post", {"value": "A" if enabled else "B"})
+
+
+def backup_adblock():
+    backup_dir = COMPOSE_DIR / "backup"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    target = backup_dir / f"adblock-change-{datetime.now().strftime('%Y%m%d-%H%M%S')}.tar.gz"
+    with tarfile.open(target, "w:gz") as archive:
+        for relative in ("web/family-cn-ads-lite.rules", "web/family-adult-filter.rules", "web/family-adblock-allow.txt", "data/adguard", "data/rule/switch7.txt"):
+            path = COMPOSE_DIR / relative
+            if path.exists():
+                archive.add(path, arcname=relative, recursive=True)
+    return target
+
+
+def restore_adblock(backup):
+    for metadata in ADBLOCK_SOURCES.values():
+        metadata["file"].unlink(missing_ok=True)
+    with tarfile.open(backup, "r:gz") as archive:
+        archive.extractall(COMPOSE_DIR)
+    command(["docker", "restart", CONTAINER], timeout=45)
+    wait_healthy(60)
+
+
+def adblock_probe():
+    candidates = read_compiled_domains(ADBLOCK_SOURCES["cn_ads"]["file"])
+    if not candidates:
+        raise RuntimeError("国内广告规则为空，无法验证拦截")
+    domain = "doubleclick.net" if "doubleclick.net" in candidates else sorted(candidates)[0]
+    baseline = command(["dig", "+tries=1", "+time=3", "+comments", "@223.5.5.5", domain, "A"], timeout=6)
+    if "status: NOERROR" not in baseline:
+        raise RuntimeError("广告探针在公共 DNS 中没有返回正常基线")
+    output = command(["dig", "+tries=1", "+time=3", "+comments", f"@{DNS_SERVER}", domain, "A"], timeout=6)
+    if "status: NXDOMAIN" not in output:
+        raise RuntimeError("广告域名没有返回 NXDOMAIN")
+
+
+def apply_adblock_mode(mode, validate=True):
+    if mode not in ("off", "observe", "block"):
+        raise ValueError("过滤模式无效")
+    expected = {key: len(read_compiled_domains(item["file"])) for key, item in ADBLOCK_SOURCES.items()}
+    if mode != "off" and any(not count for count in expected.values()):
+        raise RuntimeError("请先更新并校验精简过滤规则")
+    # Switching blocking off first prevents partially loaded sources from affecting clients.
+    set_adblock_switch(False)
+    rules_enabled = mode == "block"
+    ensure_family_adguard_rules(rules_enabled)
+    wait_family_adguard_rules(expected, rules_enabled)
+    if rules_enabled:
+        # adguard_rule publishes first; domain_mapper rebuilds its aggregate asynchronously.
+        time.sleep(6)
+    if validate and mode != "off":
+        validate_route_matrix()
+    if mode == "block":
+        set_adblock_switch(True)
+        if validate:
+            adblock_probe()
+            validate_route_matrix()
+    value = config()
+    value["adblock_mode"] = mode
+    save_config(value)
+    return mode
+
+
+def do_adblock_update():
+    with worker_lock:
+        backup = None
+        try:
+            value = config()
+            value["last_adblock_check"] = int(time.time())
+            save_config(value)
+            backup = backup_adblock()
+            allowlist = (
+                parse_allowlist(ADBLOCK_PENDING_ALLOWLIST_PATH.read_text(encoding="utf-8"))
+                if ADBLOCK_PENDING_ALLOWLIST_PATH.exists()
+                else load_adblock_allowlist()
+            )
+            set_adblock_status("updating", "正在使用本地网络下载并校验精简过滤规则", backup=str(backup))
+            compiled = {}
+            sources = []
+            for source_key, metadata in ADBLOCK_SOURCES.items():
+                content = direct_download(metadata["url"])
+                domains, body = compile_adblock_source(source_key, content, allowlist)
+                compiled[source_key] = (domains, body)
+                sources.append({
+                    "key": source_key,
+                    "label": metadata["label"],
+                    "source": metadata["url"],
+                    "project": metadata["project"],
+                    "rule_count": len(domains),
+                    "sha256": hashlib.sha256(body.encode()).hexdigest(),
+                })
+            for source_key, (_, body) in compiled.items():
+                atomic_text(ADBLOCK_SOURCES[source_key]["file"], body)
+            atomic_text(ADBLOCK_ALLOWLIST_PATH, "\n".join(allowlist) + "\n")
+            mode = config()["adblock_mode"]
+            apply_adblock_mode(mode, validate=mode != "off")
+            ADBLOCK_PENDING_ALLOWLIST_PATH.unlink(missing_ok=True)
+            set_adblock_status(
+                "updated",
+                "精简过滤规则已更新并通过数量、白名单和分流验证",
+                mode=mode,
+                sources=sources,
+                allowlist_count=len(allowlist),
+                backup=str(backup),
+                completed_at=now_iso(),
+            )
+        except Exception as exc:
+            failure = str(exc)
+            if backup:
+                try:
+                    set_adblock_status("rolling_back", f"过滤规则校验失败，正在恢复：{failure}", backup=str(backup))
+                    restore_adblock(backup)
+                    set_adblock_status("rolled_back", f"过滤规则更新失败，已恢复旧配置：{failure}", backup=str(backup), completed_at=now_iso())
+                    return
+                except Exception as rollback_exc:
+                    failure += f"；自动回滚也失败：{rollback_exc}"
+            set_adblock_status("error", f"过滤规则更新失败：{failure}", completed_at=now_iso())
+
+
+def do_adblock_mode(mode):
+    with worker_lock:
+        previous = config()["adblock_mode"]
+        backup = backup_adblock()
+        try:
+            set_adblock_status("applying", f"正在切换到{ {'off':'关闭', 'observe':'观察', 'block':'拦截'}[mode] }模式", backup=str(backup))
+            apply_adblock_mode(mode, validate=mode != "off")
+            set_adblock_status(
+                "updated",
+                {"off": "精简过滤已关闭", "observe": "观察模式已启用，只记录命中而不拦截", "block": "精简过滤已启用并通过拦截与分流验证"}[mode],
+                mode=mode,
+                backup=str(backup),
+                completed_at=now_iso(),
+            )
+        except Exception as exc:
+            failure = str(exc)
+            try:
+                restore_adblock(backup)
+                value = config()
+                value["adblock_mode"] = previous
+                save_config(value)
+                set_adblock_status("rolled_back", f"模式切换失败，已恢复原状态：{failure}", mode=previous, backup=str(backup), completed_at=now_iso())
+            except Exception as rollback_exc:
+                set_adblock_status("error", f"模式切换失败：{failure}；回滚失败：{rollback_exc}", mode=previous, backup=str(backup), completed_at=now_iso())
+
+
+def domain_in_set(domain, values):
+    labels = domain.lower().rstrip(".").split(".")
+    return any(".".join(labels[index:]) in values for index in range(max(0, len(labels) - 10), len(labels)))
+
+
+def adblock_runtime_status():
+    value = adblock_status_file()
+    settings = config()
+    sets = {key: read_compiled_domains(metadata["file"]) for key, metadata in ADBLOCK_SOURCES.items()}
+    logs = core_request("/api/v2/audit/logs?limit=2000").get("logs", [])
+    hits = {"cn_ads": 0, "adult": 0}
+    domains = {}
+    for item in logs:
+        domain = str(item.get("query_name", "")).lower().rstrip(".")
+        if not domain or domain.startswith(("family-filter-test.", "000123456789.")) or settings["adblock_mode"] == "off":
+            continue
+        if settings["adblock_mode"] == "block" and "广告屏蔽" not in str(item.get("effective_tag", "")):
+            continue
+        category = "adult" if domain_in_set(domain, sets["adult"]) else "cn_ads" if domain_in_set(domain, sets["cn_ads"]) else None
+        if category:
+            hits[category] += 1
+            domains[domain] = domains.get(domain, 0) + 1
+    rules = family_adguard_rules()
+    value.update({
+        "mode": settings["adblock_mode"],
+        "auto_enabled": settings["adblock_auto_enabled"],
+        "interval_hours": settings["adblock_interval_hours"],
+        "allowlist": "\n".join(load_adblock_allowlist()) + "\n",
+        "allowlist_count": len(load_adblock_allowlist()),
+        "hits": {**hits, "total": sum(hits.values())},
+        "top_domains": [{"domain": domain, "count": count} for domain, count in sorted(domains.items(), key=lambda item: (-item[1], item[0]))[:8]],
+        "sources": [
+            {
+                "key": key,
+                "label": metadata["label"],
+                "rule_count": len(sets[key]),
+                "loaded_count": int((rules.get(key) or {}).get("rule_count", 0)),
+                "enabled": bool((rules.get(key) or {}).get("enabled")),
+                "source": metadata["url"],
+                "project": metadata["project"],
+            }
+            for key, metadata in ADBLOCK_SOURCES.items()
+        ],
+        "busy": worker_busy(),
+    })
+    return value
 
 
 def backup_rules():
@@ -702,6 +1128,11 @@ def scheduler():
         time.sleep(300)
         value = config()
         now = time.time()
+        if value["adblock_auto_enabled"] and now - value["last_adblock_check"] >= value["adblock_interval_hours"] * 3600:
+            value["last_adblock_check"] = int(now)
+            save_config(value)
+            start_worker(do_adblock_update)
+            continue
         if value["rule_auto_enabled"] and now - value["last_rule_check"] >= value["rule_interval_hours"] * 3600:
             value["last_rule_check"] = int(now)
             save_config(value)
@@ -758,6 +1189,12 @@ class Handler(BaseHTTPRequestHandler):
                 value["source_error"] = str(exc)
             self.reply(HTTPStatus.OK, value)
             return
+        if self.path == "/adblock/status":
+            try:
+                self.reply(HTTPStatus.OK, adblock_runtime_status())
+            except Exception as exc:
+                self.reply(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
+            return
         if self.path == "/metrics":
             try:
                 self.reply(HTTPStatus.OK, metrics_summary())
@@ -795,6 +1232,40 @@ class Handler(BaseHTTPRequestHandler):
             started = start_worker(do_rule_update)
             self.reply(HTTPStatus.ACCEPTED if started else HTTPStatus.CONFLICT, {"started": started, "message": "已开始更新规则" if started else "已有任务正在运行"})
             return
+        if self.path == "/adblock/update":
+            started = start_worker(do_adblock_update)
+            self.reply(HTTPStatus.ACCEPTED if started else HTTPStatus.CONFLICT, {"started": started, "message": "已开始直连下载并校验精简过滤规则" if started else "已有任务正在运行"})
+            return
+        if self.path == "/adblock/mode":
+            size = min(int(self.headers.get("Content-Length", "0")), 4096)
+            try:
+                body = json.loads(self.rfile.read(size) or "{}")
+                mode = str(body.get("mode", ""))
+                if mode not in ("off", "observe", "block"):
+                    raise ValueError("过滤模式无效")
+            except (ValueError, TypeError) as exc:
+                self.reply(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid json"})
+                return
+            started = start_worker(lambda: do_adblock_mode(mode))
+            self.reply(HTTPStatus.ACCEPTED if started else HTTPStatus.CONFLICT, {"started": started, "message": "已开始切换过滤模式" if started else "已有任务正在运行"})
+            return
+        if self.path == "/adblock/allowlist":
+            size = min(int(self.headers.get("Content-Length", "0")), 65536)
+            try:
+                body = json.loads(self.rfile.read(size) or "{}")
+                allowlist = parse_allowlist(body.get("value", ""))
+            except (ValueError, TypeError) as exc:
+                self.reply(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid json"})
+                return
+            if worker_busy():
+                self.reply(HTTPStatus.CONFLICT, {"started": False, "message": "已有任务正在运行"})
+                return
+            atomic_text(ADBLOCK_PENDING_ALLOWLIST_PATH, "\n".join(allowlist) + "\n")
+            started = start_worker(do_adblock_update)
+            if not started:
+                ADBLOCK_PENDING_ALLOWLIST_PATH.unlink(missing_ok=True)
+            self.reply(HTTPStatus.ACCEPTED if started else HTTPStatus.CONFLICT, {"started": started, "message": "放行名单已提交并开始重新校验" if started else "已有任务正在运行"})
+            return
         if self.path == "/upstreams":
             size = min(int(self.headers.get("Content-Length", "0")), 32768)
             try:
@@ -819,6 +1290,19 @@ class Handler(BaseHTTPRequestHandler):
             save_config(value)
             self.reply(HTTPStatus.OK, {"config": value, "message": "规则自动更新已开启" if value["rule_auto_enabled"] else "规则自动更新已关闭"})
             return
+        if self.path == "/adblock/auto":
+            size = min(int(self.headers.get("Content-Length", "0")), 4096)
+            try:
+                body = json.loads(self.rfile.read(size) or "{}")
+            except ValueError:
+                self.reply(HTTPStatus.BAD_REQUEST, {"error": "invalid json"})
+                return
+            value = config()
+            value["adblock_auto_enabled"] = bool(body.get("enabled"))
+            value["last_adblock_check"] = int(time.time())
+            save_config(value)
+            self.reply(HTTPStatus.OK, {"config": value, "message": "过滤规则自动更新已开启" if value["adblock_auto_enabled"] else "过滤规则自动更新已关闭"})
+            return
         if self.path == "/auto":
             size = min(int(self.headers.get("Content-Length", "0")), 4096)
             try:
@@ -835,12 +1319,39 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
 
+class RuleFileHandler(BaseHTTPRequestHandler):
+    def log_message(self, *_):
+        pass
+
+    def do_GET(self):
+        files = {
+            "/family-cn-ads-lite.rules": ADBLOCK_SOURCES["cn_ads"]["file"],
+            "/family-adult-filter.rules": ADBLOCK_SOURCES["adult"]["file"],
+        }
+        path = files.get(urllib.parse.urlsplit(self.path).path)
+        if path is None or not path.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        body = path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+
 if __name__ == "__main__":
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if not CONFIG_PATH.exists():
         initial = dict(DEFAULT_CONFIG)
         initial["last_auto_check"] = int(time.time())
         initial["last_rule_check"] = int(time.time())
+        initial["last_adblock_check"] = int(time.time())
         save_config(initial)
     threading.Thread(target=scheduler, daemon=True).start()
+    threading.Thread(
+        target=ThreadingHTTPServer((ADBLOCK_RULES_HOST, ADBLOCK_RULES_PORT), RuleFileHandler).serve_forever,
+        daemon=True,
+    ).start()
     ThreadingHTTPServer(("127.0.0.1", 18102), Handler).serve_forever()
