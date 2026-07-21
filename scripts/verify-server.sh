@@ -28,8 +28,9 @@ spec = importlib.util.spec_from_file_location('family_proxy_gateway_verify', gat
 gateway = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gateway)
 handler = gateway.Handler.__new__(gateway.Handler)
-handler.headers = {'Referer': 'http://gateway/dns/#data'}
+handler.headers = {}
 legacy_routes = {
+    '/api/v1/system/health': 18091,
     '/api/v2/audit/stats': 18091,
     '/plugins/geosite_cn/config': 18091,
     '/maintenance-api/metrics': 18102,
