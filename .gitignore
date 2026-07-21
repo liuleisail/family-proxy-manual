@@ -1,0 +1,23 @@
+# Never publish live credentials or network-specific state.
+.env
+*.env
+router.env
+*.secret
+*.key
+*.pem
+*.p12
+*.sqlite
+
+# Subscription content and generated proxy state.
+subscriptions/
+providers/
+*subscription*
+*candidate*.json
+rule-backups/
+backups/
+logs/
+
+# NAS and Docker data.
+volumes/
+zdocker/
+docker-data/
