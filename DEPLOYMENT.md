@@ -4,7 +4,7 @@
 
 ## 0. 前置条件
 
-- Debian/Ubuntu 或兼容 `systemd` 的主机，已安装 Docker Engine 与 Docker Compose 插件。
+- Debian/Ubuntu 或兼容 `systemd` 的主机，已安装 Docker Engine 与 Docker Compose 插件。Debian/Ubuntu 安装器会按需补齐 `python3-yaml` 和 `lm-sensors`；其它发行版需自行安装，缺少 `lm-sensors` 时仅温度卡片不可用。
 - 旁路主机有固定 IPv4 地址，并与 RouterOS 位于同一 LAN。
 - RouterOS API 已仅向旁路主机开放；不得把 API 暴露到 WAN。
 - 旁路主机的 SSD 路径可用于 `/var/lib/family-proxy/docker`，或在配置中改成另一个持久目录。
@@ -36,7 +36,7 @@ printf '%s' 'dns_username:dns_password' | base64
 sudo ./scripts/install-server.sh
 ```
 
-首次安装不会启动服务。脚本会保存旧版文件到 `/var/backups/family-proxy/<时间戳>/`，渲染运行程序、检查 Python 语法、安装 systemd 单元并启用开机启动。
+首次安装不会启动服务。脚本会保存旧版文件到 `/var/backups/family-proxy/<时间戳>/`，渲染运行程序、检查 Python 语法、安装 systemd 单元并启用开机启动。`FAMILY_DOCKER_ROOT` 必须指向服务器可持续访问的数据目录；Z4Pro 状态页会以该目录统计 Docker 盘容量。
 
 ## 3. 创建 Mihomo 容器
 
@@ -79,8 +79,10 @@ DNS 必须由本机现有的 MosDNS/DNS 服务监听旁路主机的 `53` 端口�
 
 ```bash
 git pull --ff-only
-./scripts/upgrade-server.sh
+sudo ./scripts/upgrade-server.sh
 ```
+
+升级脚本会先建立时间戳备份，然后更新并重启 `family-proxy-ui`、`family-mihomo-sub-import` 和 `family-proxy-gateway`。它不会重启 Mihomo/MosDNS 容器、启动历史停用容器或写入 RouterOS。新版网关兼容 Safari 缓存的旧 DNS 页面，升级后无需清空 DNS 数据。
 
 失败时停止相关服务，从本次时间戳备份恢复 `/opt/family-proxy-ui/`、服务单元和本地配置，再执行：
 
@@ -99,9 +101,11 @@ sudo /usr/local/sbin/family-mihomo-tproxy-auto sync
 
 ## 7. 验收标准
 
-- 三个控制平面服务均为 `active`，本地健康接口正常。
+- 三个控制平面服务均为 `active`，`verify-server.sh` 通过内部网关密钥验证健康、Z4Pro 系统状态和机场状态接口。
+- 设备页能显示 CPU、内存、温度、Docker 数据盘、运行/总容器数和系统运行时间；已停止容器保持原状态。
 - Mihomo 控制接口可访问，候选池配置可校验并加载。
 - DNS 服务确实监听旁路主机 53 端口，国内和代理域名按预期解析。
+- DNS“概览”和“数据管理”的重新载入均成功；来自旧 DNS 页面的无前缀 API 也能经统一入口兼容转发。
 - 接管测试设备在国内 App、局域网服务和外网业务上都通过；未接管设备保持原样。
 - RouterOS 文本导出、二进制备份和本次服务器备份均可定位。
 

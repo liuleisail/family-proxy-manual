@@ -8,6 +8,7 @@ import ipaddress
 import json
 import os
 import secrets
+import shutil
 import socket
 import subprocess
 import threading
@@ -37,7 +38,7 @@ PROXY_IP = "__FAMILY_PROXY_IP__"
 FIXED_MANAGED_IPS = set()
 RESERVED_IPS = {"__FAMILY_ROUTER_IP__", "__FAMILY_RESERVED_GATEWAY_IP__", PROXY_IP}
 AUDIT_PATH = Path("/var/log/family-proxy-ui-audit.jsonl")
-BUILD_VERSION = "2026.07.21-ui-fix1"
+BUILD_VERSION = "2026.07.21-z4pro-status"
 SHARED_LIST = "family_mihomo_devices"
 SHARED_TABLE = "family_mihomo_shared"
 SHARED_CONN_MARK = "family_mihomo_conn"
@@ -49,6 +50,8 @@ RULES_LOCK = threading.Lock()
 DEVICE_PREFS_LOCK = threading.Lock()
 DNS_METRICS_LOCK = threading.Lock()
 DNS_SAMPLES = deque(maxlen=120)
+SYSTEM_STATUS_LOCK = threading.Lock()
+SYSTEM_STATUS_CACHE = {"timestamp": 0.0, "value": None, "cpu_sample": None}
 PROTECTED_RULES = {"GEOSITE,CN,DIRECT", "GEOIP,CN,DIRECT,no-resolve"}
 
 
@@ -961,6 +964,109 @@ def remove_device(ip):
         return {"ip": ip, "message": f"已移除 {removed} 条页面管理规则，设备恢复直连"}
 
 
+def cpu_sample():
+    fields = [int(value) for value in Path("/proc/stat").read_text().splitlines()[0].split()[1:]]
+    idle = fields[3] + (fields[4] if len(fields) > 4 else 0)
+    return sum(fields), idle
+
+
+def temperature_status():
+    try:
+        result = subprocess.run(["sensors", "-j"], capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return {"cpu_c": None, "nvme_c": None}
+    if result.returncode:
+        return {"cpu_c": None, "nvme_c": None}
+    try:
+        document = json.loads(result.stdout)
+    except (TypeError, ValueError):
+        return {"cpu_c": None, "nvme_c": None}
+
+    def reading(chip_prefix, feature_name):
+        for chip, features in document.items():
+            if not chip.startswith(chip_prefix):
+                continue
+            feature = features.get(feature_name, {})
+            for key, value in feature.items():
+                if key.endswith("_input"):
+                    return round(float(value), 1)
+        return None
+
+    return {
+        "cpu_c": reading("coretemp-", "Package id 0"),
+        "nvme_c": reading("nvme-", "Composite"),
+    }
+
+
+def docker_status():
+    result = subprocess.run(
+        ["docker", "ps", "-a", "--format", "{{json .}}"],
+        capture_output=True, text=True, timeout=5,
+    )
+    if result.returncode:
+        return {"running": None, "total": None, "unhealthy": None}
+    containers = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+    running = sum(item.get("State") == "running" for item in containers)
+    unhealthy = sum("unhealthy" in item.get("Status", "").lower() for item in containers)
+    return {"running": running, "total": len(containers), "unhealthy": unhealthy}
+
+
+def system_status():
+    with SYSTEM_STATUS_LOCK:
+        now = time.monotonic()
+        cached = SYSTEM_STATUS_CACHE.get("value")
+        if cached and now - SYSTEM_STATUS_CACHE["timestamp"] < 5:
+            return dict(cached)
+
+        previous = SYSTEM_STATUS_CACHE.get("cpu_sample")
+        current = cpu_sample()
+        if previous is None:
+            time.sleep(0.12)
+            previous, current = current, cpu_sample()
+        total_delta = current[0] - previous[0]
+        idle_delta = current[1] - previous[1]
+        cpu_percent = round(max(0.0, min(100.0, 100 * (total_delta - idle_delta) / total_delta)), 1) if total_delta else 0.0
+        SYSTEM_STATUS_CACHE["cpu_sample"] = current
+
+        memory = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, value = line.split(":", 1)
+            memory[key] = int(value.strip().split()[0]) * 1024
+        memory_total = memory["MemTotal"]
+        memory_used = memory_total - memory.get("MemAvailable", memory.get("MemFree", 0))
+        swap_total = memory.get("SwapTotal", 0)
+        swap_used = max(0, swap_total - memory.get("SwapFree", 0))
+        load_1m, load_5m, load_15m = os.getloadavg()
+        uptime_seconds = float(Path("/proc/uptime").read_text().split()[0])
+        disk = shutil.disk_usage(MIHOMO_CONFIG_PATH.parent.parent)
+        temperatures = temperature_status()
+        containers = docker_status()
+        memory_percent = round(memory_used / memory_total * 100, 1)
+        disk_percent = round(disk.used / disk.total * 100, 1)
+        swap_percent = round(swap_used / swap_total * 100, 1) if swap_total else 0.0
+        healthy = (
+            cpu_percent < 95 and memory_percent < 90 and disk_percent < 90
+            and (temperatures["cpu_c"] is None or temperatures["cpu_c"] < 85)
+            and (temperatures["nvme_c"] is None or temperatures["nvme_c"] < 75)
+            and not containers.get("unhealthy")
+        )
+        value = {
+            "healthy": healthy,
+            "cpu": {"percent": cpu_percent, "cores": os.cpu_count() or 0,
+                    "load_1m": round(load_1m, 2), "load_5m": round(load_5m, 2), "load_15m": round(load_15m, 2)},
+            "memory": {"used": memory_used, "total": memory_total, "percent": memory_percent,
+                       "swap_used": swap_used, "swap_total": swap_total, "swap_percent": swap_percent},
+            "temperature": temperatures,
+            "disk": {"used": disk.used, "total": disk.total, "free": disk.free, "percent": disk_percent},
+            "docker": containers,
+            "uptime_seconds": uptime_seconds,
+            "kernel": os.uname().release,
+            "updated_at": int(time.time()),
+        }
+        SYSTEM_STATUS_CACHE.update({"timestamp": now, "value": value})
+        return dict(value)
+
+
 PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>家庭旁路设备管理</title><style>
 :root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#15191d;color:#eef2f4}*{box-sizing:border-box}body{margin:0}.wrap{max-width:980px;margin:auto;padding:34px 22px}header{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;border-bottom:1px solid #394249;padding-bottom:22px;flex-wrap:wrap}h1{margin:0;font-size:25px;letter-spacing:0}p{color:#aeb9bf;margin:8px 0 0;line-height:1.55}.badge{white-space:nowrap;border:1px solid #3b805f;background:#173527;color:#9fe1b8;padding:7px 10px;border-radius:5px;font-size:13px}.badge.bad{border-color:#8b4945;background:#3b211f;color:#ffb4aa}.health-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-top:18px}.health-item{padding:11px 12px;border-top:2px solid #3b805f;background:#1b2125}.health-item.bad{border-color:#a4514b}.health-item b{display:block;font-size:13px}.health-item span{display:block;margin-top:4px;color:#97a4aa;font-size:12px}.panel{margin-top:22px;border:1px solid #394249;background:#20262b;border-radius:7px;padding:20px}h2{font-size:16px;margin:0 0 14px}.add{display:flex;gap:10px;align-items:center}input{background:#101417;border:1px solid #4b5961;color:#fff;border-radius:4px;padding:10px 12px;font-size:15px;width:220px}button{border:0;border-radius:4px;padding:10px 14px;font-weight:650;cursor:pointer;background:#62c77c;color:#092212;font-size:14px}button.remove{background:#2a3035;border:1px solid #626e75;color:#e4ebee}button:disabled{opacity:.5;cursor:default}.note{font-size:13px;margin-top:10px}.status{min-height:22px;margin-top:12px;font-size:14px}.error{color:#ffb4aa}.ok{color:#9fe1b8}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:13px 8px;border-top:1px solid #354048}th{color:#aeb9bf;font-weight:600}td:last-child{text-align:right}.muted{color:#94a1a8}.state{display:inline-block;font-size:12px;border:1px solid #4b5961;padding:3px 7px;border-radius:4px}.state.active{border-color:#3b805f;color:#9fe1b8}.state.wait{border-color:#8e7a44;color:#e7cd81}@media(max-width:650px){.wrap{padding:22px 14px}header{display:block}.badge{display:inline-block;margin-top:14px}.health-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.panel{padding:15px}.add{align-items:stretch;flex-direction:column}input{width:100%}table th:nth-child(2),table td:nth-child(2){display:none}table{font-size:13px}}</style><body><main class="wrap"><header><div><h1>家庭旁路设备管理</h1><p>加入、验证、撤出均按单台设备执行，不改全屋网关和公网服务。</p></div><span class="badge" id="health">连接检查中</span></header><div class="health-grid" id="healthChecks"></div><section class="panel"><h2>加入旁路</h2><div class="add"><input id="ip" inputmode="decimal" placeholder="__FAMILY_LAN_PREFIX__x"><button onclick="enableDevice()">加入并校验</button></div><p class="note">系统先检查 Z4Pro、DNS、策略组和冲突策略；失败会清理本次创建的规则。设备需已有 DHCP 租约。</p><div class="status" id="status"></div></section><section class="panel"><h2>设备列表</h2><table><thead><tr><th>设备</th><th>MAC 地址</th><th>在线</th><th>实际状态</th><th></th></tr></thead><tbody id="devices"></tbody></table></section></main><script>
 const csrf="__CSRF__",statusEl=document.querySelector('#status');function setStatus(msg,ok){statusEl.textContent=msg;statusEl.className='status '+(ok?'ok':'error')}async function api(path,opt={}){let r=await fetch(path,{...opt,headers:{'Content-Type':'application/json','X-CSRF':csrf,...(opt.headers||{})}}),b=await r.json();if(!r.ok)throw Error(b.error||'请求失败');return b}function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}function healthItem(name,ok,text){return `<div class="health-item ${ok?'':'bad'}"><b>${name}</b><span>${text}</span></div>`}async function load(){try{let data=await api('/api/devices'),s=data.summary,c=s.checks||{};let ready=s.ready&&s.netwatch==='up';let badge=document.querySelector('#health');badge.textContent=ready?'旁路平面正常':'旁路平面需检查';badge.className='badge '+(ready?'':'bad');document.querySelector('#healthChecks').innerHTML=healthItem('RB5009',s.router==='connected','管理连接')+healthItem('DNS',c.dns,'国内解析')+healthItem('Mihomo',c.mihomo,'控制接口')+healthItem('策略组',c.policy,s.detail?.proxy||'未就绪')+healthItem('自动回退',s.netwatch==='up',s.netwatch);let rows=data.devices.map(d=>{let label=!d.managed?'未接管':d.effective?'已生效':'等待新流量',state=!d.managed?'':d.effective?'active':'wait',action=d.fixed?'<span class="muted">固定灰度</span>':d.managed?`<button class="remove" onclick="removeDevice('${d.ip}')">恢复直连</button>`:`<button class="remove" onclick="choose('${d.ip}')">选择</button>`;return `<tr><td>${esc(d.name)}<div class="muted">${d.ip}${d.static?' · 固定':''}</div></td><td class="muted">${esc(d.mac)}</td><td>${esc(d.status)}</td><td><span class="state ${state}">${label}</span>${d.managed?`<div class="muted">${d.packets} 个包</div>`:''}</td><td>${action}</td></tr>`}).join('');document.querySelector('#devices').innerHTML=rows||'<tr><td colspan="5" class="muted">未发现 DHCP 设备</td></tr>'}catch(e){setStatus(e.message,false)}}function choose(ip){document.querySelector('#ip').value=ip;document.querySelector('#ip').focus()}async function enableDevice(){let ip=document.querySelector('#ip').value.trim();try{setStatus('正在执行健康检查、冲突检查和规则事务...',true);let r=await api('/api/enable',{method:'POST',body:JSON.stringify({ip})});setStatus(r.message,true);await load()}catch(e){setStatus(e.message,false)}}async function removeDevice(ip){if(!confirm('将 '+ip+' 恢复直连并清理旧连接？'))return;try{setStatus('正在恢复直连...',true);let r=await api('/api/remove',{method:'POST',body:JSON.stringify({ip})});setStatus(r.message,true);await load()}catch(e){setStatus(e.message,false)}}load();setInterval(load,30000)</script></body></html>"""
@@ -982,6 +1088,41 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta n
 const csrf="__CSRF__",statusEl=document.querySelector('#status');let filter='managed',devices=[],deviceQuery='',editingMac='';function esc(s){return String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]))}function setStatus(message,ok=true){statusEl.textContent=message;statusEl.className='status '+(ok?'':'error')}async function api(path,opt={}){let response=await fetch(new URL(path,location.origin),{...opt,headers:{'Content-Type':'application/json','X-CSRF':csrf,...(opt.headers||{})}}),body=await response.json();if(!response.ok)throw Error(body.error||'请求失败');return body}function healthItem(name,ok,text){return `<div class="health-item ${ok?'':'bad'}"><b>${esc(name)}</b><span title="${esc(text)}">${esc(text)}</span></div>`}function deviceActions(d){let rename=`<button class="secondary" onclick="openRename('${d.mac}')">改名</button>`;if(d.managed)return rename+(d.fixed?'<span class="muted">固定设备</span>':`<button class="secondary danger" onclick="removeDevice('${d.ip}')">恢复直连</button>`);let join=`<button class="secondary" onclick="choose('${d.ip}')">加入旁路</button>`;if(filter==='favorites')return rename+join+`<button class="secondary danger" onclick="setFavorite('${d.mac}',false)">移出常用</button>`;let keep=d.favorite?`<button class="secondary danger" onclick="setFavorite('${d.mac}',false)">取消保留</button>`:`<button class="secondary" onclick="setFavorite('${d.mac}',true)">保留</button>`;return rename+join+keep}function render(){let q=deviceQuery.toLowerCase(),shown=devices.filter(d=>(filter==='managed'&&d.managed||filter==='favorites'&&d.favorite||filter==='online'&&d.status==='bound')&&(!q||`${d.name} ${d.ip} ${d.mac}`.toLowerCase().includes(q)));let empty={managed:'尚无已接管设备',favorites:'尚未保留常用设备，可在“全部在线”中添加',online:'当前没有可见的在线设备'}[filter];document.querySelector('#devices').innerHTML=shown.length?shown.map(d=>{let label=!d.managed?(d.favorite?'常用设备':'未接管'):d.effective?'已生效':'等待新流量',state=!d.managed?'':d.effective?'active':'wait';return `<div class="device-row"><div class="device-name">${esc(d.name)}<div class="device-meta">${esc(d.ip)}${d.static?' · 固定地址':''}${d.custom_name?' · 自定义名称':''}</div></div><div class="device-mac muted">${esc(d.mac)}</div><div class="device-online online ${d.status==='bound'?'bound':''}">${d.status==='bound'?'在线':'离线'}</div><div class="device-state state ${state}">${label}${d.managed?`<div class="device-meta">${d.packets} 个包</div>`:''}</div><div class="device-action">${deviceActions(d)}</div></div>`}).join(''):`<div class="empty">${empty}</div>`}function setFilter(value){filter=value;document.querySelectorAll('[data-filter]').forEach(b=>b.classList.toggle('active',b.dataset.filter===value));render()}async function load(){try{let data=await api('/api/devices'),summary=data.summary,checks=summary.checks||{},ready=summary.ready&&summary.netwatch==='up';devices=data.devices;let badge=document.querySelector('#health');badge.className='overall '+(ready?'':'bad');badge.innerHTML=`<span class="dot"></span><span>${ready?'旁路运行正常':'旁路需要检查'}</span>`;document.querySelector('#healthChecks').innerHTML=healthItem('RB5009',summary.router==='connected','管理连接')+healthItem('DNS',checks.dns,'国内解析')+healthItem('Mihomo',checks.mihomo,'控制接口')+healthItem('当前策略',checks.policy,summary.detail?.proxy||'未就绪')+healthItem('自动回退',summary.netwatch==='up',summary.netwatch==='up'?'已启用':'未就绪');render()}catch(e){setStatus(e.message,false)}}function choose(ip){document.querySelector('#ip').value=ip;document.querySelector('#ip').focus();window.scrollTo({top:document.querySelector('.add-row').offsetTop-90,behavior:'smooth'})}function openRename(mac){let d=devices.find(x=>x.mac===mac);if(!d)return;editingMac=mac;document.querySelector('#renameInput').value=d.name;document.querySelector('#renameDialog').showModal();requestAnimationFrame(()=>document.querySelector('#renameInput').select())}function closeRename(){document.querySelector('#renameDialog').close();editingMac=''}async function saveRename(event){event.preventDefault();let alias=document.querySelector('#renameInput').value.trim();try{await api('/api/device/preference',{method:'POST',body:JSON.stringify({mac:editingMac,alias})});closeRename();setStatus(alias?'设备名称已保存':'已恢复路由器原名称',true);await load()}catch(e){setStatus(e.message,false)}}async function setFavorite(mac,favorite){try{await api('/api/device/preference',{method:'POST',body:JSON.stringify({mac,favorite})});setStatus(favorite?'已加入常用设备':'已移出常用设备',true);await load()}catch(e){setStatus(e.message,false)}}async function enableDevice(){let ip=document.querySelector('#ip').value.trim();try{setStatus('正在检查并加入设备…',true);let result=await api('/api/enable',{method:'POST',body:JSON.stringify({ip})});setStatus(result.message,true);await load()}catch(e){setStatus(e.message,false)}}async function removeDevice(ip){if(!confirm(`将 ${ip} 恢复直连并清理旧连接？`))return;try{setStatus('正在恢复直连…',true);let result=await api('/api/remove',{method:'POST',body:JSON.stringify({ip})});setStatus(result.message,true);await load()}catch(e){setStatus(e.message,false)}}document.querySelector('#deviceSearch').addEventListener('input',event=>{deviceQuery=event.target.value.trim();render()});document.querySelector('#renameDialog').addEventListener('click',event=>{if(event.target.id==='renameDialog')closeRename()});load();setInterval(()=>{if(!document.querySelector('#renameDialog').open)load()},30000)
 </script></body></html>'''
 PAGE = PAGE.replace('<div class="eyebrow">SELECTIVE ROUTING</div>', '')
+PAGE = PAGE.replace(
+    '.add-row{display:grid;',
+    '.system-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}'
+    '.system-item{min-width:0;min-height:118px;padding:16px;border-right:1px solid #38383a;border-bottom:1px solid #38383a}'
+    '.system-item:nth-child(3n){border-right:0}.system-item:nth-last-child(-n+3){border-bottom:0}'
+    '.system-label{color:#8e8e93;font-size:12px}.system-value{margin-top:8px;font-size:23px;line-height:1.15;font-weight:700;font-variant-numeric:tabular-nums}'
+    '.system-detail{margin-top:8px;color:#8e8e93;font-size:12px;line-height:1.45;overflow-wrap:anywhere}'
+    '.system-item.warn .system-value{color:#ffd60a}.system-item.bad .system-value{color:#ff453a}'
+    '.meter{height:4px;margin-top:10px;border-radius:2px;background:#38383a;overflow:hidden}.meter span{display:block;height:100%;background:#30d158}'
+    '.system-item.warn .meter span{background:#ffd60a}.system-item.bad .meter span{background:#ff453a}'
+    '.add-row{display:grid;',
+    1,
+)
+PAGE = PAGE.replace(
+    '<section class="section"><div class="section-title"><h2>运行状态</h2>',
+    '<section class="section"><div class="section-title"><h2>Z4Pro 运行状态</h2><span class="muted" id="systemUpdated">正在读取</span></div>'
+    '<div class="group system-grid" id="systemStatus"><div class="empty">正在读取系统状态</div></div></section>'
+    '<section class="section"><div class="section-title"><h2>旁路运行状态</h2>',
+    1,
+)
+PAGE = PAGE.replace(
+    'function deviceActions(d){',
+    '''function formatBytes(value){return `${(Number(value||0)/1073741824).toFixed(1)} GB`}
+function formatUptime(seconds){let total=Math.max(0,Math.floor(Number(seconds||0))),days=Math.floor(total/86400),hours=Math.floor(total%86400/3600),minutes=Math.floor(total%3600/60);return days?`${days} 天 ${hours} 小时`:hours?`${hours} 小时 ${minutes} 分钟`:`${minutes} 分钟`}
+function systemTone(value,warn,bad){return Number(value)>=bad?'bad':Number(value)>=warn?'warn':''}
+function systemItem(label,value,detail,tone='',percent=null){let meter=percent===null?'':`<div class="meter"><span style="width:${Math.max(0,Math.min(100,Number(percent)||0))}%"></span></div>`;return `<div class="system-item ${tone}"><div class="system-label">${esc(label)}</div><div class="system-value">${esc(value)}</div>${meter}<div class="system-detail">${esc(detail)}</div></div>`}
+async function loadSystem(){try{let s=await api('/api/system/status'),c=s.cpu,m=s.memory,t=s.temperature,d=s.disk,x=s.docker,tempValue=t.cpu_c==null?'不可用':`${Number(t.cpu_c).toFixed(1)}°C`,tempDetail=t.nvme_c==null?'NVMe 温度不可用':`NVMe ${Number(t.nvme_c).toFixed(1)}°C`,dockerValue=x.running==null?'不可用':`${x.running} / ${x.total}`,dockerDetail=x.unhealthy==null?'状态不可用':x.unhealthy?`${x.unhealthy} 个容器异常`:x.total>x.running?`运行中均正常 · ${x.total-x.running} 个已停止`:'运行中容器均正常';document.querySelector('#systemStatus').innerHTML=systemItem('CPU',`${Number(c.percent).toFixed(1)}%`,`${c.cores} 核 · 负载 ${c.load_1m} / ${c.load_5m}`,systemTone(c.percent,75,90),c.percent)+systemItem('内存',`${Number(m.percent).toFixed(1)}%`,`${formatBytes(m.used)} / ${formatBytes(m.total)} · Swap ${Number(m.swap_percent).toFixed(1)}%`,systemTone(m.percent,75,90),m.percent)+systemItem('温度',tempValue,tempDetail,systemTone(t.cpu_c||0,70,85))+systemItem('M.2 Docker 盘',`${Number(d.percent).toFixed(1)}%`,`${formatBytes(d.used)} / ${formatBytes(d.total)}`,systemTone(d.percent,75,90),d.percent)+systemItem('Docker',dockerValue,dockerDetail,x.unhealthy?'bad':'')+systemItem('运行时间',formatUptime(s.uptime_seconds),`内核 ${s.kernel}`);document.querySelector('#systemUpdated').textContent=`${s.healthy?'状态正常':'需要检查'} · ${new Date(s.updated_at*1000).toLocaleTimeString('zh-CN',{hour12:false})}`}catch(e){document.querySelector('#systemStatus').innerHTML=`<div class="empty">读取失败：${esc(e.message)}</div>`;document.querySelector('#systemUpdated').textContent='读取失败'}}
+function deviceActions(d){''',
+    1,
+)
+PAGE = PAGE.replace(
+    "load();setInterval(()=>{if(!document.querySelector('#renameDialog').open)load()},30000)",
+    "load();loadSystem();setInterval(loadSystem,10000);setInterval(()=>{if(!document.querySelector('#renameDialog').open)load()},30000)",
+    1,
+)
 PAGE = PAGE.replace(
     '.overall.bad{color:#ff453a}',
     '.overall.bad{color:#ff453a}.overall.warn{color:#ffd60a}',
@@ -1029,6 +1170,12 @@ PAGE = PAGE.replace(
 .health-item span{white-space:normal;overflow:visible;text-overflow:clip;line-height:1.45;overflow-wrap:anywhere}
 @media(max-width:760px){.health-item,.health-item:nth-child(2n),.health-item:last-child{flex-basis:calc(50% - 1px);min-width:calc(50% - 1px);border:0}}
 @media(max-width:420px){.health-item,.health-item:nth-child(2n),.health-item:last-child{flex-basis:100%;min-width:100%;min-height:0}}</style></head>''',
+    1,
+)
+PAGE = PAGE.replace(
+    '</style></head>',
+    '''@media(max-width:820px){.system-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.system-item,.system-item:nth-child(3n),.system-item:nth-last-child(-n+3){border-right:1px solid #38383a;border-bottom:1px solid #38383a}.system-item:nth-child(2n){border-right:0}.system-item:nth-last-child(-n+2){border-bottom:0}}
+@media(max-width:420px){.system-grid{grid-template-columns:1fr}.system-item,.system-item:nth-child(2n),.system-item:nth-child(3n),.system-item:nth-last-child(-n+3),.system-item:nth-last-child(-n+2){border-right:0;border-bottom:1px solid #38383a}.system-item:last-child{border-bottom:0}}</style></head>''',
     1,
 )
 PAGE = PAGE.replace('@media(max-width:760px)', '@media(max-width:820px)')
@@ -1136,6 +1283,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-Frame-Options", "DENY")
             self.end_headers()
             self.wfile.write(data)
+            return
+        if path == "/api/system/status":
+            try:
+                self.reply(HTTPStatus.OK, system_status())
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                self.reply(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": f"Z4Pro 状态读取失败：{exc}"},
+                )
             return
         if path == "/api/devices":
             try:

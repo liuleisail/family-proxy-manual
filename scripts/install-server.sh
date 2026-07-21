@@ -14,6 +14,15 @@ python3 -c 'import yaml' 2>/dev/null || {
   command -v apt-get >/dev/null || { echo "install python3-yaml, then retry" >&2; exit 1; }
   apt-get update && apt-get install -y python3-yaml
 }
+if ! command -v sensors >/dev/null; then
+  if command -v apt-get >/dev/null; then
+    if ! apt-get update || ! apt-get install -y lm-sensors; then
+      echo "warning: lm-sensors installation failed; CPU/NVMe temperature cards will show unavailable" >&2
+    fi
+  else
+    echo "warning: lm-sensors is not installed; CPU/NVMe temperature cards will show unavailable" >&2
+  fi
+fi
 if [[ ! -f $CONFIG ]]; then
   install -d -m 700 /etc/family-proxy-ui
   install -m 600 "$REPO_DIR/config/router.env.example" "$CONFIG"
