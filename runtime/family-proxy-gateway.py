@@ -8,6 +8,7 @@ import http.client
 import ipaddress
 import os
 import secrets
+import threading
 import time
 from http import HTTPStatus
 from http.cookies import SimpleCookie
@@ -215,5 +216,30 @@ class Handler(BaseHTTPRequestHandler):
         self.proxy()
 
 
+class LegacyAirportRedirect(BaseHTTPRequestHandler):
+    """Redirect cached direct-port bookmarks back through the login gateway."""
+
+    def log_message(self, *_):
+        pass
+
+    def redirect(self):
+        try:
+            allowed = ipaddress.ip_address(self.client_address[0]) in LAN
+        except ValueError:
+            allowed = False
+        if not allowed:
+            self.send_error(HTTPStatus.FORBIDDEN)
+            return
+        self.send_response(HTTPStatus.PERMANENT_REDIRECT)
+        self.send_header("Location", "http://__FAMILY_PROXY_IP__:18088/airport/")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+    do_GET = redirect
+    do_HEAD = redirect
+
+
 if __name__ == "__main__":
+    legacy = ThreadingHTTPServer(("__FAMILY_PROXY_IP__", 18090), LegacyAirportRedirect)
+    threading.Thread(target=legacy.serve_forever, daemon=True).start()
     ThreadingHTTPServer(("__FAMILY_PROXY_IP__", 18088), Handler).serve_forever()
