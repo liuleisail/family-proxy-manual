@@ -38,7 +38,7 @@ PROXY_IP = "__FAMILY_PROXY_IP__"
 FIXED_MANAGED_IPS = set()
 RESERVED_IPS = {"__FAMILY_ROUTER_IP__", "__FAMILY_RESERVED_GATEWAY_IP__", PROXY_IP}
 AUDIT_PATH = Path("/var/log/family-proxy-ui-audit.jsonl")
-BUILD_VERSION = "2026.07.21-router-status"
+BUILD_VERSION = "2026.07.21-device-layout"
 SHARED_LIST = "family_mihomo_devices"
 SHARED_TABLE = "family_mihomo_shared"
 SHARED_CONN_MARK = "family_mihomo_conn"
@@ -1215,6 +1215,47 @@ PAGE = PAGE.replace(
     1,
 )
 PAGE = PAGE.replace('@media(max-width:760px)', '@media(max-width:820px)')
+PAGE = PAGE.replace(
+    '</style></head>',
+    '''.manual-add>summary{display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:46px;padding:0 14px;border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;color:#0a84ff;font-size:13px;font-weight:600;cursor:pointer;list-style:none}.manual-add>summary::-webkit-details-marker{display:none}.manual-add>summary:after{content:"›";font-size:21px;line-height:1;color:#636366;transform:rotate(90deg);transition:transform .16s ease}.manual-add[open]>summary{margin-bottom:9px}.manual-add[open]>summary:after{transform:rotate(-90deg)}.summary-hint{color:#8e8e93;font-size:12px;font-weight:400}@media(max-width:420px){.summary-hint{display:none}}</style></head>''',
+    1,
+)
+
+
+def page_section(page, heading):
+    marker = f"<h2>{heading}</h2>"
+    heading_at = page.index(marker)
+    start = page.rfind('<section class="section">', 0, heading_at)
+    end = page.index("</section>", heading_at) + len("</section>")
+    return start, end, page[start:end]
+
+
+sections = {heading: page_section(PAGE, heading) for heading in (
+    "设备", "加入旁路", "旁路运行状态", "RB5009 运行状态", "Z4Pro 运行状态")}
+region_start = min(section[0] for section in sections.values())
+region_end = max(section[1] for section in sections.values())
+ordered_sections = "".join(sections[heading][2] for heading in (
+    "设备", "加入旁路", "旁路运行状态", "RB5009 运行状态", "Z4Pro 运行状态"))
+PAGE = PAGE[:region_start] + ordered_sections + PAGE[region_end:]
+
+add_start, add_end, add_section = page_section(PAGE, "加入旁路")
+add_section = add_section.replace(
+    '<section class="section"><div class="section-title"><h2>加入旁路</h2></div>',
+    '<details class="section manual-add" id="manualAdd"><summary><span>按 IP 手动加入</span><span class="summary-hint">适用于已知地址的设备</span></summary>',
+    1,
+)
+add_section = add_section[:-len("</section>")] + "</details>"
+PAGE = PAGE[:add_start] + add_section + PAGE[add_end:]
+PAGE = PAGE.replace(
+    "function choose(ip){document.querySelector('#ip').value=ip;",
+    "function choose(ip){document.querySelector('#manualAdd').open=true;document.querySelector('#ip').value=ip;",
+    1,
+)
+PAGE = PAGE.replace(
+    "function setStatus(message,ok=true){statusEl.textContent=message;statusEl.className='status '+(ok?'':'error')}",
+    "function setStatus(message,ok=true){statusEl.textContent=message;statusEl.className='status '+(ok?'':'error');if(!ok)document.querySelector('#manualAdd').open=true}",
+    1,
+)
 
 RULES_PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>代理规则</title><style>
 :root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC","Segoe UI",sans-serif;background:#000;color:#f5f5f7;letter-spacing:0}*{box-sizing:border-box}body{margin:0;background:#000;color:#f5f5f7}.topbar{position:sticky;top:0;z-index:10;border-bottom:1px solid rgba(255,255,255,.1);background:rgba(18,18,20,.88);backdrop-filter:saturate(180%) blur(22px);-webkit-backdrop-filter:saturate(180%) blur(22px)}.topbar-inner{max-width:1040px;min-height:58px;margin:auto;padding:0 22px;display:flex;align-items:center;justify-content:space-between;gap:18px}.brand{font-size:17px;font-weight:650;color:#fff;white-space:nowrap}.nav{display:flex;align-items:center;gap:4px;padding:3px;background:#2c2c2e;border-radius:8px}.nav a{padding:7px 11px;border-radius:6px;color:#aeaeb2;text-decoration:none;font-size:13px;white-space:nowrap}.nav a.active{background:#636366;color:#fff}.wrap{max-width:1040px;margin:auto;padding:38px 22px 64px}.intro{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:25px}.intro h1{font-size:30px;line-height:1.15;margin:0;font-weight:700}.intro p{margin:9px 0 0;color:#98989d;font-size:14px}.count{padding:8px 11px;border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;color:#30d158;font-size:13px;white-space:nowrap}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:9px}.toolbar h2{font-size:13px;color:#8e8e93;font-weight:600;margin:0}.actions{display:flex;gap:7px}.group{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.rule-row{display:grid;grid-template-columns:34px minmax(0,1fr) auto;align-items:center;gap:9px;padding:9px 12px;border-top:1px solid #38383a}.rule-row:first-child{border-top:0}.rule-index{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#636366;text-align:right}.rule-input{min-width:0;width:100%;height:38px;border:1px solid transparent;border-radius:7px;background:#2c2c2e;color:#f5f5f7;padding:0 10px;font:13px ui-monospace,SFMono-Regular,Menlo,monospace;outline:none}.rule-input:focus{border-color:#0a84ff;box-shadow:0 0 0 3px rgba(10,132,255,.18)}.rule-input.protected{color:#aeaeb2}.icon-set{display:flex;gap:3px}.icon{width:34px;height:34px;border:0;border-radius:6px;background:transparent;color:#0a84ff;font-size:17px;cursor:pointer}.icon:hover{background:rgba(10,132,255,.12)}.icon.danger{color:#ff453a}.icon:disabled{color:#48484a;cursor:default;background:transparent}.button{height:36px;border:0;border-radius:7px;padding:0 13px;font:600 13px inherit;cursor:pointer}.primary{background:#0a84ff;color:#fff}.secondary{background:#2c2c2e;color:#f5f5f7}.button:disabled{opacity:.5;cursor:default}.footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px}.status{min-height:20px;color:#30d158;font-size:13px}.status.error{color:#ff6961}.empty{padding:28px;text-align:center;color:#8e8e93}.dirty .count{color:#ffd60a}@media(max-width:760px){.topbar-inner{height:auto;padding:10px 14px;align-items:flex-start;flex-direction:column;gap:8px}.nav{width:100%;display:grid;grid-template-columns:repeat(4,1fr)}.nav a{text-align:center;padding:7px 5px;white-space:normal}.wrap{padding:28px 14px 50px}.intro{align-items:flex-start;flex-direction:column}.rule-row{grid-template-columns:28px minmax(0,1fr);padding:9px}.icon-set{grid-column:2;justify-content:flex-end}.footer{align-items:stretch;flex-direction:column}.footer .button{width:100%}.actions{width:100%}.actions .button{flex:1}}
