@@ -31,11 +31,29 @@
 - 官方域名/IP 规则使用原始项目的 HTTPS 地址。若代理节点无法访问 GitHub，可本地直连 `raw.githubusercontent.com`，但不得改用来源不明的镜像站。
 - 自动更新至少校验规则数量下限、与上一版的数量比例、固定域名的实际标签、实际国内/国外上游和异常/FakeIP 地址；任一项失败即回滚。
 
+### 在管理页编辑上游
+
+安装可选 DNS 管理组件后，“DNS - 概览 - 解析上游”可以分别编辑国内和国外服务器。每行一个地址；需要固定连接 IP 时，在竖线后填写 IP：
+
+```text
+udp://223.5.5.5
+https://dns.alidns.com/dns-query | 223.5.5.5
+h3://dns.alidns.com/dns-query | 223.6.6.6
+tls://dns.alidns.com | 223.5.5.5
+quic://dns.alidns.com | 223.6.6.6
+```
+
+`h3://` 是页面的简写，保存时会转换为 HTTPS 并开启 HTTP/3。DoT、DoH3 和 DoQ 应优先填写证书对应的域名，再用竖线指定连接 IP；直接填写 `tls://223.5.5.5` 等 IP 地址可能因证书名称不匹配而失败。
+
+国外组只接受 DoT、DoH、DoH3 和 DoQ，并强制沿用 Mihomo SOCKS 出口；不会退回明文 UDP/TCP。保存时先备份现有上游，调用 MosDNS-T 热重载，再检查固定国内外域名的实际 `final_upstream`。任一探针失败会恢复旧配置，无需重启 MosDNS 核心。
+
+该编辑器只影响主动使用 Z4Pro MosDNS 的查询，不会修改 RouterOS、DHCP DNS、设备接管名单或增加 DNS 重定向。当前网络若已验证国内应用使用公共 DNS 更稳定，应继续保持这一边界。
+
 ## 4. HTTPDNS 和 DoT
 
 MosDNS 无法控制应用直接访问的 HTTPDNS、DoH 或 DoT。推荐分层处理：
 
-- RouterOS 只对接管设备重定向 TCP/UDP 53。
+- 只有经过单设备验证确有需要时，才对接管设备重定向 TCP/UDP 53；已验证公共 DNS 更稳定的网络不要启用该项。
 - 只对接管设备阻断局域网以外的 TCP/UDP 853，并把规则放在该策略的 FastTrack 排除规则之前。
 - 不全局封锁 443。
 - HTTPDNS 使用本地维护的小型清单，先覆盖实际使用的购物、短视频和通信应用；不要直接启用同时混有 PCDN、广告和遥测域名的大型清单。

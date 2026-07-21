@@ -58,6 +58,22 @@ sudo ./scripts/verify-server.sh
 
 DNS 必须由本机现有的 MosDNS/DNS 服务监听旁路主机的 `53` 端口。该项目不自动覆盖 DNS 容器，因为错误地占用 `53` 端口会影响全屋解析。完成 DNS 对接后，管理页的 DNS 健康项才会变为正常。
 
+### 可选：安装 MosDNS 管理页面
+
+已有兼容的 `family-mosdns-t` compose 目录时，可以部署上游编辑、规则/软件维护与仪表盘：
+
+```bash
+sudo scripts/install-mosdns-management.sh \
+  --compose-dir /你的持久化目录/family-mosdns-t \
+  --dns-server 旁路主机的局域网IP \
+  --core-api http://MosDNS容器地址:9099 \
+  --socks5 Mihomo容器地址:7890
+```
+
+脚本先备份仪表盘、维护服务和 `upstream_overrides.json`，然后只重启维护服务并重建 `ui` 服务，以修复 Docker 单文件 bind mount 更换 inode 后可能出现的 `Stale file handle`。它不重启 MosDNS 核心、不改端口 `53`、不修改现有上游、不写 RouterOS，也不增加 DNS 重定向。
+
+打开统一入口的“DNS - 概览 - 解析上游”后可编辑服务器。保存时使用 MosDNS-T 热重载，并用国内外固定域名校验实际分流；失败自动恢复旧上游。未主动使用 MosDNS 的设备不受这些设置影响。
+
 ## 4. RouterOS 操作
 
 在 RouterOS 终端依次导入：
@@ -112,7 +128,7 @@ sudo /usr/local/sbin/family-mihomo-tproxy-auto sync
 - 设备页能显示 CPU、内存、温度、Docker 数据盘、运行/总容器数和系统运行时间；已停止容器保持原状态。
 - Mihomo 控制接口可访问，候选池配置可校验并加载。
 - DNS 服务确实监听旁路主机 53 端口，国内和代理域名按预期解析。
-- DNS“概览”和“数据管理”的重新载入均成功；来自旧 DNS 页面的无前缀 API 也能经统一入口兼容转发。
+- DNS“概览”和“数据管理”的重新载入均成功；上游编辑能读取当前配置、拒绝国外明文 DNS；来自旧 DNS 页面的无前缀 API 也能经统一入口兼容转发。
 - 接管测试设备在国内 App、局域网服务和外网业务上都通过；未接管设备保持原样。
 - RouterOS 文本导出、二进制备份和本次服务器备份均可定位。
 
