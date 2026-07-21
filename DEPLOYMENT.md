@@ -4,7 +4,7 @@
 
 ## 0. 前置条件
 
-- Debian/Ubuntu 或兼容 `systemd` 的主机，已安装 Docker Engine 与 Docker Compose 插件。Debian/Ubuntu 安装器会按需补齐 `python3-yaml` 和 `lm-sensors`；其它发行版需自行安装，缺少 `lm-sensors` 时仅温度卡片不可用。
+- Debian/Ubuntu 或兼容 `systemd` 的主机，已安装 Docker Engine 与 Docker Compose 插件。Debian/Ubuntu 安装器会按需补齐 `python3-yaml`、`lm-sensors`、`tcpdump` 和 `util-linux`；其它发行版需自行安装。缺少 `lm-sensors` 时仅温度卡片不可用，缺少后两项则不能使用设备抓包诊断。
 - 旁路主机有固定 IPv4 地址，并与 RouterOS 位于同一 LAN。
 - RouterOS API 已仅向旁路主机开放；不得把 API 暴露到 WAN。
 - 旁路主机的 SSD 路径可用于 `/var/lib/family-proxy/docker`，或在配置中改成另一个持久目录。
@@ -20,7 +20,7 @@ sudo install -m 600 config/router.env.example /etc/family-proxy-ui/router.env
 sudoedit /etc/family-proxy-ui/router.env
 ```
 
-只填写 `router.env` 内的 LAN、旁路主机、RouterOS API 用户/密码及管理页用户名/密码。首次运行安装器会把 `UI_PASSWORD` 转为 PBKDF2 哈希并从文件中删除。该文件、网关会话密钥和节点/订阅文件均不在 Git 中。
+只填写 `router.env` 内的 LAN、旁路主机、RouterOS API 用户/密码及管理页用户名/密码。`FAMILY_CAPTURE_INTERFACE` 应填写承载受管设备流量的 LAN 桥接口，Z4Pro 通常为 `kvmbr0`；其它主机先用 `ip -br link` 核实。首次运行安装器会把 `UI_PASSWORD` 转为 PBKDF2 哈希并从文件中删除。该文件、网关会话密钥和节点/订阅文件均不在 Git 中。
 
 现有 DNS 仪表盘若启用了 Basic Auth，再把 `username:password` 的 Base64 结果填入 `DNS_UPSTREAM_AUTH_B64`：
 
@@ -37,6 +37,8 @@ sudo ./scripts/install-server.sh
 ```
 
 首次安装不会启动服务。脚本会保存旧版文件到 `/var/backups/family-proxy/<时间戳>/`，渲染运行程序、检查 Python 语法、安装 systemd 单元并启用开机启动。`FAMILY_DOCKER_ROOT` 必须指向服务器可持续访问的数据目录；Z4Pro 状态页会以该目录统计 Docker 盘容量。
+
+systemd 会为设备诊断创建 `/run/family-proxy-captures` 内存运行目录。抓包单文件限制 50 MB、总量限制 200 MB、保留 24 小时，重启后自动清空，因此不会持续写入 Docker 数据盘或 M.2。
 
 安装器还会使用本地直连从 APNIC 官方数据源生成 `/etc/family-proxy-ui/cn-ipv4.txt`，并启用每周更新计时器。该列表用于让受管设备的中国 IPv4 流量在旁路主机直接转发和 SNAT；只有列表外流量进入 Mihomo TPROXY。手动更新命令为：
 

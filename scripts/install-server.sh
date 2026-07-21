@@ -23,6 +23,19 @@ if ! command -v sensors >/dev/null; then
     echo "warning: lm-sensors is not installed; CPU/NVMe temperature cards will show unavailable" >&2
   fi
 fi
+missing_capture_packages=()
+command -v tcpdump >/dev/null || missing_capture_packages+=(tcpdump)
+command -v prlimit >/dev/null || missing_capture_packages+=(util-linux)
+if ((${#missing_capture_packages[@]})); then
+  if command -v apt-get >/dev/null; then
+    apt-get update && apt-get install -y "${missing_capture_packages[@]}"
+  else
+    echo "install tcpdump and util-linux (prlimit), then retry" >&2
+    exit 1
+  fi
+fi
+[[ -x /usr/bin/tcpdump ]] || { echo "/usr/bin/tcpdump is required" >&2; exit 1; }
+[[ -x /usr/bin/prlimit ]] || { echo "/usr/bin/prlimit is required" >&2; exit 1; }
 if [[ ! -f $CONFIG ]]; then
   install -d -m 700 /etc/family-proxy-ui
   install -m 600 "$REPO_DIR/config/router.env.example" "$CONFIG"

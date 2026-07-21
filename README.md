@@ -18,7 +18,7 @@ sudo install -m 600 config/router.env.example /etc/family-proxy-ui/router.env
 sudoedit /etc/family-proxy-ui/router.env
 ```
 
-只需要填写本机 LAN、旁路主机 IP、RouterOS API 地址/账号/密码和管理页账号/密码。`router.env` 不会被提交；首次安装后明文 `UI_PASSWORD` 会自动转换为哈希并删除。
+只需要填写本机 LAN、旁路主机 IP、承载受管设备流量的 LAN 桥接口、RouterOS API 地址/账号/密码和管理页账号/密码。Z4Pro 的桥接口通常是 `kvmbr0`，其它服务器先用 `ip -br link` 核实。`router.env` 不会被提交；首次安装后明文 `UI_PASSWORD` 会自动转换为哈希并删除。
 
 ### 2. 部署控制平面与 Mihomo
 
@@ -29,7 +29,7 @@ sudo ./scripts/install-server.sh --start
 sudo ./scripts/verify-server.sh
 ```
 
-第一条命令会生成带时间戳的本地备份、渲染程序、安装 systemd 服务，但不启动服务；在 Debian/Ubuntu 上还会按需安装 `python3-yaml` 和用于温度读取的 `lm-sensors`。第二条命令只在不存在 `family-mihomo-fallback` 容器时创建基础 Mihomo 容器。第三、四条命令启动服务，并验证控制平面、Z4Pro 系统状态和机场状态接口。
+第一条命令会生成带时间戳的本地备份、渲染程序、安装 systemd 服务，但不启动服务；在 Debian/Ubuntu 上还会按需安装 `python3-yaml`、用于温度读取的 `lm-sensors`，以及设备诊断所需的 `tcpdump` 和 `prlimit`。第二条命令只在不存在 `family-mihomo-fallback` 容器时创建基础 Mihomo 容器。第三、四条命令启动服务，并验证控制平面、系统状态、机场状态和抓包容量限制。
 
 DNS 必须先由服务器上现有的 MosDNS/DNS 服务监听旁路主机的 `53` 端口；本项目故意不自动接管端口 `53`，避免影响现有家庭 DNS。
 
@@ -60,7 +60,7 @@ MosDNS-T 的推荐加固配置见 [MOSDNS.md](MOSDNS.md)。其中包含分流前
 
 | 页面 | 日常用途 | 不做什么 |
 | --- | --- | --- |
-| 设备 | 查看旁路健康、RB5009 版本/CPU/可用内存/运行时间与 Z4Pro CPU、内存、温度、Docker 盘和容器状态；加入或撤出单台设备、改名、保留常用设备、查看流量计数 | 不在这里修改机场节点 |
+| 设备 | 查看旁路健康、RB5009 版本/CPU/可用内存/运行时间与 Z4Pro CPU、内存、温度、Docker 盘和容器状态；加入或撤出单台设备、改名、保留常用设备、查看流量计数和执行短时抓包诊断 | 不在这里修改机场节点 |
 | 规则 | 调整业务分流规则并生成可回退配置 | 不写入订阅链接 |
 | 机场与候选池 | 按需添加机场来源、全量测速生成建议、复测并生效、查看 fallback 切换 | 不长期对所有节点测速 |
 | DNS | 查看解析状态、缓存和日志；按需编辑 MosDNS 国内/国外上游 | 不自动修改 RouterOS、DHCP DNS 或强制重定向 |
@@ -80,6 +80,15 @@ MosDNS-T 的推荐加固配置见 [MOSDNS.md](MOSDNS.md)。其中包含分流前
 5. 让设备重新连接 Wi-Fi，分别验证一个国内应用、一个网页视频服务和一个即时通信服务。
 
 “等待新流量”只表示规则已创建但还没有观察到新连接。重新打开应用或切换一次 Wi-Fi 后应出现计数；若仍为零，按本文的“故障排查”检查。
+
+### 短时抓包诊断
+
+“已接管”设备会显示“诊断”按钮，可抓取该设备的全部、DNS、TCP 或 UDP 元数据，用于判断请求是否发出、DNS 返回是否延迟、连接是否重传，以及流量实际经过哪个方向。HTTPS 正文仍是加密内容，不会显示账号、密码或页面正文。
+
+- 时长只能选择 30 秒、1 分钟或 3 分钟；全机同一时间只运行一个任务。
+- 单文件硬限制 50 MB，所有文件合计不超过 200 MB，超过 24 小时自动删除。
+- 文件位于 `/run/family-proxy-captures` 内存目录，不写入 M.2；服务器重启后自动清空。
+- 诊断完成后可下载 PCAP 用 Wireshark 查看，也可立即在页面删除。不要把抓包文件上传到公开网站或提交到 GitHub。
 
 ### 撤出一台设备
 

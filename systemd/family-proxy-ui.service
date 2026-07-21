@@ -15,6 +15,9 @@ PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
 ReadWritePaths=/etc/family-proxy-ui /var/lib/family-proxy /var/log/family-proxy-ui-audit.jsonl
+RuntimeDirectory=family-proxy-captures
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
 
 [Install]
 WantedBy=multi-user.target
