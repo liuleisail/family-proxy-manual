@@ -41,6 +41,8 @@ POOLS = {
 CANDIDATES = PROVIDERS / "candidates.json"
 PREVIOUS = PROVIDERS / "candidates.previous.json"
 LAST_TESTS = PROVIDERS / "last-tests.json"
+CONFIRM_TESTS = PROVIDERS / "last-confirm-tests.json"
+SUGGESTIONS = PROVIDERS / "pool-suggestions.json"
 RUNTIME_STATE = PROVIDERS / "runtime-state.json"
 RUNTIME_EVENTS = PROVIDERS / "runtime-events.json"
 VERSIONS = BASE / "family-mihomo-fallback/config-versions"
@@ -63,6 +65,9 @@ TEST_STATE = {
     "started_at": None,
     "finished_at": None,
     "error": None,
+    "action": None,
+    "proposal_ready": False,
+    "applied": False,
 }
 
 
@@ -135,6 +140,64 @@ def pools():
     except (OSError, json.JSONDecodeError):
         data = {}
     return {name: list(data.get(name, []))[:5] for name in POOLS}
+
+
+def suggestions():
+    data = read_json(SUGGESTIONS, {})
+    proposal = data.get("pools") if isinstance(data.get("pools"), dict) else {}
+    return {
+        "pools": {name: list(proposal.get(name, []))[:5] for name in POOLS},
+        "generated_at": data.get("generated_at"),
+        "ready": bool(data.get("ready")),
+        "reason": data.get("reason"),
+    }
+
+
+def node_index():
+    return {item["name"]: item for item in nodes()}
+
+
+def pool_matches(pool, node):
+    return any(word.casefold() in node["raw"].casefold() for word in POOLS[pool])
+
+
+def test_score(result):
+    # Median latency is dominant; jitter only breaks close calls.
+    return int(result["delay"]) + round(int(result["jitter"] or 0) * 0.35)
+
+
+def rank_pool_candidates(entries):
+    """Keep stable primary nodes first, then fill with stable backups."""
+    chosen = []
+    for source, limit in (("primary", 3), ("backup1", 1), ("backup2", 1)):
+        chosen.extend(sorted((entry for entry in entries if entry["source"] == source),
+                             key=lambda entry: (entry["score"], entry["name"]))[:limit])
+    for entry in sorted(entries, key=lambda entry: (source_rank(entry["name"]), entry["score"], entry["name"])):
+        if entry not in chosen and len(chosen) < 5:
+            chosen.append(entry)
+    return [entry["name"] for entry in sorted(chosen, key=lambda entry: (source_rank(entry["name"]), entry["score"], entry["name"]))[:5]]
+
+
+def build_suggestions(results):
+    indexed = node_index()
+    result_by_name = {item["name"]: item for item in results}
+    proposed = {}
+    for pool in POOLS:
+        eligible = []
+        for name, node in indexed.items():
+            result = result_by_name.get(name)
+            if not result or result.get("success") != 3 or result.get("delay") is None:
+                continue
+            if pool_matches(pool, node):
+                eligible.append({"name": name, "source": node["source"], "score": test_score(result)})
+        proposed[pool] = rank_pool_candidates(eligible)
+    missing = [pool for pool, entries in proposed.items() if not entries]
+    return {
+        "pools": proposed,
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "ready": not missing,
+        "reason": ("、".join(missing) + " 没有连续三次成功的节点") if missing else None,
+    }
 
 
 def seed_pools():
@@ -297,6 +360,7 @@ def apply_provider(slot, cleaned, count):
         generate_config(reconciled)
         PREVIOUS.write_bytes(previous_candidates)
         atomic_json(CANDIDATES, reconciled)
+        SUGGESTIONS.unlink(missing_ok=True)
         atomic_json(PROVIDERS / f"{slot}.json", meta)
     except (ValueError, OSError):
         if previous_provider is None:
@@ -343,6 +407,7 @@ def clear_slot(slot):
         generate_config(reconciled)
         PREVIOUS.write_bytes(previous_candidates)
         atomic_json(CANDIDATES, reconciled)
+        SUGGESTIONS.unlink(missing_ok=True)
         (PROVIDERS / f"{slot}.json").unlink(missing_ok=True)
     except (ValueError, OSError):
         path.write_bytes(previous_provider)
@@ -357,14 +422,16 @@ def clear_slot(slot):
 
 
 def validate_pools(value):
-    valid = {n["name"] for n in nodes()}
+    indexed = node_index()
     cleaned = {}
     for pool in POOLS:
         entries = value.get(pool, [])
         if not isinstance(entries, list) or not 1 <= len(entries) <= 5 or len(entries) != len(set(entries)):
             raise ValueError(f"{pool} 必须是 1 至 5 个不重复节点")
-        if any(item not in valid for item in entries):
+        if any(item not in indexed for item in entries):
             raise ValueError(f"{pool} 含有不存在的节点")
+        if any(not pool_matches(pool, indexed[item]) for item in entries):
+            raise ValueError(f"{pool} 含有不符合地域规则的节点")
         cleaned[pool] = sorted(entries, key=source_rank)
     return cleaned
 
@@ -425,8 +492,7 @@ def test_one(name):
     }
 
 
-def test_all(progress=None):
-    names = [item["name"] for item in nodes()]
+def test_nodes(names, progress=None, result_path=LAST_TESTS):
     with ThreadPoolExecutor(max_workers=6) as executor:
         futures = [executor.submit(test_one, name) for name in names]
         results = []
@@ -436,8 +502,12 @@ def test_all(progress=None):
                 progress(completed, len(names))
     results = sorted(results, key=lambda item: (not item["ok"], item["delay"] or 999999,
                                                  item["jitter"] or 999999, item["name"]))
-    atomic_json(LAST_TESTS, {"tested_at": datetime.now().astimezone().isoformat(), "results": results})
+    atomic_json(result_path, {"tested_at": datetime.now().astimezone().isoformat(), "results": results})
     return results
+
+
+def test_all(progress=None):
+    return test_nodes([item["name"] for item in nodes()], progress)
 
 
 def test_status():
@@ -447,6 +517,7 @@ def test_status():
     state["last_tested_at"] = latest.get("tested_at")
     state["last_total"] = len(latest.get("results", []))
     state["last_ok"] = sum(1 for item in latest.get("results", []) if item.get("ok"))
+    state["suggestions"] = suggestions()
     return state
 
 
@@ -457,7 +528,8 @@ def start_test_all():
     now = datetime.now().astimezone().isoformat()
     with TEST_STATE_LOCK:
         TEST_STATE.update({"running": True, "total": len(names), "completed": 0,
-                           "started_at": now, "finished_at": None, "error": None})
+                           "started_at": now, "finished_at": None, "error": None,
+                           "action": "full-test", "proposal_ready": False, "applied": False})
 
     def update_progress(completed, total):
         with TEST_STATE_LOCK:
@@ -465,10 +537,12 @@ def start_test_all():
 
     def run():
         try:
-            test_all(update_progress)
+            proposal = build_suggestions(test_all(update_progress))
+            atomic_json(SUGGESTIONS, proposal)
             with TEST_STATE_LOCK:
                 TEST_STATE.update({"running": False, "completed": TEST_STATE["total"],
-                                   "finished_at": datetime.now().astimezone().isoformat()})
+                                   "finished_at": datetime.now().astimezone().isoformat(),
+                                   "proposal_ready": proposal["ready"]})
         except Exception as exc:
             with TEST_STATE_LOCK:
                 TEST_STATE.update({"running": False, "error": str(exc),
@@ -477,6 +551,54 @@ def start_test_all():
             TEST_JOB_LOCK.release()
 
     threading.Thread(target=run, name="mihomo-manual-speed-test", daemon=True).start()
+    return {"started": True, **test_status()}
+
+
+def start_retest_apply(value):
+    if not suggestions()["ready"]:
+        raise ValueError("请先完成全量稳定性测速并生成完整建议")
+    selected = validate_pools(value)
+    if not TEST_JOB_LOCK.acquire(blocking=False):
+        return {"started": False, **test_status()}
+    names = list(dict.fromkeys(name for entries in selected.values() for name in entries))
+    now = datetime.now().astimezone().isoformat()
+    with TEST_STATE_LOCK:
+        TEST_STATE.update({"running": True, "total": len(names), "completed": 0,
+                           "started_at": now, "finished_at": None, "error": None,
+                           "action": "retest-apply", "proposal_ready": True, "applied": False})
+
+    def update_progress(completed, total):
+        with TEST_STATE_LOCK:
+            TEST_STATE.update({"completed": completed, "total": total})
+
+    def run():
+        try:
+            results = test_nodes(names, update_progress, CONFIRM_TESTS)
+            indexed = node_index()
+            result_by_name = {item["name"]: item for item in results}
+            confirmed = {}
+            for pool, entries in selected.items():
+                stable = []
+                for name in entries:
+                    result = result_by_name.get(name)
+                    if result and result.get("success") == 3 and result.get("delay") is not None:
+                        stable.append({"name": name, "source": indexed[name]["source"], "score": test_score(result)})
+                confirmed[pool] = rank_pool_candidates(stable)
+            final = validate_pools(confirmed)
+            save_pools(final)
+            atomic_json(SUGGESTIONS, {"pools": final, "generated_at": now, "ready": True,
+                                      "reason": None, "applied_at": datetime.now().astimezone().isoformat()})
+            with TEST_STATE_LOCK:
+                TEST_STATE.update({"running": False, "completed": TEST_STATE["total"],
+                                   "finished_at": datetime.now().astimezone().isoformat(), "applied": True})
+        except Exception as exc:
+            with TEST_STATE_LOCK:
+                TEST_STATE.update({"running": False, "error": str(exc),
+                                   "finished_at": datetime.now().astimezone().isoformat()})
+        finally:
+            TEST_JOB_LOCK.release()
+
+    threading.Thread(target=run, name="mihomo-candidate-confirmation", daemon=True).start()
     return {"started": True, **test_status()}
 
 
@@ -578,12 +700,15 @@ PAGE = PAGE.replace(_history_marker, _stable_marker + _history_marker, 1)
 # Keep the subscription landing page small. The full node catalogue is only
 # needed once the user opens the candidate-pool tab.
 PAGE = PAGE.replace("if(id==='runtime')loadStatus()", "if(id==='pools')loadPools();if(id==='runtime')loadStatus()")
-PAGE = PAGE.replace("let all=[],pools={},delays={};", "let all=[],pools={},delays={},catalogLoaded=false,testPoll=null;")
+PAGE = PAGE.replace("let all=[],pools={},delays={};", "let all=[],pools={},activePools={},suggestion=null,delays={},catalogLoaded=false,testPoll=null;")
 PAGE = PAGE.replace("async function load(){let d=await api('/api/state');", "async function load(){let d=await api('/api/nodes');")
-PAGE = PAGE.replace("renderPools()}function options", "catalogLoaded=true;renderPools()}async function loadSummary(){let d=await api('/api/state');document.querySelector('#slots').innerHTML=d.slots.map(slotCard).join('');pools=d.pools;if(d.tests&&d.tests.tested_at)document.querySelector('#testStatus').textContent='上次稳定性测速：'+d.tests.tested_at}async function loadPools(){if(catalogLoaded)return;try{await load()}catch(e){pageError(e)}}function pageError(e){let box=document.querySelector('#pageStatus');if(!box){box=document.createElement('div');box.id='pageStatus';box.className='status bad';document.querySelector('.intro').append(box)}box.innerHTML='页面数据加载失败。<button class=\"btn\" onclick=\"loadSummary().catch(pageError)\">重试</button>';console.error(e)}function options")
+PAGE = PAGE.replace("renderPools()}function options", "catalogLoaded=true;renderPools()}async function loadSummary(){let d=await api('/api/state');document.querySelector('#slots').innerHTML=d.slots.map(slotCard).join('');pools=d.pools;if(d.tests&&d.tests.tested_at)document.querySelector('#testStatus').textContent='上次稳定性测速：'+d.tests.tested_at}async function loadPools(){if(catalogLoaded)return;try{await load();await refreshTestStatus()}catch(e){pageError(e)}}function pageError(e){let box=document.querySelector('#pageStatus');if(!box){box=document.createElement('div');box.id='pageStatus';box.className='status bad';document.querySelector('.intro').append(box)}box.innerHTML='页面数据加载失败。<button class=\"btn\" onclick=\"loadSummary().catch(pageError)\">重试</button>';console.error(e)}function options")
 PAGE = PAGE.replace("}load()", "}loadSummary().catch(pageError)")
+PAGE = PAGE.replace("all=d.nodes;pools=d.pools;", "all=d.nodes;activePools=d.pools;suggestion=d.suggestions||null;pools=suggestion&&suggestion.generated_at?suggestion.pools:activePools;")
+PAGE = PAGE.replace('<button class="btn primary" onclick="testAll()">稳定性测速</button><button class="btn" onclick="save()">校验并应用</button>', '<button class="btn primary" onclick="testAll()">全量稳定性测速</button><button class="btn" onclick="confirmApply()">复测并生效</button>')
+PAGE = PAGE.replace('<div class="section-title"><h2>业务候选池</h2></div>', '<div class="section-title"><h2>待生效候选池</h2><span class="muted">测速建议不会自动替换当前出口</span></div>')
 _old_speed_test = "async function testAll(){let status=document.querySelector('#testStatus');try{status.textContent='正在对每个节点连续测试三次，本次操作完成后即停止…';status.className='status';let d=await api('/api/test-all',{method:'POST',body:'{}'});delays=Object.fromEntries(d.results.map(function(x){return [x.name,x]}));status.textContent='测速完成：'+d.results.filter(function(x){return x.ok}).length+'/'+d.results.length+' 稳定可用';renderPools()}catch(e){status.textContent=e.message;status.className='status bad'}}"
-_new_speed_test = "function showTestStatus(d){let status=document.querySelector('#testStatus');clearTimeout(testPoll);if(d.running){status.textContent='测速中：'+d.completed+'/'+d.total+' 个节点已完成；可继续浏览页面，完成后自动显示结果';status.className='status';testPoll=setTimeout(refreshTestStatus,1000);return}if(d.error){status.textContent='测速未完成：'+d.error;status.className='status bad';return}if(d.finished_at){status.textContent='测速完成：'+d.last_ok+'/'+d.last_total+' 稳定可用';status.className='status';catalogLoaded=false;loadPools();return}if(d.last_tested_at){status.textContent='上次稳定性测速：'+d.last_tested_at}}async function refreshTestStatus(){try{showTestStatus(await api('/api/test-status'))}catch(e){let status=document.querySelector('#testStatus');status.textContent='测速状态读取失败：'+e.message;status.className='status bad'}}async function testAll(){try{showTestStatus(await api('/api/test-all',{method:'POST',body:'{}'}))}catch(e){let status=document.querySelector('#testStatus');status.textContent=e.message;status.className='status bad'}}"
+_new_speed_test = "function showTestStatus(d){let status=document.querySelector('#testStatus');clearTimeout(testPoll);if(d.running){status.textContent=(d.action==='retest-apply'?'候选池复测中：':'全量测速中：')+d.completed+'/'+d.total+' 个节点已完成；可继续浏览页面';status.className='status';testPoll=setTimeout(refreshTestStatus,1000);return}if(d.error){status.textContent=(d.action==='retest-apply'?'复测未生效：':'测速未完成：')+d.error;status.className='status bad';return}if(d.finished_at&&d.action==='retest-apply'){status.textContent=d.applied?'复测、配置校验和运行验证均通过，候选池已生效':'复测完成，但未生效';status.className=d.applied?'status':'status bad';catalogLoaded=false;loadPools();return}if(d.finished_at&&d.action==='full-test'){status.textContent=d.suggestions&&d.suggestions.ready?'全量测速完成，已生成待生效建议；确认后点击“复测并生效”':'测速完成，但有业务池没有连续三次成功的节点';status.className=d.suggestions&&d.suggestions.ready?'status':'status bad';catalogLoaded=false;loadPools();return}if(d.suggestions&&d.suggestions.ready){status.textContent='已生成待生效建议；当前出口保持不变，点击“复测并生效”后才会更新';status.className='status';return}if(d.last_tested_at){status.textContent='上次稳定性测速：'+d.last_tested_at}}async function refreshTestStatus(){try{showTestStatus(await api('/api/test-status'))}catch(e){let status=document.querySelector('#testStatus');status.textContent='测速状态读取失败：'+e.message;status.className='status bad'}}async function testAll(){try{showTestStatus(await api('/api/test-all',{method:'POST',body:'{}'}))}catch(e){let status=document.querySelector('#testStatus');status.textContent=e.message;status.className='status bad'}}async function confirmApply(){let status=document.querySelector('#testStatus');try{showTestStatus(await api('/api/retest-apply',{method:'POST',body:JSON.stringify({pools:pools})}))}catch(e){status.textContent=e.message;status.className='status bad'}}"
 if _old_speed_test not in PAGE:
     raise RuntimeError("speed test template marker missing")
 PAGE = PAGE.replace(_old_speed_test, _new_speed_test, 1)
@@ -622,10 +747,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             tests = read_json(LAST_TESTS, {})
             self.reply(200, {"slots": [slot_state(s) for s in SLOTS], "pools": pools(),
-                             "tests": {"tested_at": tests.get("tested_at")}})
+                             "tests": {"tested_at": tests.get("tested_at")}, "suggestions": suggestions()})
         elif path == "/api/nodes":
             self.reply(200, {"slots": [slot_state(s) for s in SLOTS], "nodes": nodes(), "pools": pools(),
-                             "tests": read_json(LAST_TESTS, {})})
+                             "tests": read_json(LAST_TESTS, {}), "suggestions": suggestions()})
         elif path == "/api/test-status":
             self.reply(200, test_status())
         elif path == "/api/status":
@@ -649,6 +774,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/import": result = import_slot(body["slot"], body.get("url", ""))
             elif path == "/api/remove": result = clear_slot(body["slot"])
             elif path == "/api/pools": result = save_pools(body.get("pools", {}))
+            elif path == "/api/retest-apply": result = start_retest_apply(body.get("pools", {}))
             elif path == "/api/rollback": result = rollback_pools()
             elif path == "/api/test-all": result = start_test_all()
             else: raise ValueError("not found")
