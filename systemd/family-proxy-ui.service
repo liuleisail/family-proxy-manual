@@ -1,0 +1,20 @@
+[Unit]
+Description=Family Proxy LAN Device Controller
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/family-proxy-ui/router.env
+ExecStart=/usr/bin/python3 /opt/family-proxy-ui/family-proxy-ui.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/family-proxy-ui /var/lib/family-proxy /var/log/family-proxy-ui-audit.jsonl
+
+[Install]
+WantedBy=multi-user.target

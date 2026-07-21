@@ -1,0 +1,22 @@
+tproxy-port: 7893
+mixed-port: 7890
+bind-address: 0.0.0.0
+allow-lan: true
+mode: rule
+log-level: info
+ipv6: false
+external-controller: 127.0.0.1:9091
+profile:
+  store-selected: true
+proxies: []
+proxy-groups:
+  - name: Proxy-Auto
+    type: select
+    proxies: [DIRECT]
+  - name: Others
+    type: select
+    proxies: [Proxy-Auto, DIRECT]
+rules:
+  - GEOSITE,CN,DIRECT
+  - GEOIP,CN,DIRECT,no-resolve
+  - MATCH,Others

@@ -1,0 +1,11 @@
+services:
+  family-mihomo-fallback:
+    image: metacubex/mihomo:Alpha
+    container_name: family-mihomo-fallback
+    network_mode: host
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./config.yaml:/root/.config/mihomo/config.yaml:ro
+      - ./cache.db:/root/.config/mihomo/cache.db
