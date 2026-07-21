@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly refresh of family proxy China IPv4 set
+
+[Timer]
+OnCalendar=Sun *-*-* 04:25:00
+RandomizedDelaySec=20m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

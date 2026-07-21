@@ -38,6 +38,12 @@ sudo ./scripts/install-server.sh
 
 首次安装不会启动服务。脚本会保存旧版文件到 `/var/backups/family-proxy/<时间戳>/`，渲染运行程序、检查 Python 语法、安装 systemd 单元并启用开机启动。`FAMILY_DOCKER_ROOT` 必须指向服务器可持续访问的数据目录；Z4Pro 状态页会以该目录统计 Docker 盘容量。
 
+安装器还会使用本地直连从 APNIC 官方数据源生成 `/etc/family-proxy-ui/cn-ipv4.txt`，并启用每周更新计时器。该列表用于让受管设备的中国 IPv4 流量在旁路主机直接转发和 SNAT；只有列表外流量进入 Mihomo TPROXY。手动更新命令为：
+
+```bash
+sudo /usr/local/sbin/refresh-family-cn-ipv4
+```
+
 ## 3. 创建 Mihomo 容器
 
 确认当前没有名为 `family-mihomo-fallback` 的容器后执行：
