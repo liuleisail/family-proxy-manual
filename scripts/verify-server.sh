@@ -10,7 +10,12 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 secret = Path('/etc/family-proxy-ui/gateway.secret').read_text().strip()
-checks = ((18093, '/api/health'), (18093, '/api/system/status'), (18090, '/api/state'))
+checks = (
+    (18093, '/api/health'),
+    (18093, '/api/system/status'),
+    (18093, '/api/captures'),
+    (18090, '/api/state'),
+)
 for port, path in checks:
     request = Request(
         f'http://127.0.0.1:{port}{path}',
@@ -22,6 +27,15 @@ for port, path in checks:
         payload = json.load(response)
         if path == '/api/system/status' and not {'cpu', 'memory', 'disk', 'docker'} <= payload.keys():
             raise SystemExit('system status payload is incomplete')
+        if path == '/api/captures':
+            expected = {'file_bytes': 50_000_000, 'total_bytes': 200_000_000,
+                        'retention_seconds': 86_400}
+            if payload.get('limits') != expected:
+                raise SystemExit(f'capture limits are unexpected: {payload.get("limits")}')
+
+capture_dir = Path('/run/family-proxy-captures')
+if not capture_dir.is_dir():
+    raise SystemExit('capture runtime directory is missing')
 
 gateway_path = Path('/opt/family-proxy-ui/family-proxy-gateway.py')
 spec = importlib.util.spec_from_file_location('family_proxy_gateway_verify', gateway_path)

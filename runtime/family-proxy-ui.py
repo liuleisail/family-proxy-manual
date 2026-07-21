@@ -8,6 +8,7 @@ import ipaddress
 import json
 import os
 import secrets
+import signal
 import shutil
 import socket
 import subprocess
@@ -19,7 +20,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -38,7 +39,7 @@ PROXY_IP = "__FAMILY_PROXY_IP__"
 FIXED_MANAGED_IPS = set()
 RESERVED_IPS = {"__FAMILY_ROUTER_IP__", "__FAMILY_RESERVED_GATEWAY_IP__", PROXY_IP}
 AUDIT_PATH = Path("/var/log/family-proxy-ui-audit.jsonl")
-BUILD_VERSION = "2026.07.21-device-layout"
+BUILD_VERSION = "2026.07.21-device-capture"
 SHARED_LIST = "family_mihomo_devices"
 SHARED_TABLE = "family_mihomo_shared"
 SHARED_CONN_MARK = "family_mihomo_conn"
@@ -52,6 +53,20 @@ DNS_METRICS_LOCK = threading.Lock()
 DNS_SAMPLES = deque(maxlen=120)
 SYSTEM_STATUS_LOCK = threading.Lock()
 SYSTEM_STATUS_CACHE = {"timestamp": 0.0, "value": None, "cpu_sample": None}
+CAPTURE_DIR = Path("/run/family-proxy-captures")
+CAPTURE_INTERFACE = os.environ.get("FAMILY_CAPTURE_INTERFACE", "kvmbr0")
+CAPTURE_MAX_BYTES = 50_000_000
+CAPTURE_TOTAL_BYTES = 200_000_000
+CAPTURE_RETENTION_SECONDS = 24 * 60 * 60
+CAPTURE_DURATIONS = {30, 60, 180}
+CAPTURE_SCOPES = {
+    "all": ("全部流量", ()),
+    "dns": ("仅 DNS", ("and", "port", "53")),
+    "tcp": ("仅 TCP", ("and", "tcp")),
+    "udp": ("仅 UDP", ("and", "udp")),
+}
+CAPTURE_LOCK = threading.Lock()
+CAPTURE_STATE = {"active": None}
 PROTECTED_RULES = {"GEOSITE,CN,DIRECT", "GEOIP,CN,DIRECT,no-resolve"}
 
 
@@ -488,6 +503,248 @@ def validate_ip(value):
     if address not in LAN or str(address) in RESERVED_IPS:
         raise RouterError("该地址不在可管理范围内")
     return str(address)
+
+
+def capture_paths(capture_id):
+    if (not isinstance(capture_id, str) or not capture_id.startswith("capture-")
+            or len(capture_id) > 64
+            or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789-" for char in capture_id)):
+        raise RouterError("抓包记录编号无效")
+    return CAPTURE_DIR / f"{capture_id}.pcap", CAPTURE_DIR / f"{capture_id}.json"
+
+
+def write_capture_metadata(metadata):
+    _, metadata_path = capture_paths(metadata["id"])
+    temporary = metadata_path.with_suffix(".json.new")
+    temporary.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, metadata_path)
+
+
+def read_capture_metadata(metadata_path):
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        capture_paths(metadata.get("id"))
+        return metadata
+    except (OSError, ValueError, json.JSONDecodeError, RouterError):
+        return None
+
+
+def public_capture(metadata):
+    capture_path, _ = capture_paths(metadata["id"])
+    size = capture_path.stat().st_size if capture_path.exists() else 0
+    result = {key: metadata.get(key) for key in (
+        "id", "ip", "scope", "scope_label", "duration", "status",
+        "created_at", "finished_at", "expires_at", "message",
+    )}
+    result.update({
+        "size": size,
+        "running": metadata.get("status") == "running",
+        "downloadable": metadata.get("status") != "running" and size >= 24,
+    })
+    return result
+
+
+def cleanup_captures():
+    CAPTURE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(CAPTURE_DIR, 0o700)
+    now = time.time()
+    active_id = CAPTURE_STATE["active"]["id"] if CAPTURE_STATE.get("active") else None
+    records = []
+    known_pcaps = set()
+    for metadata_path in CAPTURE_DIR.glob("capture-*.json"):
+        metadata = read_capture_metadata(metadata_path)
+        if not metadata:
+            metadata_path.unlink(missing_ok=True)
+            continue
+        if metadata.get("status") == "running" and metadata["id"] != active_id:
+            metadata["status"] = "interrupted"
+            metadata["finished_at"] = int(now)
+            metadata["message"] = "管理服务重启，抓包已停止"
+            write_capture_metadata(metadata)
+        capture_path, _ = capture_paths(metadata["id"])
+        known_pcaps.add(capture_path)
+        if metadata["id"] != active_id and float(metadata.get("expires_at", 0) or 0) <= now:
+            capture_path.unlink(missing_ok=True)
+            metadata_path.unlink(missing_ok=True)
+            continue
+        if capture_path.exists():
+            records.append((capture_path.stat().st_mtime, capture_path, metadata_path))
+    for capture_path in CAPTURE_DIR.glob("capture-*.pcap"):
+        if capture_path not in known_pcaps and now - capture_path.stat().st_mtime > 300:
+            capture_path.unlink(missing_ok=True)
+    total = sum(path.stat().st_size for _, path, _ in records if path.exists())
+    for _, capture_path, metadata_path in sorted(records):
+        capture_id = metadata_path.stem
+        if total <= CAPTURE_TOTAL_BYTES:
+            break
+        if capture_id == active_id:
+            continue
+        size = capture_path.stat().st_size if capture_path.exists() else 0
+        capture_path.unlink(missing_ok=True)
+        metadata_path.unlink(missing_ok=True)
+        total -= size
+
+
+def capture_monitor(record):
+    process = record["process"]
+    deadline = record["started_monotonic"] + record["metadata"]["duration"]
+    reason = "completed"
+    while process.poll() is None:
+        with CAPTURE_LOCK:
+            requested = record.get("stop_reason")
+        if requested:
+            reason = requested
+            break
+        if time.monotonic() >= deadline:
+            reason = "completed"
+            break
+        time.sleep(0.2)
+    if process.poll() is None:
+        try:
+            process.send_signal(signal.SIGINT)
+            process.wait(timeout=3)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            process.kill()
+            process.wait(timeout=3)
+    stderr = process.stderr.read().strip()[-500:] if process.stderr else ""
+    return_code = process.returncode
+    with CAPTURE_LOCK:
+        if record.get("stop_reason"):
+            reason = record["stop_reason"]
+        metadata = record["metadata"]
+        if reason == "manual":
+            metadata["status"] = "stopped"
+            metadata["message"] = "已手动停止"
+        elif return_code in (0, 130, -signal.SIGINT):
+            metadata["status"] = "completed"
+            metadata["message"] = "已达到设定时长"
+        elif return_code in (-signal.SIGXFSZ, 153):
+            metadata["status"] = "limit"
+            metadata["message"] = "已达到 50 MB 容量上限"
+        else:
+            metadata["status"] = "failed"
+            metadata["message"] = stderr or f"tcpdump 退出码 {return_code}"
+        metadata["finished_at"] = int(time.time())
+        write_capture_metadata(metadata)
+        if CAPTURE_STATE.get("active") is record:
+            CAPTURE_STATE["active"] = None
+        cleanup_captures()
+    audit("capture_finish", metadata["ip"], metadata["status"], metadata["id"])
+
+
+def start_capture(ip, duration, scope):
+    ip = validate_ip(ip)
+    if ip not in managed_ips():
+        raise RouterError("只能诊断当前已接管的设备")
+    try:
+        duration = int(duration)
+    except (TypeError, ValueError) as exc:
+        raise RouterError("抓包时长无效") from exc
+    if duration not in CAPTURE_DURATIONS:
+        raise RouterError("抓包时长只能选择 30 秒、1 分钟或 3 分钟")
+    if scope not in CAPTURE_SCOPES:
+        raise RouterError("抓包范围无效")
+    with CAPTURE_LOCK:
+        cleanup_captures()
+        active = CAPTURE_STATE.get("active")
+        if active and active["process"].poll() is None:
+            raise RouterError(f"{active['metadata']['ip']} 正在抓包，请等待结束或先停止")
+        capture_id = "capture-" + time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(4)
+        capture_path, _ = capture_paths(capture_id)
+        scope_label, scope_filter = CAPTURE_SCOPES[scope]
+        command = [
+            "/usr/bin/prlimit", f"--fsize={CAPTURE_MAX_BYTES}:{CAPTURE_MAX_BYTES}", "--",
+            "/usr/bin/tcpdump", "-i", CAPTURE_INTERFACE, "-nn", "-s", "128", "-U",
+            "-w", str(capture_path), "host", ip, *scope_filter,
+        ]
+        process = subprocess.Popen(
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, text=True, start_new_session=True,
+        )
+        now = int(time.time())
+        metadata = {
+            "id": capture_id,
+            "ip": ip,
+            "scope": scope,
+            "scope_label": scope_label,
+            "duration": duration,
+            "status": "running",
+            "created_at": now,
+            "finished_at": None,
+            "expires_at": now + CAPTURE_RETENTION_SECONDS,
+            "message": "正在抓取",
+        }
+        record = {"id": capture_id, "process": process, "metadata": metadata,
+                  "started_monotonic": time.monotonic(), "stop_reason": None}
+        CAPTURE_STATE["active"] = record
+        write_capture_metadata(metadata)
+        threading.Thread(target=capture_monitor, args=(record,), daemon=True).start()
+    time.sleep(0.15)
+    if process.poll() is not None:
+        time.sleep(0.1)
+        metadata = read_capture_metadata(capture_paths(capture_id)[1]) or metadata
+        raise RouterError("抓包启动失败：" + metadata.get("message", "tcpdump 无法启动"))
+    audit("capture_start", ip, "success", f"{capture_id} scope={scope} duration={duration}")
+    return {"message": f"已开始抓取 {scope_label}，最长 {duration} 秒", "capture": public_capture(metadata)}
+
+
+def stop_capture(capture_id):
+    with CAPTURE_LOCK:
+        active = CAPTURE_STATE.get("active")
+        if not active or active["id"] != capture_id or active["process"].poll() is not None:
+            raise RouterError("该抓包任务当前没有运行")
+        active["stop_reason"] = "manual"
+        process = active["process"]
+    try:
+        process.send_signal(signal.SIGINT)
+    except ProcessLookupError:
+        pass
+    return {"message": "正在停止抓包"}
+
+
+def list_captures(ip=None):
+    if ip is not None:
+        ip = validate_ip(ip)
+    with CAPTURE_LOCK:
+        cleanup_captures()
+        records = []
+        for metadata_path in CAPTURE_DIR.glob("capture-*.json"):
+            metadata = read_capture_metadata(metadata_path)
+            if metadata and (ip is None or metadata.get("ip") == ip):
+                records.append(public_capture(metadata))
+        records.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
+        active = CAPTURE_STATE.get("active")
+        return {
+            "captures": records[:20],
+            "active_id": active["id"] if active and active["process"].poll() is None else None,
+            "limits": {"file_bytes": CAPTURE_MAX_BYTES, "total_bytes": CAPTURE_TOTAL_BYTES,
+                       "retention_seconds": CAPTURE_RETENTION_SECONDS},
+        }
+
+
+def delete_capture(capture_id):
+    with CAPTURE_LOCK:
+        active = CAPTURE_STATE.get("active")
+        if active and active["id"] == capture_id and active["process"].poll() is None:
+            raise RouterError("请先停止正在运行的抓包任务")
+        capture_path, metadata_path = capture_paths(capture_id)
+        if not metadata_path.exists() and not capture_path.exists():
+            raise RouterError("抓包记录不存在")
+        capture_path.unlink(missing_ok=True)
+        metadata_path.unlink(missing_ok=True)
+    audit("capture_delete", "", "success", capture_id)
+    return {"message": "抓包文件已删除"}
+
+
+def capture_cleanup_loop():
+    while True:
+        time.sleep(3600)
+        try:
+            with CAPTURE_LOCK:
+                cleanup_captures()
+        except OSError:
+            pass
 
 
 def find(records, **wanted):
@@ -1256,6 +1513,43 @@ PAGE = PAGE.replace(
     "function setStatus(message,ok=true){statusEl.textContent=message;statusEl.className='status '+(ok?'':'error');if(!ok)document.querySelector('#manualAdd').open=true}",
     1,
 )
+PAGE = PAGE.replace(
+    '</main><dialog id="renameDialog">',
+    '''</main><dialog id="captureDialog"><div class="dialog-body"><h2>网络诊断</h2><p id="captureTarget">选择抓包范围和时长。HTTPS 内容保持加密，只记录流向、握手和重传等元数据。</p><div class="capture-options"><label>抓包范围<select id="captureScope"><option value="all">全部流量</option><option value="dns">仅 DNS</option><option value="tcp">仅 TCP</option><option value="udp">仅 UDP</option></select></label><label>最长时长<select id="captureDuration"><option value="30">30 秒</option><option value="60" selected>1 分钟</option><option value="180">3 分钟</option></select></label></div><div class="capture-note">文件保存在服务器内存盘；单次最多 50 MB、总计最多 200 MB，24 小时后自动删除。</div><div class="capture-status" id="captureStatus"></div><div class="capture-list" id="captureList"><div class="empty">正在读取诊断记录</div></div></div><div class="dialog-actions"><button type="button" class="dialog-cancel" onclick="closeCapture()">关闭</button><button type="button" class="dialog-save" id="captureStart" onclick="startCapture()">开始抓包</button></div></dialog><dialog id="renameDialog">''',
+    1,
+)
+PAGE = PAGE.replace(
+    '</style></head>',
+    '''.capture-options{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:17px}.capture-options label{color:#8e8e93;font-size:12px}.capture-options select{display:block;width:100%;height:38px;margin-top:6px;border:1px solid #48484a;border-radius:7px;background:#2c2c2e;color:#fff;padding:0 10px;font:14px inherit}.capture-note{margin-top:13px;padding:10px 12px;border-radius:7px;background:#2c2c2e;color:#aeaeb2;font-size:12px;line-height:1.5}.capture-status{min-height:18px;margin-top:12px;color:#30d158;font-size:13px}.capture-status.error{color:#ff6961}.capture-list{margin-top:10px;border:1px solid #38383a;border-radius:7px;overflow:hidden}.capture-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:11px 12px;border-top:1px solid #38383a}.capture-row:first-child{border-top:0}.capture-title{font-size:13px}.capture-meta{margin-top:4px;color:#8e8e93;font-size:11px}.capture-actions{display:flex;align-items:center;gap:3px}.capture-download{color:#0a84ff;text-decoration:none;font-size:13px;font-weight:600;padding:7px 8px;border-radius:6px}.capture-download:hover{background:rgba(10,132,255,.12)}@media(max-width:420px){.capture-options{grid-template-columns:1fr}.capture-row{grid-template-columns:1fr}.capture-actions{justify-content:flex-end}}</style></head>''',
+    1,
+)
+PAGE = PAGE.replace(
+    'function deviceActions(d){',
+    '''let captureIp='',captureTimer=0;
+function captureSize(bytes){let n=Number(bytes||0);return n<1048576?`${Math.max(0,Math.round(n/1024))} KB`:`${(n/1048576).toFixed(1)} MB`}
+function captureTime(value){return value?new Date(Number(value)*1000).toLocaleString('zh-CN',{hour12:false}):'--'}
+function captureLabel(item){return item.running?'正在抓取':({completed:'已完成',stopped:'已停止',limit:'达到容量上限',failed:'失败',interrupted:'服务重启中断'}[item.status]||item.status)}
+function captureRows(data){let active=data.active_id;document.querySelector('#captureStart').disabled=Boolean(active);document.querySelector('#captureList').innerHTML=data.captures.length?data.captures.map(item=>`<div class="capture-row"><div><div class="capture-title">${esc(item.scope_label)} · ${captureLabel(item)}</div><div class="capture-meta">${captureTime(item.created_at)} · ${captureSize(item.size)} · 最长 ${item.duration} 秒</div></div><div class="capture-actions">${item.running?`<button class="secondary danger" onclick="stopCapture('${item.id}')">停止</button>`:item.downloadable?`<a class="capture-download" href="/api/capture/download?id=${encodeURIComponent(item.id)}">下载</a><button class="secondary danger" onclick="deleteCapture('${item.id}')">删除</button>`:`<button class="secondary danger" onclick="deleteCapture('${item.id}')">删除</button>`}</div></div>`).join(''):'<div class="empty">暂无抓包记录</div>'}
+async function loadCaptures(){if(!captureIp)return;clearTimeout(captureTimer);try{let data=await api(`/api/captures?ip=${encodeURIComponent(captureIp)}`);captureRows(data);if(document.querySelector('#captureDialog').open)captureTimer=setTimeout(loadCaptures,data.active_id?1000:5000)}catch(e){document.querySelector('#captureStatus').textContent=e.message;document.querySelector('#captureStatus').className='capture-status error'}}
+function openCapture(ip){let device=devices.find(item=>item.ip===ip);captureIp=ip;document.querySelector('#captureTarget').textContent=`${device?.name||ip} · ${ip}。HTTPS 内容保持加密，只记录流向、握手和重传等元数据。`;document.querySelector('#captureStatus').textContent='';document.querySelector('#captureStatus').className='capture-status';document.querySelector('#captureDialog').showModal();loadCaptures()}
+function closeCapture(){clearTimeout(captureTimer);captureTimer=0;captureIp='';document.querySelector('#captureDialog').close()}
+async function startCapture(){let status=document.querySelector('#captureStatus');try{status.textContent='正在启动抓包…';status.className='capture-status';let result=await api('/api/capture/start',{method:'POST',body:JSON.stringify({ip:captureIp,scope:document.querySelector('#captureScope').value,duration:Number(document.querySelector('#captureDuration').value)})});status.textContent=result.message;await loadCaptures()}catch(e){status.textContent=e.message;status.className='capture-status error'}}
+async function stopCapture(id){try{let result=await api('/api/capture/stop',{method:'POST',body:JSON.stringify({id})});document.querySelector('#captureStatus').textContent=result.message;await loadCaptures()}catch(e){document.querySelector('#captureStatus').textContent=e.message;document.querySelector('#captureStatus').className='capture-status error'}}
+async function deleteCapture(id){if(!confirm('删除这份抓包文件？'))return;try{let result=await api('/api/capture/delete',{method:'POST',body:JSON.stringify({id})});document.querySelector('#captureStatus').textContent=result.message;await loadCaptures()}catch(e){document.querySelector('#captureStatus').textContent=e.message;document.querySelector('#captureStatus').className='capture-status error'}}
+document.querySelector('#captureDialog').addEventListener('click',event=>{if(event.target.id==='captureDialog')closeCapture()});
+function deviceActions(d){''',
+    1,
+)
+PAGE = PAGE.replace(
+    'if(d.managed)return rename+',
+    'if(d.managed)return rename+`<button class="secondary" onclick="openCapture(\'${d.ip}\')">诊断</button>`+',
+    1,
+)
+PAGE = PAGE.replace(
+    "if(!document.querySelector('#renameDialog').open)load()",
+    "if(!document.querySelector('#renameDialog').open&&!document.querySelector('#captureDialog').open)load()",
+    1,
+)
 
 RULES_PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>代理规则</title><style>
 :root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC","Segoe UI",sans-serif;background:#000;color:#f5f5f7;letter-spacing:0}*{box-sizing:border-box}body{margin:0;background:#000;color:#f5f5f7}.topbar{position:sticky;top:0;z-index:10;border-bottom:1px solid rgba(255,255,255,.1);background:rgba(18,18,20,.88);backdrop-filter:saturate(180%) blur(22px);-webkit-backdrop-filter:saturate(180%) blur(22px)}.topbar-inner{max-width:1040px;min-height:58px;margin:auto;padding:0 22px;display:flex;align-items:center;justify-content:space-between;gap:18px}.brand{font-size:17px;font-weight:650;color:#fff;white-space:nowrap}.nav{display:flex;align-items:center;gap:4px;padding:3px;background:#2c2c2e;border-radius:8px}.nav a{padding:7px 11px;border-radius:6px;color:#aeaeb2;text-decoration:none;font-size:13px;white-space:nowrap}.nav a.active{background:#636366;color:#fff}.wrap{max-width:1040px;margin:auto;padding:38px 22px 64px}.intro{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:25px}.intro h1{font-size:30px;line-height:1.15;margin:0;font-weight:700}.intro p{margin:9px 0 0;color:#98989d;font-size:14px}.count{padding:8px 11px;border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;color:#30d158;font-size:13px;white-space:nowrap}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:9px}.toolbar h2{font-size:13px;color:#8e8e93;font-weight:600;margin:0}.actions{display:flex;gap:7px}.group{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.rule-row{display:grid;grid-template-columns:34px minmax(0,1fr) auto;align-items:center;gap:9px;padding:9px 12px;border-top:1px solid #38383a}.rule-row:first-child{border-top:0}.rule-index{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#636366;text-align:right}.rule-input{min-width:0;width:100%;height:38px;border:1px solid transparent;border-radius:7px;background:#2c2c2e;color:#f5f5f7;padding:0 10px;font:13px ui-monospace,SFMono-Regular,Menlo,monospace;outline:none}.rule-input:focus{border-color:#0a84ff;box-shadow:0 0 0 3px rgba(10,132,255,.18)}.rule-input.protected{color:#aeaeb2}.icon-set{display:flex;gap:3px}.icon{width:34px;height:34px;border:0;border-radius:6px;background:transparent;color:#0a84ff;font-size:17px;cursor:pointer}.icon:hover{background:rgba(10,132,255,.12)}.icon.danger{color:#ff453a}.icon:disabled{color:#48484a;cursor:default;background:transparent}.button{height:36px;border:0;border-radius:7px;padding:0 13px;font:600 13px inherit;cursor:pointer}.primary{background:#0a84ff;color:#fff}.secondary{background:#2c2c2e;color:#f5f5f7}.button:disabled{opacity:.5;cursor:default}.footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px}.status{min-height:20px;color:#30d158;font-size:13px}.status.error{color:#ff6961}.empty{padding:28px;text-align:center;color:#8e8e93}.dirty .count{color:#ffd60a}@media(max-width:760px){.topbar-inner{height:auto;padding:10px 14px;align-items:flex-start;flex-direction:column;gap:8px}.nav{width:100%;display:grid;grid-template-columns:repeat(4,1fr)}.nav a{text-align:center;padding:7px 5px;white-space:normal}.wrap{padding:28px 14px 50px}.intro{align-items:flex-start;flex-direction:column}.rule-row{grid-template-columns:28px minmax(0,1fr);padding:9px}.icon-set{grid-column:2;justify-content:flex-end}.footer{align-items:stretch;flex-direction:column}.footer .button{width:100%}.actions{width:100%}.actions .button{flex:1}}
@@ -1316,11 +1610,33 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         return False
 
+    def send_capture_file(self, capture_id):
+        try:
+            capture_path, metadata_path = capture_paths(capture_id)
+            metadata = read_capture_metadata(metadata_path)
+            if not metadata or metadata.get("status") == "running" or not capture_path.exists():
+                raise RouterError("抓包文件尚不可下载")
+            size = capture_path.stat().st_size
+            if size < 24 or size > CAPTURE_MAX_BYTES:
+                raise RouterError("抓包文件为空或超过安全限制")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/vnd.tcpdump.pcap")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition", f'attachment; filename="{capture_id}.pcap"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            with capture_path.open("rb") as handle:
+                shutil.copyfileobj(handle, self.wfile, length=1024 * 1024)
+        except RouterError as exc:
+            self.reply(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+
     def do_GET(self):
         if not self.allowed():
             self.reply(HTTPStatus.FORBIDDEN, {"error": "LAN only"})
             return
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/" and self.client_address[0] == "__FAMILY_ROUTER_IP__":
             health = gated_health()
             self.reply(HTTPStatus.OK if health["ready"] else HTTPStatus.SERVICE_UNAVAILABLE, health)
@@ -1370,6 +1686,17 @@ class Handler(BaseHTTPRequestHandler):
                     {"error": f"Z4Pro 状态读取失败：{exc}"},
                 )
             return
+        if path == "/api/captures":
+            try:
+                query = parse_qs(parsed.query)
+                self.reply(HTTPStatus.OK, list_captures(query.get("ip", [None])[0]))
+            except (RouterError, OSError) as exc:
+                self.reply(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        if path == "/api/capture/download":
+            query = parse_qs(parsed.query)
+            self.send_capture_file(query.get("id", [""])[0])
+            return
         if path == "/api/devices":
             try:
                 self.reply(HTTPStatus.OK, list_devices())
@@ -1418,6 +1745,13 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("mac", ""), body.get("alias") if "alias" in body else None,
                     body.get("favorite") if "favorite" in body else None,
                 ))
+            elif path == "/api/capture/start":
+                self.reply(HTTPStatus.OK, start_capture(
+                    body.get("ip", ""), body.get("duration", 60), body.get("scope", "all")))
+            elif path == "/api/capture/stop":
+                self.reply(HTTPStatus.OK, stop_capture(body.get("id", "")))
+            elif path == "/api/capture/delete":
+                self.reply(HTTPStatus.OK, delete_capture(body.get("id", "")))
             elif path == "/api/mihomo/select":
                 self.reply(HTTPStatus.OK, select_mihomo_node(body.get("group", ""), body.get("node", "")))
             elif path == "/api/rules":
@@ -1429,4 +1763,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    with CAPTURE_LOCK:
+        cleanup_captures()
+    threading.Thread(target=capture_cleanup_loop, daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", 18093), Handler).serve_forever()
