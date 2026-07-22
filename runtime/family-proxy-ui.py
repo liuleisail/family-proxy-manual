@@ -39,7 +39,7 @@ PROXY_IP = "__FAMILY_PROXY_IP__"
 FIXED_MANAGED_IPS = set()
 RESERVED_IPS = {"__FAMILY_ROUTER_IP__", "__FAMILY_RESERVED_GATEWAY_IP__", PROXY_IP}
 AUDIT_PATH = Path("/var/log/family-proxy-ui-audit.jsonl")
-BUILD_VERSION = "2026.07.21-capture-live"
+BUILD_VERSION = "2026.07.22-wireguard-monitor"
 SHARED_LIST = "family_mihomo_devices"
 SHARED_TABLE = "family_mihomo_shared"
 SHARED_CONN_MARK = "family_mihomo_conn"
@@ -53,6 +53,11 @@ DNS_METRICS_LOCK = threading.Lock()
 DNS_SAMPLES = deque(maxlen=120)
 SYSTEM_STATUS_LOCK = threading.Lock()
 SYSTEM_STATUS_CACHE = {"timestamp": 0.0, "value": None, "cpu_sample": None}
+WIREGUARD_STATUS_LOCK = threading.Lock()
+WIREGUARD_EVENTS_PATH = Path("/var/lib/family-proxy/wireguard-events.json")
+WIREGUARD_EVENT_RETENTION = 7 * 24 * 60 * 60
+WIREGUARD_EVENT_LIMIT = 200
+WIREGUARD_STATE = {"interfaces": {}, "probe_timestamp": 0.0, "probe": None}
 CAPTURE_DIR = Path("/run/family-proxy-captures")
 CAPTURE_INTERFACE = os.environ.get("FAMILY_CAPTURE_INTERFACE", "kvmbr0")
 CAPTURE_MAX_BYTES = 50_000_000
@@ -885,6 +890,197 @@ def update_device_preference(mac, alias=None, favorite=None):
     return {"message": "设备信息已保存", "mac": mac}
 
 
+def routeros_duration_seconds(value):
+    """Convert RouterOS durations such as 1w2d3h4m5s to seconds."""
+    units = {"w": 604800, "d": 86400, "h": 3600, "m": 60, "s": 1}
+    total = 0
+    number = ""
+    for char in str(value or ""):
+        if char.isdigit():
+            number += char
+        elif char in units and number:
+            total += int(number) * units[char]
+            number = ""
+        elif char not in ".":
+            number = ""
+    return total
+
+
+def mask_endpoint(value):
+    endpoint = str(value or "").strip()
+    if not endpoint:
+        return "未建立"
+    host, separator, port = endpoint.rpartition(":")
+    if not separator:
+        host, port = endpoint, ""
+    try:
+        address = ipaddress.ip_address(host.strip("[]"))
+        if address.version == 4:
+            parts = str(address).split(".")
+            host = ".".join(parts[:2] + ["*", "*"])
+        else:
+            host = f"{address.exploded.split(':')[0]}:{address.exploded.split(':')[1]}::*"
+    except ValueError:
+        labels = host.split(".")
+        host = "*." + ".".join(labels[-2:]) if len(labels) > 2 else host
+    return f"{host}:{port}" if port else host
+
+
+def load_wireguard_events(now=None):
+    now = int(now or time.time())
+    try:
+        events = json.loads(WIREGUARD_EVENTS_PATH.read_text(encoding="utf-8"))
+        if not isinstance(events, list):
+            events = []
+    except (OSError, ValueError, json.JSONDecodeError):
+        events = []
+    return [item for item in events
+            if isinstance(item, dict) and now - int(item.get("timestamp", 0)) <= WIREGUARD_EVENT_RETENTION][
+                -WIREGUARD_EVENT_LIMIT:]
+
+
+def save_wireguard_events(events):
+    WIREGUARD_EVENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = WIREGUARD_EVENTS_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(events[-WIREGUARD_EVENT_LIMIT:], ensure_ascii=False, indent=2) + "\n",
+                         encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, WIREGUARD_EVENTS_PATH)
+
+
+def wireguard_probe(api, target, source):
+    if not target:
+        return None
+    props = {"address": target, "count": "2", "interval": "200ms"}
+    if source:
+        props["src-address"] = source
+    try:
+        replies = api.talk("/ping", props)
+    except RouterError:
+        return {"target": target, "reachable": False, "latency_ms": None}
+    latencies = []
+    for reply in replies:
+        raw = reply.get("time", "")
+        try:
+            if "ms" in raw:
+                milliseconds, remainder = raw.split("ms", 1)
+                latency = float(milliseconds)
+                if remainder.endswith("us") and remainder[:-2]:
+                    latency += float(remainder[:-2]) / 1000
+                latencies.append(latency)
+            elif raw.endswith("us"):
+                latencies.append(float(raw[:-2]) / 1000)
+        except ValueError:
+            pass
+    return {
+        "target": target,
+        "reachable": bool(latencies),
+        "latency_ms": round(sum(latencies) / len(latencies), 1) if latencies else None,
+    }
+
+
+def wireguard_status():
+    config = load_config()
+    mobile_name = config.get("WIREGUARD_MOBILE_INTERFACE", "back-to-home-vpn")
+    site_name = config.get("WIREGUARD_SITE_INTERFACE", "wg-home")
+    mobile_label = config.get("WIREGUARD_MOBILE_LABEL", "手机按需回家")
+    site_label = config.get("WIREGUARD_SITE_LABEL", "站点常驻互联")
+    site_probe = config.get("WIREGUARD_SITE_PROBE", "")
+    site_probe_source = config.get("WIREGUARD_SITE_PROBE_SOURCE", "")
+    now = int(time.time())
+    with WIREGUARD_STATUS_LOCK:
+        with RouterOS() as api:
+            interfaces = api.print("/interface/wireguard")
+            peers = api.print("/interface/wireguard/peers")
+            routes = api.print("/ip/route")
+            nat_rules = api.print("/ip/firewall/nat")
+            if now - WIREGUARD_STATE["probe_timestamp"] >= 60:
+                WIREGUARD_STATE["probe"] = wireguard_probe(api, site_probe, site_probe_source)
+                WIREGUARD_STATE["probe_timestamp"] = now
+
+        output = []
+        current_states = {}
+        for interface in interfaces:
+            name = interface.get("name", "")
+            if not name:
+                continue
+            kind = "mobile" if name == mobile_name else "site" if name == site_name else "other"
+            label = mobile_label if kind == "mobile" else site_label if kind == "site" else name
+            interface_peers = [item for item in peers if item.get("interface") == name]
+            peer_rows = []
+            active_peers = 0
+            latest = None
+            rx_bytes = tx_bytes = 0
+            for index, peer in enumerate(interface_peers, 1):
+                handshake = peer.get("last-handshake", "")
+                age = routeros_duration_seconds(handshake) if handshake else None
+                active = age is not None and age <= 180
+                active_peers += int(active)
+                latest = age if age is not None and (latest is None or age < latest) else latest
+                rx = int(peer.get("rx", 0) or 0)
+                tx = int(peer.get("tx", 0) or 0)
+                rx_bytes += rx
+                tx_bytes += tx
+                endpoint_value = peer.get("current-endpoint-address") or peer.get("endpoint-address", "")
+                endpoint_port = peer.get("current-endpoint-port") or peer.get("endpoint-port", "")
+                if endpoint_value and endpoint_port:
+                    endpoint_value = f"{endpoint_value}:{endpoint_port}"
+                peer_rows.append({
+                    "name": peer.get("name") or peer.get("comment") or f"对端 {index}",
+                    "allowed_address": peer.get("allowed-address", ""),
+                    "endpoint": mask_endpoint(endpoint_value),
+                    "last_handshake_seconds": age,
+                    "active": active,
+                    "rx_bytes": rx,
+                    "tx_bytes": tx,
+                })
+            running = interface.get("running") == "true" and interface.get("disabled") != "true"
+            if not running:
+                state, state_text = "down", "接口未运行"
+            elif kind == "mobile":
+                state, state_text = ("up", "手机正在连接") if active_peers else ("idle", "待机，等待手机连接")
+            elif latest is not None and latest <= 180:
+                state, state_text = "up", "链路正常"
+            elif latest is not None and latest <= 600:
+                state, state_text = "warn", "握手时间偏久"
+            else:
+                state, state_text = "down", "链路未建立"
+            current_states[name] = state
+            route_rows = [{
+                "destination": route.get("dst-address", ""),
+                "gateway": route.get("gateway", ""),
+                "active": route.get("active") == "true" and route.get("disabled") != "true",
+            } for route in routes if route.get("gateway") == name]
+            nat_ready = any(
+                rule.get("in-interface") == name and rule.get("disabled") != "true"
+                and rule.get("action") in {"masquerade", "src-nat"}
+                for rule in nat_rules
+            )
+            output.append({
+                "name": name, "label": label, "kind": kind, "state": state, "state_text": state_text,
+                "running": running, "listen_port": interface.get("listen-port", ""), "mtu": interface.get("mtu", ""),
+                "peer_total": len(peer_rows), "peer_active": active_peers,
+                "last_handshake_seconds": latest, "rx_bytes": rx_bytes, "tx_bytes": tx_bytes,
+                "routes": route_rows, "nat_ready": nat_ready, "peers": peer_rows,
+                "probe": WIREGUARD_STATE["probe"] if kind == "site" else None,
+            })
+
+        events = load_wireguard_events(now)
+        previous = WIREGUARD_STATE["interfaces"]
+        for item in output:
+            old_state = previous.get(item["name"])
+            if old_state and old_state != item["state"]:
+                events.append({
+                    "timestamp": now, "interface": item["name"], "label": item["label"],
+                    "from": old_state, "to": item["state"],
+                    "message": f"{item['label']}：{item['state_text']}",
+                })
+        if events != load_wireguard_events(now):
+            save_wireguard_events(events)
+        WIREGUARD_STATE["interfaces"] = current_states
+        return {"updated_at": now, "interfaces": output, "events": events[-20:]}
+
+
 def router_summary(api):
     checks = api.print("/tool/netwatch")
     health = next((item for item in checks if item.get("name") == "family-mihomo-tproxy-health"), None)
@@ -1469,6 +1665,8 @@ PAGE = PAGE.replace(
     '<section class="section"><div class="section-title"><h2>运行状态</h2>',
     '<section class="section"><div class="section-title"><h2>RB5009 运行状态</h2><span class="muted" id="routerUpdated">正在读取</span></div>'
     '<div class="group router-grid" id="routerStatus"><div class="empty">正在读取路由器状态</div></div></section>'
+    '<section class="section"><div class="section-title"><h2>WireGuard 远程互联</h2><span class="muted" id="wireguardUpdated">正在读取</span></div>'
+    '<div class="group wireguard-list" id="wireguardStatus"><div class="empty">正在读取隧道状态</div></div></section>'
     '<section class="section"><div class="section-title"><h2>Z4Pro 运行状态</h2><span class="muted" id="systemUpdated">正在读取</span></div>'
     '<div class="group system-grid" id="systemStatus"><div class="empty">正在读取系统状态</div></div></section>'
     '<section class="section"><div class="section-title"><h2>旁路运行状态</h2>',
@@ -1487,8 +1685,22 @@ function deviceActions(d){''',
     1,
 )
 PAGE = PAGE.replace(
+    'function deviceActions(d){',
+    r'''let wireguardData={interfaces:[],events:[]},wireguardSelected='';
+function trafficBytes(value){let n=Number(value||0),units=['B','KB','MB','GB','TB'],i=0;while(n>=1024&&i<units.length-1){n/=1024;i++}return `${n.toFixed(i?1:0)} ${units[i]}`}
+function handshakeAge(seconds){if(seconds==null)return '从未';let n=Number(seconds);return n<60?`${n} 秒前`:n<3600?`${Math.floor(n/60)} 分钟前`:n<86400?`${Math.floor(n/3600)} 小时前`:`${Math.floor(n/86400)} 天前`}
+function wireguardStateText(item){return item.kind==='site'&&item.probe?.reachable?`${item.state_text} · ${item.probe.latency_ms} ms`:item.state_text}
+function renderWireGuard(){let target=document.querySelector('#wireguardStatus');target.innerHTML=wireguardData.interfaces.length?wireguardData.interfaces.map(item=>`<div class="wireguard-row"><div class="wg-identity"><span class="wg-dot ${esc(item.state)}"></span><div><b>${esc(item.label)}</b><div class="muted">${esc(item.name)} · UDP ${esc(item.listen_port||'--')}</div></div></div><div class="wg-metric"><span>状态</span><b class="wg-tone ${esc(item.state)}">${esc(wireguardStateText(item))}</b></div><div class="wg-metric"><span>最近握手</span><b>${esc(handshakeAge(item.last_handshake_seconds))}</b></div><div class="wg-metric"><span>对端</span><b>${item.peer_active} / ${item.peer_total} 活跃</b></div><div class="wg-metric"><span>累计流量</span><b>↓ ${trafficBytes(item.rx_bytes)} · ↑ ${trafficBytes(item.tx_bytes)}</b></div><button class="wg-detail" onclick="openWireGuard('${esc(item.name)}')" aria-label="查看 ${esc(item.label)} 详情">详情 <span>›</span></button></div>`).join(''):'<div class="empty">未发现 WireGuard 接口</div>'}
+function wireguardDetail(item){let routes=item.routes.length?item.routes.map(route=>`<div class="wg-detail-row"><span>${esc(route.destination)}</span><b class="${route.active?'good':'bad-text'}">${route.active?'路由生效':'路由未生效'}</b></div>`).join(''):'<div class="empty compact">该接口没有独立远端路由</div>',peers=item.peers.length?item.peers.map(peer=>`<div class="wg-peer"><div><b>${esc(peer.name)}</b><span>${esc(peer.allowed_address||'未声明地址')}</span></div><div><b class="${peer.active?'good':''}">${handshakeAge(peer.last_handshake_seconds)}</b><span>${esc(peer.endpoint)} · ↓ ${trafficBytes(peer.rx_bytes)} / ↑ ${trafficBytes(peer.tx_bytes)}</span></div></div>`).join(''):'<div class="empty compact">没有对端</div>',events=wireguardData.events.filter(event=>event.interface===item.name);document.querySelector('#wireguardDialogTitle').textContent=item.label;document.querySelector('#wireguardDialogBody').innerHTML=`<div class="wg-detail-summary"><div><span>当前状态</span><b class="wg-tone ${esc(item.state)}">${esc(wireguardStateText(item))}</b></div><div><span>接口</span><b>${esc(item.name)} · MTU ${esc(item.mtu||'--')}</b></div><div><span>NAT</span><b>${item.kind==='mobile'?(item.nat_ready?'已就绪':'需要检查'):'不适用'}</b></div></div><h3>对端</h3><div class="wg-detail-group">${peers}</div><h3>远端路由</h3><div class="wg-detail-group">${routes}</div><h3>最近状态变化</h3><div class="wg-detail-group">${events.length?events.slice().reverse().map(event=>`<div class="wg-detail-row"><span>${new Date(event.timestamp*1000).toLocaleString('zh-CN',{hour12:false})}</span><b>${esc(event.message)}</b></div>`).join(''):'<div class="empty compact">最近 7 天没有状态变化</div>'}</div>`}
+function openWireGuard(name){let item=wireguardData.interfaces.find(value=>value.name===name);if(!item)return;wireguardSelected=name;wireguardDetail(item);document.querySelector('#wireguardDialog').showModal()}
+function closeWireGuard(){wireguardSelected='';document.querySelector('#wireguardDialog').close()}
+async function loadWireGuard(){try{wireguardData=await api('/api/wireguard/status');renderWireGuard();if(wireguardSelected){let item=wireguardData.interfaces.find(value=>value.name===wireguardSelected);if(item)wireguardDetail(item)}document.querySelector('#wireguardUpdated').textContent=new Date(wireguardData.updated_at*1000).toLocaleTimeString('zh-CN',{hour12:false})}catch(e){document.querySelector('#wireguardStatus').innerHTML=`<div class="empty">读取失败：${esc(e.message)}</div>`;document.querySelector('#wireguardUpdated').textContent='读取失败'}}
+function deviceActions(d){''',
+    1,
+)
+PAGE = PAGE.replace(
     "load();setInterval(()=>{if(!document.querySelector('#renameDialog').open)load()},30000)",
-    "load();loadSystem();setInterval(loadSystem,10000);setInterval(()=>{if(!document.querySelector('#renameDialog').open)load()},30000)",
+    "load();loadSystem();loadWireGuard();setInterval(loadSystem,10000);setInterval(loadWireGuard,10000);setInterval(()=>{if(!document.querySelector('#renameDialog').open)load()},30000)",
     1,
 )
 PAGE = PAGE.replace(
@@ -1573,11 +1785,11 @@ def page_section(page, heading):
 
 
 sections = {heading: page_section(PAGE, heading) for heading in (
-    "设备", "加入旁路", "旁路运行状态", "RB5009 运行状态", "Z4Pro 运行状态")}
+    "设备", "加入旁路", "旁路运行状态", "RB5009 运行状态", "WireGuard 远程互联", "Z4Pro 运行状态")}
 region_start = min(section[0] for section in sections.values())
 region_end = max(section[1] for section in sections.values())
 ordered_sections = "".join(sections[heading][2] for heading in (
-    "设备", "加入旁路", "旁路运行状态", "RB5009 运行状态", "Z4Pro 运行状态"))
+    "设备", "加入旁路", "旁路运行状态", "RB5009 运行状态", "WireGuard 远程互联", "Z4Pro 运行状态"))
 PAGE = PAGE[:region_start] + ordered_sections + PAGE[region_end:]
 
 add_start, add_end, add_section = page_section(PAGE, "加入旁路")
@@ -1634,6 +1846,26 @@ PAGE = PAGE.replace(
 PAGE = PAGE.replace(
     "if(!document.querySelector('#renameDialog').open)load()",
     "if(!document.querySelector('#renameDialog').open&&!document.querySelector('#captureDialog').open)load()",
+    1,
+)
+PAGE = PAGE.replace(
+    '</main><dialog id="captureDialog">',
+    '''</main><dialog id="wireguardDialog" class="wireguard-dialog"><div class="dialog-body"><h2 id="wireguardDialogTitle">WireGuard 详情</h2><p>仅显示脱敏运行信息，不展示任何密钥。</p><div id="wireguardDialogBody"></div></div><div class="dialog-actions"><button type="button" class="dialog-cancel" onclick="closeWireGuard()">关闭</button></div></dialog><dialog id="captureDialog">''',
+    1,
+)
+PAGE = PAGE.replace(
+    '</style></head>',
+    '''.wireguard-list{overflow:hidden}.wireguard-row{display:grid;grid-template-columns:minmax(185px,1.35fr) repeat(4,minmax(110px,1fr)) auto;align-items:center;gap:15px;padding:15px 16px;border-top:1px solid #38383a}.wireguard-row:first-child{border-top:0}.wg-identity{display:flex;align-items:center;gap:11px;min-width:0}.wg-identity b{font-size:14px}.wg-dot{width:9px;height:9px;border-radius:50%;background:#8e8e93;box-shadow:0 0 0 3px rgba(142,142,147,.14);flex:0 0 auto}.wg-dot.up{background:#30d158}.wg-dot.warn{background:#ffd60a}.wg-dot.down{background:#ff453a}.wg-metric{min-width:0}.wg-metric span,.wg-detail-summary span{display:block;color:#8e8e93;font-size:11px}.wg-metric b,.wg-detail-summary b{display:block;margin-top:5px;font-size:12px;line-height:1.35;overflow-wrap:anywhere}.wg-tone.up,.good{color:#30d158}.wg-tone.warn{color:#ffd60a}.wg-tone.down,.bad-text{color:#ff453a}.wg-tone.idle{color:#aeaeb2}.wg-detail{border:0;background:transparent;color:#0a84ff;padding:8px;font:600 13px inherit;white-space:nowrap;cursor:pointer}.wg-detail span{font-size:18px;margin-left:3px}.wireguard-dialog{width:min(720px,calc(100% - 28px))}.wireguard-dialog h3{margin:20px 0 8px;color:#8e8e93;font-size:12px;font-weight:600}.wg-detail-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;margin-top:17px;border:1px solid #38383a;border-radius:7px;background:#38383a;overflow:hidden}.wg-detail-summary>div{padding:12px;background:#242426}.wg-detail-group{border:1px solid #38383a;border-radius:7px;overflow:hidden}.wg-peer,.wg-detail-row{display:grid;grid-template-columns:1fr 1.4fr;gap:12px;padding:11px 12px;border-top:1px solid #38383a;font-size:12px}.wg-peer:first-child,.wg-detail-row:first-child{border-top:0}.wg-peer>div:last-child{text-align:right}.wg-peer b,.wg-peer span{display:block}.wg-peer span{margin-top:4px;color:#8e8e93;overflow-wrap:anywhere}.wg-detail-row b{text-align:right}.empty.compact{padding:15px}@media(max-width:820px){.wireguard-row{grid-template-columns:minmax(155px,1.3fr) 1fr 1fr auto}.wg-metric:nth-of-type(4),.wg-metric:nth-of-type(5){display:none}}@media(max-width:520px){.wireguard-row{grid-template-columns:1fr auto;gap:10px}.wg-metric{grid-column:1}.wg-metric:nth-of-type(3){display:block}.wg-detail{grid-column:2;grid-row:1/4}.wg-detail-summary{grid-template-columns:1fr}.wg-peer,.wg-detail-row{grid-template-columns:1fr}.wg-peer>div:last-child,.wg-detail-row b{text-align:left}}</style></head>''',
+    1,
+)
+PAGE = PAGE.replace(
+    "document.querySelector('#captureDialog').addEventListener('click',event=>{if(event.target.id==='captureDialog')closeCapture()});",
+    "document.querySelector('#captureDialog').addEventListener('click',event=>{if(event.target.id==='captureDialog')closeCapture()});document.querySelector('#wireguardDialog').addEventListener('click',event=>{if(event.target.id==='wireguardDialog')closeWireGuard()});",
+    1,
+)
+PAGE = PAGE.replace(
+    "!document.querySelector('#captureDialog').open)load()",
+    "!document.querySelector('#captureDialog').open&&!document.querySelector('#wireguardDialog').open)load()",
     1,
 )
 
@@ -1781,6 +2013,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(
                     HTTPStatus.SERVICE_UNAVAILABLE,
                     {"error": f"Z4Pro 状态读取失败：{exc}"},
+                )
+            return
+        if path == "/api/wireguard/status":
+            try:
+                self.reply(HTTPStatus.OK, wireguard_status())
+            except (RouterError, OSError, ValueError) as exc:
+                self.reply(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": f"WireGuard 状态读取失败：{exc}"},
                 )
             return
         if path == "/api/captures":
