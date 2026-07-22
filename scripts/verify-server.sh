@@ -3,10 +3,19 @@ set -Eeuo pipefail
 for unit in family-proxy-ui family-mihomo-sub-import family-proxy-gateway; do
   systemctl is-active --quiet "$unit" || { echo "$unit is not active" >&2; exit 1; }
 done
+for executable in /usr/local/sbin/sync-routeros-cn-ipv4 /usr/local/sbin/refresh-mihomo-geodata; do
+  [[ -x $executable ]] || { echo "$executable is missing" >&2; exit 1; }
+done
+systemctl is-enabled --quiet family-cn-ipv4-refresh.timer || { echo "CN refresh timer is disabled" >&2; exit 1; }
+if grep -qx 'MIHOMO_GEODATA_AUTO_UPDATE=true' /etc/family-proxy-ui/router.env; then
+  systemctl is-enabled --quiet family-mihomo-geodata-refresh.timer || { echo "Mihomo geodata auto-update is configured but its timer is disabled" >&2; exit 1; }
+fi
 python3 - <<'PY'
 import json
 import importlib.util
+import time
 from pathlib import Path
+from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 secret = Path('/etc/family-proxy-ui/gateway.secret').read_text().strip()
@@ -21,7 +30,16 @@ for port, path in checks:
         f'http://127.0.0.1:{port}{path}',
         headers={'X-Family-Gateway': secret},
     )
-    with urlopen(request, timeout=8) as response:
+    response = None
+    for attempt in range(20):
+        try:
+            response = urlopen(request, timeout=8)
+            break
+        except URLError:
+            if attempt == 19:
+                raise
+            time.sleep(0.25)
+    with response:
         if response.status != 200:
             raise SystemExit(f'{port}{path}: HTTP {response.status}')
         payload = json.load(response)

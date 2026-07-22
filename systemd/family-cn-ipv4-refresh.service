@@ -5,5 +5,5 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-TimeoutStartSec=360
+TimeoutStartSec=900
 ExecStart=/usr/local/sbin/refresh-family-cn-ipv4

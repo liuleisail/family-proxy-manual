@@ -42,3 +42,9 @@ install -m 600 "$out" "$DEST"
 if [[ ${1:-} != --no-sync ]] && systemctl is-active --quiet family-mihomo-tproxy-auto; then
   /usr/local/sbin/family-mihomo-tproxy-auto sync
 fi
+if [[ ${1:-} != --no-sync && -x /usr/local/sbin/sync-routeros-cn-ipv4 ]]; then
+  config=/etc/family-proxy-ui/router.env
+  if [[ -r $config ]]; then
+    grep -qx 'ROUTER_CN_AUTO_SYNC=true' "$config" && /usr/local/sbin/sync-routeros-cn-ipv4
+  fi
+fi

@@ -57,8 +57,12 @@ install -m 755 /opt/family-proxy-ui/rendered/family-mihomo-sub-import.py /opt/fa
 install -m 755 /opt/family-proxy-ui/rendered/family-proxy-gateway.py /opt/family-proxy-ui/family-proxy-gateway.py
 install -m 755 "$REPO_DIR/scripts/family-mihomo-tproxy-auto" /usr/local/sbin/family-mihomo-tproxy-auto
 install -m 755 "$REPO_DIR/scripts/refresh-cn-ipv4" /usr/local/sbin/refresh-family-cn-ipv4
+install -m 755 "$REPO_DIR/scripts/sync-routeros-cn-ipv4.py" /usr/local/sbin/sync-routeros-cn-ipv4
+install -m 755 "$REPO_DIR/scripts/refresh-mihomo-geodata.py" /usr/local/sbin/refresh-mihomo-geodata
 install -d -m 700 /etc/family-proxy-ui /var/lib/family-proxy/docker/family-mihomo-sub-import/providers
-install -m 600 /dev/null /etc/family-proxy-ui/managed-ips 2>/dev/null || true
+if [[ ! -e /etc/family-proxy-ui/managed-ips ]]; then
+  install -m 600 /dev/null /etc/family-proxy-ui/managed-ips
+fi
 [[ -s /etc/family-proxy-ui/cn-ipv4.txt ]] || /usr/local/sbin/refresh-family-cn-ipv4 --no-sync
 [[ -s /etc/family-proxy-ui/gateway.secret ]] || { umask 077; head -c 48 /dev/urandom | base64 > /etc/family-proxy-ui/gateway.secret; }
 for unit in "$REPO_DIR"/systemd/*.service; do install -m 644 "$unit" /etc/systemd/system/; done
@@ -66,6 +70,11 @@ for unit in "$REPO_DIR"/systemd/*.timer; do install -m 644 "$unit" /etc/systemd/
 systemctl daemon-reload
 systemctl enable family-proxy-ui family-mihomo-sub-import family-proxy-gateway family-mihomo-tproxy-auto
 systemctl enable --now family-cn-ipv4-refresh.timer
+if grep -qx 'MIHOMO_GEODATA_AUTO_UPDATE=true' "$CONFIG" && docker inspect family-mihomo-fallback >/dev/null 2>&1; then
+  systemctl enable --now family-mihomo-geodata-refresh.timer
+else
+  systemctl disable --now family-mihomo-geodata-refresh.timer >/dev/null 2>&1 || true
+fi
 echo "Installed control plane. Backup: $backup"
 if (( START )); then
   systemctl restart family-proxy-ui family-mihomo-sub-import family-proxy-gateway

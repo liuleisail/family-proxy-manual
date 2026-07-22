@@ -783,6 +783,11 @@ const csrf='__CSRF__',poolNames=['HK-视频','JP-AI','SG-AI','US-AI','TG','Proxy
 </script></body></html>'''
 PAGE = PAGE.replace('<div class="eyebrow">PROXY SOURCES</div>', '')
 PAGE = PAGE.replace('href="http://__FAMILY_PROXY_IP__:18091/"', 'href="/dns/"')
+PAGE = PAGE.replace(
+    '<a href="/">设备</a><a href="/rules">规则</a><a class="active" href="/airport/">机场与候选池</a><a href="/dns/">DNS</a>',
+    '<a href="/">设备</a><a href="/dns/">DNS</a><a class="active" href="/airport/">机场与候选池</a><a href="/rules">规则</a>',
+    1,
+)
 _slot_card_start = PAGE.find("function slotCard(s){")
 _slot_card_end = PAGE.find("async function load(){", _slot_card_start)
 if _slot_card_start < 0 or _slot_card_end < 0:
