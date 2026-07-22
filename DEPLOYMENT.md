@@ -127,6 +127,8 @@ sudo ./scripts/upgrade-server.sh
 
 升级脚本会先建立时间戳备份，然后更新并重启 `family-proxy-ui`、`family-mihomo-sub-import` 和 `family-proxy-gateway`。它不会重启 Mihomo/MosDNS 容器、启动历史停用容器或写入 RouterOS。新版网关兼容 Safari 缓存的旧 DNS 页面，升级后无需清空 DNS 数据。
 
+极空间把持久化数据挂载在 `/tmp/zfsv3/...` 时，`family-mihomo-sub-import` 必须保持 `PrivateTmp=false`，否则 systemd 的私有 `/tmp` 会遮住机场文件并让候选池显示为 `0/5`。安装包已内置该设置；`verify-server.sh` 也会比较磁盘候选池与 API 返回数量，发现路径不可见时立即报错。
+
 失败时停止相关服务，从本次时间戳备份恢复 `/opt/family-proxy-ui/`、服务单元和本地配置，再执行：
 
 ```bash

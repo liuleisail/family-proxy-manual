@@ -25,6 +25,7 @@ checks = (
     (18093, '/api/captures'),
     (18090, '/api/state'),
 )
+responses = {}
 for port, path in checks:
     request = Request(
         f'http://127.0.0.1:{port}{path}',
@@ -43,6 +44,7 @@ for port, path in checks:
         if response.status != 200:
             raise SystemExit(f'{port}{path}: HTTP {response.status}')
         payload = json.load(response)
+        responses[(port, path)] = payload
         if path == '/api/system/status' and not {'cpu', 'memory', 'disk', 'docker'} <= payload.keys():
             raise SystemExit('system status payload is incomplete')
         if path == '/api/captures':
@@ -52,6 +54,24 @@ for port, path in checks:
                 raise SystemExit(f'capture limits are unexpected: {payload.get("limits")}')
             if 'live' not in payload:
                 raise SystemExit('capture live-view payload is missing')
+
+env_values = {}
+for raw in Path('/etc/family-proxy-ui/router.env').read_text().splitlines():
+    if '=' in raw and not raw.lstrip().startswith('#'):
+        key, value = raw.split('=', 1)
+        env_values[key] = value
+provider_root = Path(env_values['FAMILY_DOCKER_ROOT']) / 'family-mihomo-sub-import' / 'providers'
+candidate_file = provider_root / 'candidates.json'
+if candidate_file.is_file():
+    disk_pools = json.loads(candidate_file.read_text())
+    api_pools = responses[(18090, '/api/state')].get('pools', {})
+    disk_count = sum(len(items) for items in disk_pools.values() if isinstance(items, list))
+    api_count = sum(len(items) for items in api_pools.values() if isinstance(items, list))
+    if disk_count and api_count != disk_count:
+        raise SystemExit(
+            f'candidate pool visibility mismatch: disk={disk_count}, api={api_count}; '
+            'check PrivateTmp and FAMILY_DOCKER_ROOT'
+        )
 
 capture_dir = Path('/run/family-proxy-captures')
 if not capture_dir.is_dir():
