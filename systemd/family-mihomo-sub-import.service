@@ -12,10 +12,11 @@ ExecStart=/usr/bin/python3 /opt/family-proxy-ui/family-mihomo-sub-import.py
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=yes
-PrivateTmp=yes
+# ZSpace exposes persistent Docker data below /tmp/zfsv3. A private /tmp would
+# hide the real provider files and make the UI report an empty candidate pool.
+PrivateTmp=false
 ProtectHome=yes
-ProtectSystem=strict
-ReadWritePaths=/etc/family-proxy-ui /var/lib/family-proxy
+ProtectSystem=full
 
 [Install]
 WantedBy=multi-user.target
