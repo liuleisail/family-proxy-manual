@@ -22,6 +22,7 @@ secret = Path('/etc/family-proxy-ui/gateway.secret').read_text().strip()
 checks = (
     (18093, '/api/health'),
     (18093, '/api/system/status'),
+    (18093, '/api/wireguard/status'),
     (18093, '/api/captures'),
     (18090, '/api/state'),
 )
@@ -47,6 +48,13 @@ for port, path in checks:
         responses[(port, path)] = payload
         if path == '/api/system/status' and not {'cpu', 'memory', 'disk', 'docker'} <= payload.keys():
             raise SystemExit('system status payload is incomplete')
+        if path == '/api/wireguard/status':
+            if not {'updated_at', 'interfaces', 'events'} <= payload.keys():
+                raise SystemExit('WireGuard status payload is incomplete')
+            forbidden = {'public-key', 'private-key', 'preshared-key'}
+            for interface in payload['interfaces']:
+                if forbidden & interface.keys() or any(forbidden & peer.keys() for peer in interface.get('peers', [])):
+                    raise SystemExit('WireGuard status exposes key material')
         if path == '/api/captures':
             expected = {'file_bytes': 50_000_000, 'total_bytes': 200_000_000,
                         'retention_seconds': 86_400}
