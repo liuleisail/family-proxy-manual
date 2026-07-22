@@ -81,8 +81,18 @@ MosDNS 无法控制应用直接访问的 HTTPDNS、DoH 或 DoT。推荐分层处
 
 每次修改前保存 MosDNS 目录、容器检查结果、审计日志，以及 RouterOS 文本导出和二进制备份。至少验证：
 
+日常快速检查保留缓存，不重新断言审计方向：
+
 ```bash
-sudo scripts/verify-dns-routing.sh /etc/family-proxy-ui/router.env
+sudo scripts/verify-dns-routing.sh --quick /etc/family-proxy-ui/router.env
 ```
+
+上游、规则或分流配置变更后执行完整回归；该模式会先清理相关路由缓存，再核对审计中的实际上游：
+
+```bash
+sudo scripts/verify-dns-routing.sh --full /etc/family-proxy-ui/router.env
+```
+
+若 MosDNS API 不在本机 `127.0.0.1:9099`，在 `router.env` 设置 `MOSDNS_API_URL` 为当前容器网桥地址；不要为此暴露新的 LAN/WAN 端口。
 
 预期结果：国内探针的 `final_upstream` 为 `domestic`，国外探针为 `foreign`，返回地址不在 `198.18.0.0/15`、私网、回环或链路本地网段。若失败，恢复本次 MosDNS 备份并删除 RouterOS 中本次新增且带明确注释的规则。

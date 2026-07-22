@@ -1,0 +1,9 @@
+[Unit]
+Description=Validate and refresh official Mihomo geodata with rollback
+After=docker.service network-online.target family-mihomo-sub-import.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=1200
+ExecStart=/usr/local/sbin/refresh-mihomo-geodata

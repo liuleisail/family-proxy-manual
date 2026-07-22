@@ -912,6 +912,31 @@ def router_summary(api):
     except (RouterError, TypeError, ValueError):
         pass
     summary = local_health()
+    try:
+        secret = GATEWAY_SECRET_PATH.read_text(encoding="utf-8").strip()
+        request = Request(
+            "http://127.0.0.1:18102/metrics",
+            headers={"X-Family-Gateway": secret},
+        )
+        with urlopen(request, timeout=2) as response:
+            metrics = json.load(response)
+        ranked = {}
+        for group in ("domestic", "foreign"):
+            candidates = [item for item in metrics.get("upstreams", []) if item.get("group") == group]
+            candidates.sort(key=lambda item: (
+                float(item.get("error_rate", 100)),
+                -int(item.get("winners", 0)) / max(1, int(item.get("queries", 0))),
+                float(item.get("average_ms", 999999)),
+            ))
+            if candidates:
+                ranked[group] = candidates[0]
+        summary["dns_performance"] = {
+            "p95_ms": metrics.get("p95_ms", 0),
+            "p99_ms": metrics.get("p99_ms", 0),
+            "groups": ranked,
+        }
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        summary["dns_performance"] = {}
     summary.update({
         "netwatch": health.get("status", "unknown") if health else "missing",
         "router": "connected",
@@ -1493,7 +1518,12 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     "healthItem('DNS',checks.dns,'国内解析')",
-    "healthItem('DNS',checks.dns,summary.detail?.dns_samples?'P50 '+summary.detail.dns_p50_ms+' ms · P95 '+summary.detail.dns_p95_ms+' ms':'正在采样')",
+    "healthItem('国内 DNS',checks.dns,dnsText(summary.dns_performance?.groups?.domestic,summary.dns_performance?.p95_ms))+healthItem('国外 DNS',checks.dns,dnsText(summary.dns_performance?.groups?.foreign,summary.dns_performance?.p95_ms))",
+    1,
+)
+PAGE = PAGE.replace(
+    "function healthItem(name,ok,text){",
+    "function dnsText(item,fallback){return item?`${item.name||'上游'} · 平均 ${Number(item.average_ms||0).toFixed(1)} ms · P95 ${Number(item.p95_ms||0).toFixed(1)} ms · 错误 ${Number(item.error_rate||0).toFixed(2)}%`:`整体 P95 ${Number(fallback||0).toFixed(1)} ms`}function healthItem(name,ok,text){",
     1,
 )
 PAGE = PAGE.replace(
@@ -1619,9 +1649,13 @@ RULES_PAGE = RULES_PAGE.replace(
 )
 RULES_PAGE = RULES_PAGE.replace('href="http://__FAMILY_PROXY_IP__:18091/"', 'href="/dns/"')
 PAGE = PAGE.replace(
-    '<a href="/airport/">机场与候选池</a></nav>',
-    '<a href="/airport/">机场与候选池</a>'
-    '<a href="/dns/">DNS</a></nav>',
+    '<a class="active" href="/">设备</a><a href="/rules">规则</a><a href="/airport/">机场与候选池</a></nav>',
+    '<a class="active" href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a></nav>',
+    1,
+)
+RULES_PAGE = RULES_PAGE.replace(
+    '<a href="/">设备</a><a class="active" href="/rules">规则</a><a href="/airport/">机场与候选池</a><a href="/dns/">DNS</a>',
+    '<a href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a class="active" href="/rules">规则</a>',
     1,
 )
 PAGE = PAGE.replace(
@@ -1714,6 +1748,13 @@ class Handler(BaseHTTPRequestHandler):
                 template = RULES_TEMPLATE_PATH.read_text(encoding="utf-8")
             except OSError:
                 template = RULES_PAGE
+            nav_start = template.find('<nav class="nav"')
+            nav_end = template.find("</nav>", nav_start)
+            if nav_start >= 0 and nav_end >= 0:
+                navigation = ('<nav class="nav"><a href="/">设备</a><a href="/dns/">DNS</a>'
+                              '<a href="/airport/">机场与候选池</a>'
+                              '<a class="active" href="/rules">规则</a></nav>')
+                template = template[:nav_start] + navigation + template[nav_end + len("</nav>"):]
             data = template.replace("__CSRF__", CSRF_TOKEN).encode()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")

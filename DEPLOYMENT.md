@@ -30,6 +30,8 @@ printf '%s' 'dns_username:dns_password' | base64
 
 该值只保存在权限为 `600` 的 `router.env` 中。统一入口通过 `/dns/` 代为认证，浏览器不会再出现第二套认证框。
 
+若 MosDNS 审计 API 位于 Docker 网桥而非本机 `127.0.0.1:9099`，把 `MOSDNS_API_URL` 改为实际只在服务器可达的地址；该项仅供命令行完整 DNS 回归读取审计和清理路由缓存，不改变 DNS 查询路径。
+
 ## 2. 安装控制平面
 
 ```bash
@@ -46,6 +48,14 @@ systemd 会为设备诊断创建 `/run/family-proxy-captures` 内存运行目录
 sudo /usr/local/sbin/refresh-family-cn-ipv4
 ```
 
+`ROUTER_CN_AUTO_SYNC=true` 会在本地集合成功更新后，同步 RouterOS 中唯一的 `family_cn_ipv4` 地址表。首次启用前先做只读比较：
+
+```bash
+sudo /usr/local/sbin/sync-routeros-cn-ipv4 --check
+```
+
+脚本拒绝异常数量和超过 20% 的差异，备份位于 `/var/backups/family-proxy/routeros-cn/`，更新过程先加后删并最终对账，失败反向回滚；不操作现有 mangle、NAT、路由表或设备名单。
+
 ## 3. 创建 Mihomo 容器
 
 确认当前没有名为 `family-mihomo-fallback` 的容器后执行：
@@ -57,6 +67,14 @@ sudo ./scripts/verify-server.sh
 ```
 
 安装器不会替换同名容器。首次启动的 Mihomo 只有直连基线配置；在管理页导入至少一个原生订阅后，系统才会生成候选池和业务 fallback 策略。
+
+安装器会安装 Mihomo 地理数据库周更新单元，但默认不启用计时器。首次先执行无变更验证：
+
+```bash
+sudo /usr/local/sbin/refresh-mihomo-geodata --check
+```
+
+它先直连下载 MetaCubeX 官方资产和校验和；国内网络直连失败时仅公开 GEO 文件回退到 `FAMILY_GEODATA_PROXY` 的本机代理，机场订阅仍保持强制直连。在临时目录用当前 Mihomo 内核验证，应用前备份到 `FAMILY_DOCKER_ROOT/family-mihomo-fallback/geodata-backups/`，最多保留三版。只在文件确有变化时重启 Mihomo，失败自动恢复旧文件。检查稳定通过后才设置 `MIHOMO_GEODATA_AUTO_UPDATE=true` 并重新运行安装器；否则保持默认关闭，不影响现有 GEO 文件。
 
 DNS 必须由本机现有的 MosDNS/DNS 服务监听旁路主机的 `53` 端口。该项目不自动覆盖 DNS 容器，因为错误地占用 `53` 端口会影响全屋解析。完成 DNS 对接后，管理页的 DNS 健康项才会变为正常。
 
@@ -131,6 +149,8 @@ sudo /usr/local/sbin/family-mihomo-tproxy-auto sync
 - Mihomo 控制接口可访问，候选池配置可校验并加载。
 - DNS 服务确实监听旁路主机 53 端口，国内和代理域名按预期解析。
 - DNS“概览”和“数据管理”的重新载入均成功；上游编辑能读取当前配置、拒绝国外明文 DNS；来自旧 DNS 页面的无前缀 API 也能经统一入口兼容转发。
+- DNS 快速检查在不清缓存时通过；配置或规则变更后的完整回归能核对国内/国外实际 `final_upstream`。
+- `sync-routeros-cn-ipv4 --check` 没有异常数量或大比例漂移；Mihomo GEO 文件通过官方校验和及内核加载验证。
 - 接管测试设备在国内 App、局域网服务和外网业务上都通过；未接管设备保持原样。
 - RouterOS 文本导出、二进制备份和本次服务器备份均可定位。
 

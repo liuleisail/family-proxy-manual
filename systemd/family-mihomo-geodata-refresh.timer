@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly validated refresh of Mihomo geodata
+
+[Timer]
+OnCalendar=Wed *-*-* 04:45:00
+RandomizedDelaySec=20m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

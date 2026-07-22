@@ -28,6 +28,7 @@ STATE_DIR = Path("/etc/family-proxy-ui")
 CONFIG_PATH = STATE_DIR / "mosdns-updater.json"
 STATUS_PATH = STATE_DIR / "mosdns-updater-status.json"
 RULE_STATUS_PATH = STATE_DIR / "mosdns-rule-updater-status.json"
+VERIFY_STATUS_PATH = STATE_DIR / "mosdns-verify-status.json"
 LOCK_PATH = STATE_DIR / "mosdns-updater.lock"
 SECRET_PATH = STATE_DIR / "gateway.secret"
 DEFAULT_CONFIG = {
@@ -162,6 +163,10 @@ def rule_status():
     return load_json(RULE_STATUS_PATH, {"phase": "idle", "message": "尚未执行规则更新"})
 
 
+def verify_status():
+    return load_json(VERIFY_STATUS_PATH, {"phase": "idle", "mode": "quick", "message": "尚未执行 DNS 检查"})
+
+
 def adblock_status_file():
     return load_json(ADBLOCK_STATUS_PATH, {"phase": "idle", "message": "尚未准备精简过滤规则"})
 
@@ -177,6 +182,13 @@ def set_rule_status(phase, message, **extra):
     value = rule_status()
     value.update({"phase": phase, "message": message, "updated_at": now_iso(), **extra})
     atomic_json(RULE_STATUS_PATH, value)
+    return value
+
+
+def set_verify_status(phase, message, **extra):
+    value = verify_status()
+    value.update({"phase": phase, "message": message, "updated_at": now_iso(), **extra})
+    atomic_json(VERIFY_STATUS_PATH, value)
     return value
 
 
@@ -876,13 +888,30 @@ def save_upstream_config(domestic_text, foreign_text):
         worker_lock.release()
 
 
-def validate_route_matrix():
-    flush_route_caches()
+def validate_route_matrix(mode="full"):
+    if mode not in ("quick", "full"):
+        raise ValueError("DNS 检查模式无效")
+    if mode == "full":
+        flush_route_caches()
+    direct_results = []
     for direction, domains in ROUTE_PROBES.items():
         for domain in domains:
             answer = command(["dig", "+tries=1", "+time=4", "+short", f"@{DNS_SERVER}", domain, "A"], timeout=7)
             if not answer:
                 raise RuntimeError(f"分流回归失败：{domain} 没有返回 IPv4 地址")
+            addresses = [line.strip() for line in answer.splitlines() if re.fullmatch(r"[0-9.]+", line.strip())]
+            if not addresses:
+                raise RuntimeError(f"分流回归失败：{domain} 没有有效 IPv4 地址")
+            bad_answers = [address for address in addresses if suspicious_answer({"type": "A", "data": address})]
+            if bad_answers:
+                raise RuntimeError(f"异常 DNS 地址：{domain} 返回 {', '.join(bad_answers)}")
+            direct_results.append({"domain": domain, "direction": direction, "answers": addresses})
+
+    if mode == "quick":
+        apple_push = command(["dig", "+tries=1", "+time=4", "+comments", f"@{DNS_SERVER}", "push.apple.com", "A"], timeout=7)
+        if "status: NOERROR" not in apple_push:
+            raise RuntimeError("Apple Push 探针没有返回 NOERROR")
+        return direct_results
 
     logs = core_request("/api/v2/audit/logs?limit=500").get("logs", [])
     results = []
@@ -917,6 +946,16 @@ def validate_route_matrix():
     if "status: NOERROR" not in apple_push:
         raise RuntimeError("Apple Push 探针没有返回 NOERROR")
     return results
+
+
+def do_verify(mode):
+    set_verify_status("checking", "正在执行快速检查" if mode == "quick" else "正在清理路由缓存并核对分流方向", mode=mode)
+    try:
+        results = validate_route_matrix(mode)
+        message = "快速检查通过，缓存保持不变" if mode == "quick" else "完整回归通过，国内外实际分流方向正确"
+        set_verify_status("passed", message, mode=mode, probes=len(results), completed_at=now_iso())
+    except Exception as exc:
+        set_verify_status("error", f"检查失败：{exc}", mode=mode, completed_at=now_iso())
 
 
 def validate_rule_update(previous):
@@ -1189,6 +1228,11 @@ class Handler(BaseHTTPRequestHandler):
                 value["source_error"] = str(exc)
             self.reply(HTTPStatus.OK, value)
             return
+        if self.path == "/verify/status":
+            value = verify_status()
+            value["busy"] = worker_busy()
+            self.reply(HTTPStatus.OK, value)
+            return
         if self.path == "/adblock/status":
             try:
                 self.reply(HTTPStatus.OK, adblock_runtime_status())
@@ -1223,6 +1267,20 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/check":
             started = start_worker(do_check)
             self.reply(HTTPStatus.ACCEPTED if started else HTTPStatus.CONFLICT, {"started": started, "message": "已开始检查" if started else "已有任务正在运行"})
+            return
+        if self.path == "/verify/run":
+            size = min(int(self.headers.get("Content-Length", "0")), 4096)
+            try:
+                body = json.loads(self.rfile.read(size) or "{}")
+                mode = str(body.get("mode", "quick"))
+                if mode not in ("quick", "full"):
+                    raise ValueError("DNS 检查模式无效")
+            except (ValueError, TypeError) as exc:
+                self.reply(HTTPStatus.BAD_REQUEST, {"error": str(exc) or "invalid json"})
+                return
+            started = start_worker(lambda: do_verify(mode))
+            message = "已开始快速检查" if mode == "quick" else "已开始完整 DNS 回归"
+            self.reply(HTTPStatus.ACCEPTED if started else HTTPStatus.CONFLICT, {"started": started, "message": message if started else "已有任务正在运行"})
             return
         if self.path == "/update":
             started = start_worker(do_update)

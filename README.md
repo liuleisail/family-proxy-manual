@@ -61,9 +61,9 @@ MosDNS-T 的推荐加固配置见 [MOSDNS.md](MOSDNS.md)。其中包含分流前
 | 页面 | 日常用途 | 不做什么 |
 | --- | --- | --- |
 | 设备 | 查看旁路健康、RB5009 版本/CPU/可用内存/运行时间与 Z4Pro CPU、内存、温度、Docker 盘和容器状态；加入或撤出单台设备、改名、保留常用设备、查看流量计数和执行短时抓包诊断 | 不在这里修改机场节点 |
-| 规则 | 调整业务分流规则并生成可回退配置 | 不写入订阅链接 |
+| DNS | 查看解析状态、缓存和日志；执行保留缓存的快速检查或严格分流回归；按需编辑 MosDNS 国内/国外上游 | 不自动修改 DHCP DNS 或强制重定向 |
 | 机场与候选池 | 按需添加机场来源、全量测速生成建议、复测并生效、查看 fallback 切换 | 不长期对所有节点测速 |
-| DNS | 查看解析状态、缓存和日志；按需编辑 MosDNS 国内/国外上游 | 不自动修改 RouterOS、DHCP DNS 或强制重定向 |
+| 规则 | 调整业务分流规则并生成可回退配置 | 不写入订阅链接 |
 
 设备页按日常操作顺序排列：设备管理、按 IP 手动加入、旁路运行状态、RB5009 状态、Z4Pro 状态。“按 IP 手动加入”默认收起；从设备列表选择“加入旁路”时会自动展开并填入地址。
 
@@ -155,7 +155,7 @@ MosDNS-T 的推荐加固配置见 [MOSDNS.md](MOSDNS.md)。其中包含分流前
 
 - 国内应用、购物、短视频和本地服务优先直连。
 - 接管设备的中国 IPv4 流量由 RouterOS 在策略打标前直接送往 WAN；国外 TCP/UDP 才进入 Z4Pro 和 Mihomo TPROXY。Z4Pro 的国内直转仅作为防错兜底，不能替代 RouterOS 前置直连，否则会形成 `RouterOS -> Z4Pro -> RouterOS` 的额外往返。
-- Z4Pro 的中国 IPv4 集合每周从 APNIC 官方数据源通过本地直连更新，更新前校验条目数量，更新后只重载旁路转发规则，不重启 Docker 容器。RouterOS 地址表为稳定性采用人工校验后导入，更新方法见 `routeros/README.md`。
+- Z4Pro 的中国 IPv4 集合每周从 APNIC 官方数据源通过本地直连更新，更新前校验条目数量，更新后只重载旁路转发规则，不重启 Docker 容器。启用 `ROUTER_CN_AUTO_SYNC=true` 时，同一任务只同步 RouterOS 的 `family_cn_ipv4` 地址表：差异超过 20% 会拒绝，变更前保存 JSON，先加后删，最终对账失败会自动恢复；不会修改 mangle、NAT 或路由表。
 - AI 使用所有非香港候选池；日本、新加坡、美国优先，台湾、韩国及其他地区作为补充，不使用香港节点。
 - 视频、即时通信和搜索使用各自业务策略，不把所有流量粗暴导向一个节点。
 - 一次只修改一个业务类别；验证通过再进行下一项。
@@ -179,7 +179,20 @@ DNS 是独立功能页，但与其它页面共用管理入口和登录状态。�
 3. 路由器是否有遗留的 DNS 重定向或旧代理规则；
 4. IPv6 是否绕过或与当前规则面冲突。
 
-可用 `scripts/verify-dns-routing.sh` 对固定国内外域名执行只读回归。脚本要求 MosDNS 审计 API 可访问，用实际 `effective_tag` 与 `final_upstream` 判断方向，而不只检查是否返回 IP。
+日常可在“DNS - 数据管理”执行“快速检查”，它保留缓存，只验证固定国内外域名可解析、结果不是 FakeIP/私网地址且 Apple Push 正常。配置或规则更新后执行“完整回归”，它会清理相关路由缓存，再用实际 `effective_tag` 与 `final_upstream` 核对方向。命令行等价用法：
+
+```bash
+sudo scripts/verify-dns-routing.sh --quick /etc/family-proxy-ui/router.env
+sudo scripts/verify-dns-routing.sh --full /etc/family-proxy-ui/router.env
+```
+
+Mihomo 的 `geosite.dat`、`geoip.dat` 和 `geoip.metadb` 由独立周任务维护。数据和校验和均来自 MetaCubeX 官方仓库维护的 `release` 分支；公开文件先短时直连，失败才使用 `FAMILY_GEODATA_PROXY` 指定的本机代理。机场订阅的强制直连边界不变。任务核对 SHA-256，并用当前 Mihomo 内核加载临时文件；真正更新前备份旧文件，重启验证失败自动恢复。它只换地理数据库，不改订阅、规则、候选池或策略顺序。只检查不应用：
+
+```bash
+sudo /usr/local/sbin/refresh-mihomo-geodata --check
+```
+
+只有这条检查在当前网络稳定通过后，才把 `MIHOMO_GEODATA_AUTO_UPDATE` 改为 `true` 并重新运行安装器。默认关闭自动计时器，避免 GitHub 大文件链路不稳定时长期占用家庭带宽；现有 GEO 文件和 Mihomo 运行不受检查失败影响。
 
 ## 七、日常健康检查
 

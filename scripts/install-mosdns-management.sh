@@ -89,6 +89,7 @@ systemctl is-active --quiet family-mosdns-updater.service
 secret=$(cat /etc/family-proxy-ui/gateway.secret)
 curl --fail --silent --show-error -H "X-Family-Gateway: $secret" http://127.0.0.1:18102/upstreams >/dev/null
 curl --fail --silent --show-error -H "X-Family-Gateway: $secret" http://127.0.0.1:18102/adblock/status >/dev/null
+curl --fail --silent --show-error -H "X-Family-Gateway: $secret" http://127.0.0.1:18102/verify/status >/dev/null
 
 echo "MosDNS management installed. Backup: $backup"
 echo "The MosDNS core, RouterOS, DHCP DNS, and current upstream configuration were not changed."

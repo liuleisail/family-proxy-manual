@@ -40,7 +40,7 @@
     <header>
       <div class="header-inner">
         <div class="brand">家庭旁路</div>
-        <nav class="global-nav" aria-label="家庭旁路主功能"><a href="/">设备</a><a href="/rules">规则</a><a href="/airport/">机场与候选池</a><a class="active" href="/dns/">DNS</a></nav>
+        <nav class="global-nav" aria-label="家庭旁路主功能"><a href="/">设备</a><a class="active" href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a></nav>
       </div>
     </header>
 
@@ -194,6 +194,7 @@
           <aside class="maintenance">
             <div class="section-head"><h2>维护操作</h2></div>
             <div class="action"><div class="action-title">刷新页面数据</div><p>重新读取状态、规则数量与上游配置，不改变 DNS 服务。</p><button id="data-refresh" class="btn">重新载入</button></div>
+            <div class="action"><div class="action-title">DNS 回归检查</div><p id="verify-detail">快速检查保留缓存；完整回归会清理路由缓存并核对国内外实际上游。</p><div class="update-actions"><button id="verify-quick" class="btn">快速检查</button><button id="verify-full" class="btn">完整回归</button></div></div>
             <div class="action"><div class="action-title">清空 DNS 缓存</div><p>用于排查旧解析结果。清空后首次打开网站可能稍慢，随后会恢复。</p><button id="flush-cache" class="btn">清空缓存</button></div>
             <div class="action"><div class="action-title">查询记录采集</div><p id="capture-description">正在读取采集状态。</p><button id="toggle-capture" class="btn">--</button></div>
             <div class="action"><div class="action-title">清空查询日志</div><p>删除当前审计记录，无法撤销，不影响 DNS 解析。</p><button id="clear-logs" class="btn danger">清空日志</button></div>
@@ -203,7 +204,7 @@
     </main>
   </div>
   <script>
-    const state = { page: 'overview', logs: [], filter: 'all', capture: null, softwareUpdate: null, ruleUpdate: null, adblock: null, upstreams: null };
+    const state = { page: 'overview', logs: [], filter: 'all', capture: null, softwareUpdate: null, ruleUpdate: null, adblock: null, upstreams: null, dnsVerify: null };
     const $ = (s) => document.querySelector(s);
     const $$ = (s) => [...document.querySelectorAll(s)];
     const icons = { ok: 'ok', bad: 'bad' };
@@ -636,6 +637,34 @@
       } catch (error) { toast(`设置失败：${error.message}`, true); }
     }
 
+    function renderDnsVerify(data) {
+      state.dnsVerify = data;
+      const busy = Boolean(data.busy) || data.phase === 'checking';
+      const mode = data.mode === 'full' ? '完整回归' : '快速检查';
+      $('#verify-detail').textContent = `${mode}：${data.message || '尚未执行'}${data.completed_at ? ` · ${updateTime(data.completed_at)}` : ''}`;
+      $('#verify-quick').disabled = busy;
+      $('#verify-full').disabled = busy;
+    }
+    async function loadDnsVerify(silent = false) {
+      try { const data = await maintenanceApi('/verify/status'); renderDnsVerify(data); return data; }
+      catch (error) { if (!silent) toast(`DNS 检查状态读取失败：${error.message}`, true); return null; }
+    }
+    async function runDnsVerify(mode) {
+      if (mode === 'full' && !confirm('完整回归会清理 DNS 路由缓存，随后首次查询可能短暂变慢。继续吗？')) return;
+      try {
+        await maintenanceApi('/verify/run', {method:'POST', body:JSON.stringify({mode})});
+        toast(mode === 'quick' ? '已开始快速检查，现有缓存不变' : '已开始完整 DNS 回归');
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          const data = await loadDnsVerify(true);
+          if (data && !data.busy && data.phase !== 'checking') {
+            toast(data.message || 'DNS 检查完成', data.phase === 'error');
+            return;
+          }
+        }
+      } catch (error) { toast(`DNS 检查启动失败：${error.message}`, true); await loadDnsVerify(true); }
+    }
+
     async function postAction(path, message) {
       const result = await api(path, { method: 'POST' }); toast(message); return result;
     }
@@ -676,7 +705,7 @@
       $$('.page').forEach(x => x.classList.toggle('active', x.id === `page-${page}`));
       history.replaceState(null, '', `#${page}`);
       if (page === 'logs' && !state.logs.length) loadLogs();
-      if (page === 'data') { loadData(); loadSoftwareUpdate(true); loadRuleUpdate(true); loadAdblock(true); }
+      if (page === 'data') { loadData(); loadSoftwareUpdate(true); loadRuleUpdate(true); loadAdblock(true); loadDnsVerify(true); }
     }
     $$('.tab').forEach(x => x.addEventListener('click', () => showPage(x.dataset.page)));
     $$('.segment').forEach(x => x.addEventListener('click', () => { $$('.segment').forEach(y => y.classList.remove('active')); x.classList.add('active'); state.filter = x.dataset.filter; renderLogs(); }));
@@ -684,6 +713,8 @@
     $('#global-refresh').addEventListener('click', refreshCurrent);
     $('#logs-refresh').addEventListener('click', event => reloadFrom(event.currentTarget, loadLogs, '查询日志已重新载入'));
     $('#data-refresh').addEventListener('click', event => reloadFrom(event.currentTarget, async () => (await Promise.all([loadData(), loadAdblock(true)])).every(Boolean), '规则、过滤与上游状态已重新载入'));
+    $('#verify-quick').addEventListener('click', () => runDnsVerify('quick'));
+    $('#verify-full').addEventListener('click', () => runDnsVerify('full'));
     $('#flush-cache').addEventListener('click', flushCaches);
     $('#toggle-capture').addEventListener('click', toggleCapture);
     $('#clear-logs').addEventListener('click', clearLogs);
@@ -707,8 +738,9 @@
     loadSoftwareUpdate(true);
     loadRuleUpdate(true);
     loadAdblock(true);
+    loadDnsVerify(true);
     setInterval(() => { if (state.page === 'overview' && !document.hidden) Promise.all([loadHealth(), loadOverview()]); }, 30000);
-    setInterval(() => { if (state.page === 'data' && !document.hidden) { loadSoftwareUpdate(true); loadRuleUpdate(true); loadAdblock(true); } }, 30000);
+    setInterval(() => { if (state.page === 'data' && !document.hidden) { loadSoftwareUpdate(true); loadRuleUpdate(true); loadAdblock(true); loadDnsVerify(true); } }, 30000);
   </script>
 </body>
 </html>
