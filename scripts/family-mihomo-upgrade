@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# Controlled Mihomo image maintenance. It only ever recreates this one container.
+set -Eeuo pipefail
+
+action=${1:-status}
+config=/etc/family-proxy-ui/router.env
+container=family-mihomo-fallback
+status_file=/var/lib/family-proxy/mihomo-upgrade-status.json
+lock_file=/run/family-mihomo-upgrade.lock
+
+value() { awk -F= -v key="$1" '$1==key {print substr($0,index($0,"=")+1); exit}' "$config"; }
+root=$(value FAMILY_DOCKER_ROOT)
+workdir="$root/family-mihomo-fallback"
+compose="$workdir/docker-compose.yml"
+
+write_status() {
+  local state=$1 message=$2 old_id=${3:-} new_id=${4:-} backup=${5:-} current_version=${6:-} latest_version=${7:-} latest_published=${8:-} notes_zh=${9:-} docker_proxy_ready=${10:-}
+  mkdir -p /var/lib/family-proxy
+  python3 - "$status_file" "$state" "$message" "$old_id" "$new_id" "$backup" "$current_version" "$latest_version" "$latest_published" "$notes_zh" "$docker_proxy_ready" <<'PY'
+import json, os, sys, time
+path, state, message, old_id, new_id, backup, current_version, latest_version, latest_published, notes_zh, docker_proxy_ready = sys.argv[1:]
+data = {"updated_at": int(time.time()), "state": state, "message": message,
+        "old_image_id": old_id, "new_image_id": new_id, "backup": backup,
+        "current_version": current_version, "latest_version": latest_version,
+        "latest_published": latest_published, "release_notes_zh": notes_zh,
+        "docker_proxy_ready": docker_proxy_ready == "true"}
+tmp = path + ".new"
+with open(tmp, "w", encoding="utf-8") as handle: json.dump(data, handle, ensure_ascii=False)
+os.chmod(tmp, 0o600); os.replace(tmp, path)
+PY
+}
+
+image() { docker inspect "$container" --format '{{.Config.Image}}'; }
+image_id() { docker image inspect "$1" --format '{{.Id}}'; }
+healthy() {
+  for _ in $(seq 1 25); do
+    if curl -fsS --max-time 3 http://127.0.0.1:9091/version >/dev/null \
+      && curl -fsS --max-time 3 http://127.0.0.1:9091/proxies/Proxy-Auto >/dev/null; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+require_layout() {
+  [[ -r $config && -n $root && -f $compose ]] || { write_status failed "Mihomo Docker 配置路径不可用"; exit 1; }
+  docker inspect "$container" >/dev/null 2>&1 || { write_status failed "Mihomo 容器不存在"; exit 1; }
+}
+
+check() {
+  require_layout
+  local current version local_digest remote_digest token manifest headers release release_date docker_proxy_ready
+  current=$(image)
+  version=$(curl -fsS --max-time 4 http://127.0.0.1:9091/version 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version","未知"))' 2>/dev/null || printf '控制接口不可用')
+  local_digest=$(docker image inspect "$current" --format '{{index .RepoDigests 0}}' 2>/dev/null | sed 's/^.*@//' || true)
+  token=$(curl -fsS --max-time 18 -x http://127.0.0.1:7890 "https://auth.docker.io/token?service=registry.docker.io&scope=repository:metacubex/mihomo:pull" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' 2>/dev/null || true)
+  manifest=$(mktemp); headers=$(mktemp)
+  if [[ -n $token ]]; then
+    curl -fsS --max-time 20 -x http://127.0.0.1:7890 -H "Authorization: Bearer $token" \
+      -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+      -D "$headers" -o "$manifest" "https://registry-1.docker.io/v2/metacubex/mihomo/manifests/Alpha" || true
+  fi
+  remote_digest=$(python3 - "$manifest" <<'PY' 2>/dev/null || true
+import json, sys
+data = json.load(open(sys.argv[1]))
+for item in data.get("manifests", []):
+    platform = item.get("platform", {})
+    if platform.get("os") == "linux" and platform.get("architecture") == "amd64":
+        print(item.get("digest", "")); break
+PY
+)
+  release=$(curl -fsS --max-time 18 -x http://127.0.0.1:7890 -H 'Accept: application/vnd.github+json' \
+    https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/Prerelease-Alpha 2>/dev/null || true)
+  release_date=$(printf '%s' "$release" | python3 -c 'import json,re,sys; p=json.load(sys.stdin); m=re.search(r"Release created at\s+([^<\n]+)", p.get("body", "")); print(m.group(1).strip() if m else p.get("published_at", ""))' 2>/dev/null || true)
+  rm -f "$manifest" "$headers"
+  docker_proxy_ready=false
+  systemctl show docker -p Environment --value | grep -Eq 'HTTPS_PROXY=https?://[^" ]+' && docker_proxy_ready=true
+  if [[ -z $remote_digest ]]; then
+    write_status check_failed "经本机 Mihomo 仍无法完成仓库检查；未拉取、未重启容器。" "$(image_id "$current")" "" "" "$version" "" "" "" "$docker_proxy_ready"
+  elif [[ $local_digest == "$remote_digest" ]]; then
+    write_status current "当前 Alpha 镜像已与 Docker Hub 的 amd64 构建一致。" "$(image_id "$current")" "$remote_digest" "" "$version" "Alpha（预发布滚动版）" "$release_date" "官方说明：同步 Alpha 分支代码更新，仅保留最新构建；未提供逐项变更说明。" "$docker_proxy_ready"
+  else
+    local proxy_note=""
+    [[ $docker_proxy_ready == true ]] || proxy_note=" Docker 守护进程尚未配置代理，升级按钮已保护性禁用。"
+    write_status update_available "发现新的 Alpha amd64 镜像；点击升级后才会拉取、校验并重建容器。$proxy_note" "$(image_id "$current")" "$remote_digest" "" "$version" "Alpha（预发布滚动版）" "$release_date" "官方说明：同步 Alpha 分支代码更新，仅保留最新构建；未提供逐项变更说明。" "$docker_proxy_ready"
+  fi
+}
+
+apply() {
+  exec 9>"$lock_file"
+  flock -n 9 || { write_status busy "已有 Mihomo 维护任务正在执行"; exit 1; }
+  require_layout
+  local current old_id stamp backup new_id rollback_tag
+  current=$(image); old_id=$(image_id "$current"); stamp=$(date +%Y%m%d-%H%M%S)
+  backup="$workdir/upgrade-backups/$stamp"; rollback_tag="family-mihomo-rollback:$stamp"
+  mkdir -p "$backup"
+  cp -a "$workdir/config.yaml" "$compose" "$backup/"
+  docker image tag "$old_id" "$rollback_tag"
+  write_status applying "正在拉取并校验 Mihomo 镜像；现有容器仍在运行。" "$old_id" "" "$backup"
+  if ! docker pull "$current"; then
+    write_status failed "镜像拉取失败；现有容器未重建。" "$old_id" "" "$backup"; exit 1
+  fi
+  new_id=$(image_id "$current")
+  if [[ $new_id == "$old_id" ]]; then
+    write_status current "已是最新镜像；未重建容器。" "$old_id" "$new_id" "$backup"; exit 0
+  fi
+  if ! docker compose -f "$compose" run --rm --no-deps "$container" -t -f /root/.config/mihomo/config.yaml; then
+    docker image tag "$old_id" "$current"
+    write_status failed "新镜像未通过配置校验；容器保持原样。" "$old_id" "$new_id" "$backup"; exit 1
+  fi
+  write_status applying "配置校验通过，正在仅重建 Mihomo 容器。" "$old_id" "$new_id" "$backup"
+  if docker compose -f "$compose" up -d --no-deps --force-recreate "$container" && healthy; then
+    write_status success "升级完成，控制接口与策略组已通过验证；旧镜像标签：$rollback_tag" "$old_id" "$new_id" "$backup"; exit 0
+  fi
+  docker image tag "$old_id" "$current"
+  docker compose -f "$compose" up -d --no-deps --force-recreate "$container" || true
+  if healthy; then
+    write_status rolled_back "新镜像启动或验证失败，已自动恢复旧镜像。" "$old_id" "$new_id" "$backup"
+  else
+    write_status failed "自动回退后控制接口仍未恢复，请使用备份目录人工检查。" "$old_id" "$new_id" "$backup"
+  fi
+  exit 1
+}
+
+case "$action" in
+  check) check ;;
+  apply) apply ;;
+  status) [[ -f $status_file ]] && cat "$status_file" || printf '%s\n' '{"state":"unknown","message":"尚未检查 Mihomo 更新"}' ;;
+  *) echo "usage: $0 {check|apply|status}" >&2; exit 2 ;;
+esac

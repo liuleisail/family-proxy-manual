@@ -8,6 +8,20 @@
 
 首次部署应在一台已安装 Docker、Docker Compose 插件和 `systemd` 的旁路服务器上完成。安装器只部署控制平面，不会自动改 RouterOS、导入订阅、接管设备或覆盖已有同名 Docker 容器。
 
+### 最短首次部署
+
+适用于已具备 Docker、systemd、固定 LAN IPv4，且 RouterOS API 已限制为只允许旁路主机访问的同类服务器：
+
+```bash
+git clone https://github.com/liuleisail/family-proxy-manual.git
+cd family-proxy-manual
+sudo ./scripts/bootstrap-interactive.sh
+```
+
+脚本会展示本机网卡地址，询问 LAN、旁路主机 IP、RouterOS API 凭据、管理页凭据和 SSD 数据目录；凭据仅写入权限为 `600` 的 `/etc/family-proxy-ui/router.env`。随后它自动执行控制平面安装、基础 Mihomo 容器创建、服务启动和本机验证。管理页密码会立刻转换为 PBKDF2 哈希，明文不会保留。
+
+该入口**不**自动写 RouterOS、接管设备、导入订阅，或覆盖已有 Mihomo/MosDNS 容器。RouterOS 必须先在终端审阅并导入模板；现有 MosDNS 仅按兼容安装步骤对接。这是为了在不同家庭网络上仍保留可恢复边界，而不是把现网规则打包进镜像。
+
 ### 1. 获取项目并填写本地私密配置
 
 ```bash
@@ -64,10 +78,15 @@ MosDNS-T 的推荐加固配置见 [MOSDNS.md](MOSDNS.md)。其中包含分流前
 | DNS | 查看解析状态、缓存和日志；执行保留缓存的快速检查或严格分流回归；按需编辑 MosDNS 国内/国外上游 | 不自动修改 DHCP DNS 或强制重定向 |
 | 机场与候选池 | 按需添加机场来源、全量测速生成建议、复测并生效、查看 fallback 切换 | 不长期对所有节点测速 |
 | 规则 | 调整业务分流规则并生成可回退配置 | 不写入订阅链接 |
+| 维护 | 检查 Mihomo 镜像更新，按需升级并验证 | 不自动升级，也不触碰 MosDNS、订阅或 RouterOS |
 
 设备页按日常操作顺序排列：设备管理、按 IP 手动加入、旁路运行状态、RB5009 状态、WireGuard 远程互联、Z4Pro 状态。“按 IP 手动加入”默认收起；从设备列表选择“加入旁路”时会自动展开并填入地址。常驻站点链路按最近握手显示正常、警告或故障；手机按需隧道未连接时显示灰色“待机”，不会误报故障。详情仅展示脱敏端点、流量、路由、NAT 和最近 7 天（最多 200 条）状态变化，不返回任何密钥。
 
 首次操作前，确认管理页显示：Z4Pro 资源、RB5009 版本/CPU/可用内存/运行时间、DNS、Mihomo、当前策略和自动回退均为正常。Z4Pro 与 WireGuard 卡片每 10 秒更新，WireGuard 站点探针最多每 60 秒执行一次，RB5009 资源、设备与流量列表每 30 秒更新。Docker 的“运行数 / 总数”不会启动已停止容器；温度工具不可用时只显示“不可用”，其它状态仍可读取。任意关键项异常时，先修复健康状态，不要继续接管新设备。
+
+Mihomo 的“维护”页默认只读。检查更新只读取镜像仓库元数据，仓库不可达时显示失败且不拉取、不重启。点击“升级并验证”后，系统才会备份当前 `config.yaml` 和 Compose 文件、为旧镜像保存本地回滚标签、拉取新镜像、用现有配置校验，再重建唯一的 `family-mihomo-fallback` 容器。控制接口或 `Proxy-Auto` 策略组验证失败会自动恢复旧镜像；不会启动任何历史停用容器。当前镜像使用 Alpha 浮动标签，因此建议只在网络稳定时手动升级，不启用定时自动更新。
+
+若家庭网络无法直连 Docker Hub，可把 `systemd/docker-mihomo-proxy.conf` 安装为 Docker 服务的 `http-proxy.conf`。该配置只让 Docker 守护进程通过本机 `127.0.0.1:7890` 拉取镜像，NAS 默认网关、局域网访问和既有容器运行流量不改。应用配置需重启 Docker；先确认 `docker info` 的 `Live Restore Enabled` 为 `true`，并备份、记录容器状态后再操作。
 
 ## 三、设备接入与撤出
 
@@ -144,6 +163,14 @@ MosDNS-T 的推荐加固配置见 [MOSDNS.md](MOSDNS.md)。其中包含分流前
 | YouTube | HK-视频 | YouTube 204 探测 | 300 秒 | 当前节点不可用 |
 | Telegram | TG | Telegram 可达探测 | 300 秒 | 当前节点不可用 |
 | Google、Others | Proxy | 通用代理可达探测 | 按服务默认值 | 当前节点不可用 |
+
+Telegram 同时使用域名和原生 IP 建立连接。配置必须同时保留
+`GEOSITE,telegram,Telegram` 与 `GEOIP,telegram,Telegram,no-resolve`，否则原生 IP
+连接会落入 `Others`。候选池的 HTTP 健康检查只证明 TCP 可用；状态页会把
+`TCP 探针` 与 `UDP 声明/QUIC 未验证` 分开显示，不能把 TCP 绿灯当作 UDP 已验证。
+RouterOS 对 `family_mihomo_devices` 中的所有纳管设备快速拒绝外网 UDP/443，客户端会立即
+回退到稳定的 TCP/HTTPS；局域网目标不受影响。以后从设备页加入的新设备会自动继承该规则，
+不需要按 IP 单独创建。
 
 “切换状态”页展示策略组、当前叶子节点、稳定保持时间和最近自动切换记录。它用于确认故障切换是否发生；不应把它当作全节点测速页面。
 

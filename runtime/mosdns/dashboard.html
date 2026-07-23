@@ -33,6 +33,7 @@
     @media(max-width:900px){.header-inner{min-height:auto;padding:10px 0;align-items:flex-start;flex-direction:column;gap:8px}.global-nav{width:100%;display:grid;grid-template-columns:repeat(4,1fr)}.global-nav a{text-align:center;padding:7px 5px;white-space:normal}.intro{align-items:flex-start;flex-direction:column}.status{max-width:100%;white-space:normal}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.route-grid,.split,.data-layout,.upstream-fields{grid-template-columns:1fr}.segments{order:3;width:100%;margin-left:0}.segment{flex:1}.maintenance{margin-top:0}}
     @media(max-width:700px){.upstream-metric-row{grid-template-columns:30px minmax(0,1fr) auto}.upstream-win,.upstream-latency{grid-column:2/-1}.upstream-latency{padding-top:2px}.upstream-metric-row>.pill{grid-column:3;grid-row:1}}
     @media(max-width:520px){.header-inner,main{width:min(100% - 28px,1040px)}main{padding:28px 0 50px}.intro h1{font-size:28px}.view-tabs{width:100%}.tab{padding:0 7px}.metrics{gap:7px}.metric{min-height:92px;padding:13px}.metric-value{font-size:22px}.toolbar{align-items:stretch}.search{flex-basis:100%}.toolbar>.btn{width:100%}.data-row{grid-template-columns:1fr auto}.data-row .muted{grid-column:1/-1;grid-row:2}.upstream-card-head{align-items:flex-start}.update-summary,.filter-summary{grid-template-columns:1fr}.update-item{min-height:62px;border-left:0;border-top:1px solid var(--line)}.update-item:first-child{border-top:0}.filter-source{grid-template-columns:1fr auto}.filter-source .mono{grid-column:1}.update-actions .btn{flex:1 1 100%}}
+    @media(max-width:900px){.global-nav{grid-template-columns:repeat(5,1fr)}}
   </style>
 </head>
 <body>
@@ -40,7 +41,7 @@
     <header>
       <div class="header-inner">
         <div class="brand">家庭旁路</div>
-        <nav class="global-nav" aria-label="家庭旁路主功能"><a href="/">设备</a><a class="active" href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a></nav>
+        <nav class="global-nav" aria-label="家庭旁路主功能"><a href="/">设备</a><a class="active" href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav>
       </div>
     </header>
 
@@ -179,7 +180,7 @@
               <div class="update-card">
                 <div class="update-summary">
                   <div class="update-item"><span class="update-label">当前内核</span><span id="software-version" class="update-value mono">--</span></div>
-                  <div class="update-item"><span class="update-label">官方镜像</span><span id="software-image" class="update-value mono">--</span></div>
+                  <div class="update-item"><span class="update-label">整合镜像源</span><span id="software-image" class="update-value mono">--</span></div>
                   <div class="update-item"><span class="update-label">自动更新</span><span id="software-auto" class="update-value">--</span></div>
                 </div>
                 <div id="software-update-detail" class="update-detail">正在读取更新状态。</div>
@@ -620,7 +621,7 @@
       return null;
     }
     async function checkSoftwareUpdate() {
-      try { await maintenanceApi('/check', {method:'POST', body:'{}'}); toast('已开始检查官方镜像'); await pollSoftwareUpdate(); }
+      try { await maintenanceApi('/check', {method:'POST', body:'{}'}); toast('已开始检查整合镜像'); await pollSoftwareUpdate(); }
       catch (error) { toast(`检查失败：${error.message}`, true); await loadSoftwareUpdate(true); }
     }
     async function applySoftwareUpdate() {

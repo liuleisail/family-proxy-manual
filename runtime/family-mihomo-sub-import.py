@@ -277,7 +277,9 @@ def fallback(name, selected, url, interval, expected_status=None):
         "proxies": selected,
         "url": url,
         "interval": interval,
-        "lazy": True,
+        # Candidate pools are intentionally small. Keep their health state warm
+        # so the first request after an idle period does not trigger discovery.
+        "lazy": False,
         "timeout": 5000,
         "max-failed-times": 2,
     }
@@ -338,6 +340,29 @@ def generate_config(selected=None):
             item["name"] = sources_by_slot[slot]["prefix"] + str(item["name"])
             flattened.append(item)
     config["proxies"] = flattened
+    # Telegram mobile clients commonly connect to MTProto endpoints by IP.
+    # Skipping those ranges avoids waiting for a TLS hostname that will never
+    # arrive; the GEOIP telegram rule below still selects the dedicated pool.
+    sniffer = config.setdefault("sniffer", {})
+    skipped = list(sniffer.get("skip-dst-address") or [])
+    for cidr in ("149.154.160.0/20", "91.108.4.0/22", "91.108.56.0/22"):
+        if cidr not in skipped:
+            skipped.append(cidr)
+    sniffer["skip-dst-address"] = skipped
+    # Telegram clients commonly connect to Telegram IPs directly, so GEOSITE
+    # alone cannot route those sessions into the dedicated Telegram pool.
+    rules = list(config.get("rules") or [])
+    apple_ip_rule = "IP-CIDR,17.0.0.0/8,Apple,no-resolve"
+    if apple_ip_rule not in rules:
+        insert_at = next((index + 1 for index, rule in enumerate(rules)
+                          if str(rule).startswith("GEOSITE,apple,")), 0)
+        rules.insert(insert_at, apple_ip_rule)
+    telegram_ip_rule = "GEOIP,telegram,Telegram,no-resolve"
+    if not any(str(rule).startswith("GEOIP,telegram,") for rule in rules):
+        insert_at = next((index for index, rule in enumerate(rules)
+                          if str(rule).startswith("GEOSITE,telegram,")), len(rules))
+        rules.insert(insert_at, telegram_ip_rule)
+    config["rules"] = rules
     hk, jp, sg, us, other_ai, tg, proxy = (selected[name] for name in POOLS)
     ai_groups = ["JP-AI", "SG-AI", "US-AI"] + (["其他-AI"] if other_ai else [])
     ai_nodes = jp + sg + us + other_ai
@@ -762,13 +787,19 @@ def status():
         try:
             data = proxy_api("/proxies/" + quote(group, safe=""))
             leaf = resolve_leaf(group)
+            leaf_data = proxy_api("/proxies/" + quote(leaf, safe="")) if leaf else {}
             latest = next((event for event in reversed(events) if event.get("group") == group), None)
             result[group] = {"now": data.get("now"), "leaf": leaf, "source": source_label(leaf),
-                             "type": data.get("type"), "history": data.get("history", [])[-3:],
-                             "last_change": latest, "since": (runtime.get(group) or {}).get("since")}
+                             "type": (str(data.get("type") or "策略") + " · TCP 探针 · "
+                                      + ("UDP 声明/QUIC 未验证" if leaf_data.get("udp")
+                                         else "未声明 UDP")),
+                             "history": data.get("history", [])[-3:],
+                             "last_change": latest, "since": (runtime.get(group) or {}).get("since"),
+                             "udp_declared": bool(leaf_data.get("udp")), "quic_verified": False}
         except Exception:
             result[group] = {"now": None, "leaf": None, "source": "不可用", "type": "unavailable",
-                             "history": [], "last_change": None, "since": None}
+                             "history": [], "last_change": None, "since": None,
+                             "udp_declared": False, "quic_verified": False}
     return {"groups": result, "events": events[-20:], "versions": [path.name for path in sorted(VERSIONS.glob("*.yaml"), reverse=True)[:5]]}
 
 
@@ -785,9 +816,10 @@ PAGE = PAGE.replace('<div class="eyebrow">PROXY SOURCES</div>', '')
 PAGE = PAGE.replace('href="http://__FAMILY_PROXY_IP__:18091/"', 'href="/dns/"')
 PAGE = PAGE.replace(
     '<a href="/">设备</a><a href="/rules">规则</a><a class="active" href="/airport/">机场与候选池</a><a href="/dns/">DNS</a>',
-    '<a href="/">设备</a><a href="/dns/">DNS</a><a class="active" href="/airport/">机场与候选池</a><a href="/rules">规则</a>',
+    '<a href="/">设备</a><a href="/dns/">DNS</a><a class="active" href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a>',
     1,
 )
+PAGE = PAGE.replace('</style>', '@media(max-width:760px){.nav{grid-template-columns:repeat(5,1fr)}}</style>', 1)
 _slot_card_start = PAGE.find("function slotCard(s){")
 _slot_card_end = PAGE.find("async function load(){", _slot_card_start)
 if _slot_card_start < 0 or _slot_card_end < 0:

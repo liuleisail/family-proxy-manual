@@ -12,6 +12,22 @@
 
 ## 1. 获取项目与填写私密配置
 
+### 交互式首次安装（推荐）
+
+对于满足前置条件、尚未部署本项目的新服务器，最短流程如下：
+
+```bash
+git clone https://github.com/liuleisail/family-proxy-manual.git
+cd family-proxy-manual
+sudo ./scripts/bootstrap-interactive.sh
+```
+
+引导脚本会询问 LAN、旁路主机 IP、LAN 桥接口、SSD 数据目录、RouterOS API 与管理页凭据，生成仅本机可读的 `router.env`，然后执行控制平面安装、基础 Mihomo 容器创建、服务启动及 `verify-server.sh`。它拒绝覆盖已有 `router.env` 或同名 Mihomo 容器；已有部署请使用升级流程。
+
+该脚本不会自动写 RouterOS、占用 53 端口、覆盖已有 MosDNS、导入订阅或接管客户端。完成后仍应按本文第 4 节审阅 RouterOS 模板，并按实际情况对接既有 MosDNS。这些网络边界不应被封装进通用 Docker 镜像。
+
+### 手工填写配置
+
 ```bash
 git clone https://github.com/liuleisail/family-proxy-manual.git
 cd family-proxy-manual
@@ -127,6 +143,8 @@ sudo ./scripts/upgrade-server.sh
 
 升级脚本会先建立时间戳备份，然后更新并重启 `family-proxy-ui`、`family-mihomo-sub-import` 和 `family-proxy-gateway`。它不会重启 Mihomo/MosDNS 容器、启动历史停用容器或写入 RouterOS。新版网关兼容 Safari 缓存的旧 DNS 页面，升级后无需清空 DNS 数据。
 
+Mihomo 镜像维护通过管理页“维护”按需执行，不属于上述控制平面升级。检查仓库只读；实际升级会备份当前配置并保留旧镜像标签，且只允许重建 `family-mihomo-fallback`。若配置校验、控制接口或 `Proxy-Auto` 验证失败，脚本会自动回退旧镜像。不要为该功能设置自动计时器。
+
 极空间把持久化数据挂载在 `/tmp/zfsv3/...` 时，`family-mihomo-sub-import` 必须保持 `PrivateTmp=false`，否则 systemd 的私有 `/tmp` 会遮住机场文件并让候选池显示为 `0/5`。安装包已内置该设置；`verify-server.sh` 也会比较磁盘候选池与 API 返回数量，发现路径不可见时立即报错。
 
 失败时停止相关服务，从本次时间戳备份恢复 `/opt/family-proxy-ui/`、服务单元和本地配置，再执行：
@@ -155,5 +173,7 @@ sudo /usr/local/sbin/family-mihomo-tproxy-auto sync
 - `sync-routeros-cn-ipv4 --check` 没有异常数量或大比例漂移；Mihomo GEO 文件通过官方校验和及内核加载验证。
 - 接管测试设备在国内 App、局域网服务和外网业务上都通过；未接管设备保持原样。
 - RouterOS 文本导出、二进制备份和本次服务器备份均可定位。
+- RouterOS 的 `family-mihomo-tproxy-health` 使用专用 `18087` 端口；
+  从局域网或 WireGuard 打开 `18088` 首页应进入登录页，不能返回健康 JSON。
 
 RouterOS 的命令设计遵循其 [Packet Flow](https://help.mikrotik.com/docs/spaces/ROS/pages/328227/Packet+Flow+in+RouterOS)、[Connection Tracking](https://help.mikrotik.com/docs/spaces/ROS/pages/130220087/Connection+tracking) 与 [Netwatch](https://help.mikrotik.com/docs/spaces/ROS/pages/8323208/Netwatch) 文档：IPv4 策略路由、DNS 和 FastTrack 排除使用共享地址列表，设备增减仍保持单设备事务与独立 IPv6 防漏。

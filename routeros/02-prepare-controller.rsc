@@ -71,10 +71,21 @@
 :if ([:len [find where comment=($sharedTag . " block external DoT UDP")]] = 0) do={
   add chain=forward action=drop protocol=udp src-address-list=$sharedList dst-address-list=!local_lan_ipv4 dst-port=853 comment=($sharedTag . " block external DoT UDP") place-before=$policyAnchor
 }
+:set policyAnchor [find where comment=($sharedTag . " FastTrack exclude")]
+:local quicRule [find where comment=($sharedTag . " QUIC fast fallback")]
+:if ([:len $quicRule] = 0) do={
+  add chain=forward action=reject reject-with=icmp-port-unreachable protocol=udp src-address-list=$sharedList dst-address-list=!local_lan_ipv4 dst-port=443 comment=($sharedTag . " QUIC fast fallback") place-before=$policyAnchor
+} else={
+  set $quicRule chain=forward action=reject reject-with=icmp-port-unreachable protocol=udp src-address-list=$sharedList dst-address-list=!local_lan_ipv4 dst-port=443
+  move $quicRule destination=$policyAnchor
+}
 
 /ipv6 firewall filter
-:if ([:len [find where comment="family-mihomo-auto IPv6 drop"]] = 0) do={
-  add chain=family_mihomo_auto_v6 action=drop comment="family-mihomo-auto IPv6 drop"
+:local ipv6Reject [find where comment="family-mihomo-auto IPv6 drop"]
+:if ([:len $ipv6Reject] = 0) do={
+  add chain=family_mihomo_auto_v6 action=reject reject-with=icmp-admin-prohibited comment="family-mihomo-auto IPv6 drop"
+} else={
+  set $ipv6Reject action=reject reject-with=icmp-admin-prohibited
 }
 
 # API must be reachable only from the proxy host. Review existing input rules

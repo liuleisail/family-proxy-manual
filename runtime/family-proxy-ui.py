@@ -7,6 +7,7 @@ import hmac
 import ipaddress
 import json
 import os
+import re
 import secrets
 import signal
 import shutil
@@ -31,6 +32,7 @@ DEVICE_PREFS_PATH = Path("/etc/family-proxy-ui/device-preferences.json")
 TPROXY_SYNC = "/usr/local/sbin/family-mihomo-tproxy-auto"
 MIHOMO_API = "http://127.0.0.1:9091"
 MIHOMO_CONFIG_PATH = Path("__FAMILY_DOCKER_ROOT__/family-mihomo-fallback/config.yaml")
+MIHOMO_UPGRADE_SCRIPT = "/usr/local/sbin/family-mihomo-upgrade"
 RULE_BACKUP_DIR = MIHOMO_CONFIG_PATH.parent / "rule-backups"
 RULES_TEMPLATE_PATH = Path("/opt/family-proxy-ui/rules.html")
 MIHOMO_GROUPS = ("AI", "Youtube", "Telegram", "Google", "Others")
@@ -53,6 +55,7 @@ DNS_METRICS_LOCK = threading.Lock()
 DNS_SAMPLES = deque(maxlen=120)
 SYSTEM_STATUS_LOCK = threading.Lock()
 SYSTEM_STATUS_CACHE = {"timestamp": 0.0, "value": None, "cpu_sample": None}
+HDD_TEMPERATURE_CACHE = {"timestamp": 0.0, "value": []}
 WIREGUARD_STATUS_LOCK = threading.Lock()
 WIREGUARD_EVENTS_PATH = Path("/var/lib/family-proxy/wireguard-events.json")
 WIREGUARD_EVENT_RETENTION = 7 * 24 * 60 * 60
@@ -385,6 +388,26 @@ def select_mihomo_node(group_name, node_name):
         raise RouterError("该节点不属于当前策略组")
     mihomo_request("/proxies/" + quote(group_name, safe=""), method="PUT", payload={"name": node_name})
     return {"message": f"{group_name} 已切换到 {node_name}"}
+
+
+def mihomo_upgrade_status():
+    result = subprocess.run([MIHOMO_UPGRADE_SCRIPT, "status"], text=True, capture_output=True, timeout=5)
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, ValueError) as exc:
+        raise RouterError("Mihomo 维护状态无法读取") from exc
+    if not isinstance(payload, dict):
+        raise RouterError("Mihomo 维护状态格式错误")
+    return payload
+
+
+def start_mihomo_upgrade(unit):
+    if unit not in {"family-mihomo-upgrade-check.service", "family-mihomo-upgrade.service"}:
+        raise RouterError("不允许的维护操作")
+    result = subprocess.run(["systemctl", "start", "--no-block", unit], text=True, capture_output=True, timeout=8)
+    if result.returncode:
+        raise RouterError("Mihomo 维护任务无法启动")
+    return {"message": "维护任务已启动，请等待状态刷新", "status": mihomo_upgrade_status()}
 
 
 def rules_version(rules):
@@ -981,10 +1004,10 @@ def wireguard_probe(api, target, source):
 
 def wireguard_status():
     config = load_config()
-    mobile_name = config.get("WIREGUARD_MOBILE_INTERFACE", "back-to-home-vpn")
-    site_name = config.get("WIREGUARD_SITE_INTERFACE", "wg-home")
-    mobile_label = config.get("WIREGUARD_MOBILE_LABEL", "手机按需回家")
-    site_label = config.get("WIREGUARD_SITE_LABEL", "站点常驻互联")
+    mobile_name = config.get("WIREGUARD_MOBILE_INTERFACE") or "back-to-home-vpn"
+    site_name = config.get("WIREGUARD_SITE_INTERFACE") or "wg-home"
+    mobile_label = config.get("WIREGUARD_MOBILE_LABEL") or "手机按需回家"
+    site_label = config.get("WIREGUARD_SITE_LABEL") or "站点常驻互联"
     site_probe = config.get("WIREGUARD_SITE_PROBE", "")
     site_probe_source = config.get("WIREGUARD_SITE_PROBE_SOURCE", "")
     now = int(time.time())
@@ -1263,7 +1286,7 @@ def list_devices():
             "upnp_enabled": upnp_enabled,
             "last_change": last_audit_event(),
             "backup": latest_backup(load_config()),
-            "ipv6_policy": "纳管设备阻断",
+            "ipv6_policy": "纳管设备快速拒绝并回退 IPv4",
         })
     if managed_macs - favorite_macs:
         with DEVICE_PREFS_LOCK:
@@ -1347,10 +1370,37 @@ def ensure_shared_policy(api):
             api.talk("/ip/firewall/filter/move", {
                 "numbers": exclude[".id"], "destination": fasttrack[".id"]})
 
+    filters = api.print("/ip/firewall/filter")
+    exclude = next((rule for rule in filters
+                    if rule.get("comment") == SHARED_TAG + " FastTrack exclude"), None)
+    quic_comment = SHARED_TAG + " QUIC fast fallback"
+    quic_rule = next((rule for rule in filters if rule.get("comment") == quic_comment), None)
+    quic_props = {
+        "chain": "forward", "action": "reject", "reject-with": "icmp-port-unreachable",
+        "protocol": "udp", "src-address-list": SHARED_LIST,
+        "dst-address-list": "!local_lan_ipv4", "dst-port": "443", "comment": quic_comment,
+    }
+    if not quic_rule:
+        api.add("/ip/firewall/filter", **quic_props)
+        quic_rule = next((rule for rule in api.print("/ip/firewall/filter")
+                          if rule.get("comment") == quic_comment), None)
+    else:
+        api.set("/ip/firewall/filter", quic_rule[".id"], **quic_props)
+    if quic_rule and exclude:
+        api.talk("/ip/firewall/filter/move", {
+            "numbers": quic_rule[".id"], "destination": exclude[".id"]})
+
     ipv6_filters = api.print("/ipv6/firewall/filter")
-    if not any(rule.get("comment") == "family-mihomo-auto IPv6 drop" for rule in ipv6_filters):
+    ipv6_guard = next((rule for rule in ipv6_filters
+                       if rule.get("comment") == "family-mihomo-auto IPv6 drop"), None)
+    if not ipv6_guard:
         api.add("/ipv6/firewall/filter", chain="family_mihomo_auto_v6",
-                action="drop", comment="family-mihomo-auto IPv6 drop")
+                action="reject", **{"reject-with": "icmp-admin-prohibited",
+                                    "comment": "family-mihomo-auto IPv6 drop"})
+    elif (ipv6_guard.get("action") != "reject"
+          or ipv6_guard.get("reject-with") != "icmp-admin-prohibited"):
+        api.set("/ipv6/firewall/filter", ipv6_guard[".id"], action="reject",
+                **{"reject-with": "icmp-admin-prohibited"})
 
 
 def rule_id(api, path, comment):
@@ -1531,13 +1581,13 @@ def temperature_status():
     try:
         result = subprocess.run(["sensors", "-j"], capture_output=True, text=True, timeout=3)
     except (OSError, subprocess.SubprocessError):
-        return {"cpu_c": None, "nvme_c": None}
+        return {"cpu_c": None, "nvme_c": None, "hdd": hdd_temperature_status()}
     if result.returncode:
-        return {"cpu_c": None, "nvme_c": None}
+        return {"cpu_c": None, "nvme_c": None, "hdd": hdd_temperature_status()}
     try:
         document = json.loads(result.stdout)
     except (TypeError, ValueError):
-        return {"cpu_c": None, "nvme_c": None}
+        return {"cpu_c": None, "nvme_c": None, "hdd": hdd_temperature_status()}
 
     def reading(chip_prefix, feature_name):
         for chip, features in document.items():
@@ -1552,7 +1602,45 @@ def temperature_status():
     return {
         "cpu_c": reading("coretemp-", "Package id 0"),
         "nvme_c": reading("nvme-", "Composite"),
+        "hdd": hdd_temperature_status(),
     }
+
+
+def hdd_temperature_status():
+    """Return rotating-disk SMART temperatures, with a modest read-rate limit."""
+    now = time.monotonic()
+    cached = HDD_TEMPERATURE_CACHE.get("value")
+    if cached is not None and now - HDD_TEMPERATURE_CACHE["timestamp"] < 30:
+        return list(cached)
+    disks = []
+    try:
+        listed = subprocess.run(
+            ["lsblk", "--json", "-d", "-o", "NAME,MODEL,ROTA,TYPE"],
+            capture_output=True, text=True, timeout=3,
+        )
+        for item in json.loads(listed.stdout).get("blockdevices", []):
+            if item.get("type") == "disk" and item.get("rota") in (True, 1, "1"):
+                disks.append((str(item.get("name")), str(item.get("model") or "机械盘").strip()))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        disks = []
+
+    readings = []
+    for name, model in disks:
+        try:
+            result = subprocess.run(["smartctl", "-A", "-j", f"/dev/{name}"],
+                                    capture_output=True, text=True, timeout=4)
+            table = json.loads(result.stdout).get("ata_smart_attributes", {}).get("table", [])
+            attributes = {item.get("id"): item for item in table}
+            attribute = attributes.get(194) or attributes.get(190)
+            raw_data = (attribute or {}).get("raw", {})
+            raw = str(raw_data.get("string") or raw_data.get("value", ""))
+            match = re.search(r"\d+", raw)
+            if match:
+                readings.append({"name": name, "model": model, "temperature_c": int(match.group())})
+        except (OSError, ValueError, subprocess.SubprocessError):
+            continue
+    HDD_TEMPERATURE_CACHE.update({"timestamp": now, "value": readings})
+    return list(readings)
 
 
 def docker_status():
@@ -1605,6 +1693,7 @@ def system_status():
             cpu_percent < 95 and memory_percent < 90 and disk_percent < 90
             and (temperatures["cpu_c"] is None or temperatures["cpu_c"] < 85)
             and (temperatures["nvme_c"] is None or temperatures["nvme_c"] < 75)
+            and all(item["temperature_c"] < 60 for item in temperatures["hdd"])
             and not containers.get("unhealthy")
         )
         value = {
@@ -1655,6 +1744,7 @@ PAGE = PAGE.replace(
     '.system-item:nth-child(3n){border-right:0}.system-item:nth-last-child(-n+3){border-bottom:0}'
     '.system-label{color:#8e8e93;font-size:12px}.system-value{margin-top:8px;font-size:23px;line-height:1.15;font-weight:700;font-variant-numeric:tabular-nums}'
     '.system-detail{margin-top:8px;color:#8e8e93;font-size:12px;line-height:1.45;overflow-wrap:anywhere}'
+    '.thermal{padding-bottom:13px}.thermal-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:11px}.thermal-reading{display:flex;align-items:baseline;justify-content:space-between;gap:6px;padding:6px 7px;border-radius:6px;background:#2c2c2e}.thermal-reading span{min-width:0;color:#aeaeb2;font-size:11px;white-space:nowrap}.thermal-reading b{color:#f5f5f7;font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}.thermal.warn .thermal-reading b{color:#ffd60a}.thermal.bad .thermal-reading b{color:#ff453a}'
     '.system-item.warn .system-value{color:#ffd60a}.system-item.bad .system-value{color:#ff453a}'
     '.meter{height:4px;margin-top:10px;border-radius:2px;background:#38383a;overflow:hidden}.meter span{display:block;height:100%;background:#30d158}'
     '.system-item.warn .meter span{background:#ffd60a}.system-item.bad .meter span{background:#ff453a}'
@@ -1679,8 +1769,9 @@ function formatUptime(seconds){let total=Math.max(0,Math.floor(Number(seconds||0
 function formatRouterUptime(value){let units={w:'周',d:'天',h:'小时',m:'分钟',s:'秒'},parts=[];String(value||'').replace(/([0-9]+)(w|d|h|m|s)/g,(all,count,unit)=>{if(parts.length<3)parts.push(count+units[unit]);return all});return parts.join(' ')||'不可用'}
 function systemTone(value,warn,bad){return Number(value)>=bad?'bad':Number(value)>=warn?'warn':''}
 function systemItem(label,value,detail,tone='',percent=null){let meter=percent===null?'':`<div class="meter"><span style="width:${Math.max(0,Math.min(100,Number(percent)||0))}%"></span></div>`;return `<div class="system-item ${tone}"><div class="system-label">${esc(label)}</div><div class="system-value">${esc(value)}</div>${meter}<div class="system-detail">${esc(detail)}</div></div>`}
+function thermalItem(t,hdds){let values=[['CPU',t.cpu_c],['M.2 SSD',t.nvme_c],...hdds.slice().sort((a,b)=>String(a.name).localeCompare(String(b.name))).map((item,index)=>[`盘 ${index+1}`,item.temperature_c])],max=Math.max(...values.map(item=>Number(item[1])||0)),tone=systemTone(max,50,60);return `<div class="system-item thermal ${tone}"><div class="system-label">温度</div><div class="thermal-grid">${values.map(([label,value])=>`<div class="thermal-reading"><span>${esc(label)}</span><b>${value==null?'--':`${Number(value).toFixed(0)}°C`}</b></div>`).join('')}</div></div>`}
 function renderRouter(r){let target=document.querySelector('#routerStatus'),updated=document.querySelector('#routerUpdated');if(!r?.available){target.innerHTML='<div class="empty">路由器资源暂时不可读</div>';updated.textContent='读取失败';return}target.innerHTML=systemItem('RouterOS',r.version||'不可用',r.board_name||'RB5009')+systemItem('CPU',`${Number(r.cpu_percent).toFixed(0)}%`,`${r.cpu_count} 核 · ${r.cpu_frequency} MHz`,systemTone(r.cpu_percent,75,90),r.cpu_percent)+systemItem('可用内存',formatBytes(r.memory_free),`总计 ${formatBytes(r.memory_total)} · 已用 ${Number(r.memory_percent).toFixed(1)}%`,systemTone(r.memory_percent,75,90),r.memory_percent)+systemItem('运行时间',formatRouterUptime(r.uptime),'RouterOS 持续运行');updated.textContent=new Date().toLocaleTimeString('zh-CN',{hour12:false})}
-async function loadSystem(){try{let s=await api('/api/system/status'),c=s.cpu,m=s.memory,t=s.temperature,d=s.disk,x=s.docker,tempValue=t.cpu_c==null?'不可用':`${Number(t.cpu_c).toFixed(1)}°C`,tempDetail=t.nvme_c==null?'NVMe 温度不可用':`NVMe ${Number(t.nvme_c).toFixed(1)}°C`,dockerValue=x.running==null?'不可用':`${x.running} / ${x.total}`,dockerDetail=x.unhealthy==null?'状态不可用':x.unhealthy?`${x.unhealthy} 个容器异常`:x.total>x.running?`运行中均正常 · ${x.total-x.running} 个已停止`:'运行中容器均正常';document.querySelector('#systemStatus').innerHTML=systemItem('CPU',`${Number(c.percent).toFixed(1)}%`,`${c.cores} 核 · 负载 ${c.load_1m} / ${c.load_5m}`,systemTone(c.percent,75,90),c.percent)+systemItem('内存',`${Number(m.percent).toFixed(1)}%`,`${formatBytes(m.used)} / ${formatBytes(m.total)} · Swap ${Number(m.swap_percent).toFixed(1)}%`,systemTone(m.percent,75,90),m.percent)+systemItem('温度',tempValue,tempDetail,systemTone(t.cpu_c||0,70,85))+systemItem('M.2 Docker 盘',`${Number(d.percent).toFixed(1)}%`,`${formatBytes(d.used)} / ${formatBytes(d.total)}`,systemTone(d.percent,75,90),d.percent)+systemItem('Docker',dockerValue,dockerDetail,x.unhealthy?'bad':'')+systemItem('运行时间',formatUptime(s.uptime_seconds),`内核 ${s.kernel}`);document.querySelector('#systemUpdated').textContent=`${s.healthy?'状态正常':'需要检查'} · ${new Date(s.updated_at*1000).toLocaleTimeString('zh-CN',{hour12:false})}`}catch(e){document.querySelector('#systemStatus').innerHTML=`<div class="empty">读取失败：${esc(e.message)}</div>`;document.querySelector('#systemUpdated').textContent='读取失败'}}
+async function loadSystem(){try{let s=await api('/api/system/status'),c=s.cpu,m=s.memory,t=s.temperature,d=s.disk,x=s.docker,hdds=Array.isArray(t.hdd)?t.hdd:[],dockerValue=x.running==null?'不可用':`${x.running} / ${x.total}`,dockerDetail=x.unhealthy==null?'状态不可用':x.unhealthy?`${x.unhealthy} 个容器异常`:x.total>x.running?`运行中均正常 · ${x.total-x.running} 个已停止`:'运行中容器均正常';document.querySelector('#systemStatus').innerHTML=systemItem('CPU',`${Number(c.percent).toFixed(1)}%`,`${c.cores} 核 · 负载 ${c.load_1m} / ${c.load_5m}`,systemTone(c.percent,75,90),c.percent)+systemItem('内存',`${Number(m.percent).toFixed(1)}%`,`${formatBytes(m.used)} / ${formatBytes(m.total)} · Swap ${Number(m.swap_percent).toFixed(1)}%`,systemTone(m.percent,75,90),m.percent)+thermalItem(t,hdds)+systemItem('M.2 Docker 盘',`${Number(d.percent).toFixed(1)}%`,`${formatBytes(d.used)} / ${formatBytes(d.total)}`,systemTone(d.percent,75,90),d.percent)+systemItem('Docker',dockerValue,dockerDetail,x.unhealthy?'bad':'')+systemItem('运行时间',formatUptime(s.uptime_seconds),`内核 ${s.kernel}`);document.querySelector('#systemUpdated').textContent=`${s.healthy?'状态正常':'需要检查'} · ${new Date(s.updated_at*1000).toLocaleTimeString('zh-CN',{hour12:false})}`}catch(e){document.querySelector('#systemStatus').innerHTML=`<div class="empty">读取失败：${esc(e.message)}</div>`;document.querySelector('#systemUpdated').textContent='读取失败'}}
 function deviceActions(d){''',
     1,
 )
@@ -1789,7 +1880,7 @@ sections = {heading: page_section(PAGE, heading) for heading in (
 region_start = min(section[0] for section in sections.values())
 region_end = max(section[1] for section in sections.values())
 ordered_sections = "".join(sections[heading][2] for heading in (
-    "设备", "加入旁路", "旁路运行状态", "RB5009 运行状态", "WireGuard 远程互联", "Z4Pro 运行状态"))
+    "设备", "加入旁路", "旁路运行状态", "Z4Pro 运行状态", "RB5009 运行状态", "WireGuard 远程互联"))
 PAGE = PAGE[:region_start] + ordered_sections + PAGE[region_end:]
 
 add_start, add_end, add_section = page_section(PAGE, "加入旁路")
@@ -1808,6 +1899,49 @@ PAGE = PAGE.replace(
 PAGE = PAGE.replace(
     "function setStatus(message,ok=true){statusEl.textContent=message;statusEl.className='status '+(ok?'':'error')}",
     "function setStatus(message,ok=true){statusEl.textContent=message;statusEl.className='status '+(ok?'':'error');if(!ok)document.querySelector('#manualAdd').open=true}",
+    1,
+)
+
+
+def collapse_diagnostic_section(page, heading, hint, updated_id):
+    start, end, section = page_section(page, heading)
+    prefix = (f'<section class="section"><div class="section-title"><h2>{heading}</h2>'
+              f'<span class="muted" id="{updated_id}">正在读取</span></div>')
+    replacement = (f'<details class="section diagnostic-section"><summary><span>{heading}</span>'
+                   f'<span class="summary-hint" id="{updated_id}">{hint}</span></summary>'
+                   '<div class="diagnostic-content">')
+    if prefix not in section:
+        raise RuntimeError(f"cannot collapse section: {heading}")
+    section = section.replace(prefix, replacement, 1)
+    section = section[:-len("</section>")] + "</div></details>"
+    return page[:start] + section + page[end:]
+
+
+PAGE = collapse_diagnostic_section(PAGE, "RB5009 运行状态", "按需查看路由器资源", "routerUpdated")
+PAGE = collapse_diagnostic_section(PAGE, "WireGuard 远程互联", "按需查看远程连接", "wireguardUpdated")
+PAGE = PAGE.replace(
+    '.manual-add>summary{display:flex;',
+    '.diagnostic-section>summary,.manual-add>summary{display:flex;',
+    1,
+)
+PAGE = PAGE.replace(
+    '.manual-add>summary::-webkit-details-marker{display:none}',
+    '.diagnostic-section>summary::-webkit-details-marker,.manual-add>summary::-webkit-details-marker{display:none}',
+    1,
+)
+PAGE = PAGE.replace(
+    '.manual-add>summary:after{content:"›";',
+    '.diagnostic-section>summary:after,.manual-add>summary:after{content:"›";',
+    1,
+)
+PAGE = PAGE.replace(
+    '.manual-add[open]>summary{margin-bottom:9px}',
+    '.diagnostic-section[open]>summary,.manual-add[open]>summary{margin-bottom:9px}',
+    1,
+)
+PAGE = PAGE.replace(
+    '.manual-add[open]>summary:after{transform:rotate(-90deg)}',
+    '.diagnostic-section[open]>summary:after,.manual-add[open]>summary:after{transform:rotate(-90deg)}.diagnostic-content{margin-top:9px}',
     1,
 )
 PAGE = PAGE.replace(
@@ -1882,12 +2016,13 @@ RULES_PAGE = RULES_PAGE.replace(
 RULES_PAGE = RULES_PAGE.replace('href="http://__FAMILY_PROXY_IP__:18091/"', 'href="/dns/"')
 PAGE = PAGE.replace(
     '<a class="active" href="/">设备</a><a href="/rules">规则</a><a href="/airport/">机场与候选池</a></nav>',
-    '<a class="active" href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a></nav>',
+    '<a class="active" href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav>',
     1,
 )
+PAGE = PAGE.replace('</style>', '@media(max-width:760px){.nav{grid-template-columns:repeat(5,1fr)}}</style>', 1)
 RULES_PAGE = RULES_PAGE.replace(
     '<a href="/">设备</a><a class="active" href="/rules">规则</a><a href="/airport/">机场与候选池</a><a href="/dns/">DNS</a>',
-    '<a href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a class="active" href="/rules">规则</a>',
+    '<a href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a class="active" href="/rules">规则</a><a href="/mihomo-maintenance">维护</a>',
     1,
 )
 PAGE = PAGE.replace(
@@ -1898,6 +2033,29 @@ PAGE = PAGE.replace(
 
 
 MIHOMO_PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>Mihomo 节点</title><style>:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#000;color:#f5f5f7}*{box-sizing:border-box}body{margin:0;background:#000}.wrap{max-width:820px;margin:auto;padding:36px 18px 60px}a{color:#0a84ff;text-decoration:none}h1{font-size:30px;margin:24px 0 7px;letter-spacing:0}.sub{color:#8e8e93;margin:0 0 24px}.group{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.row{display:grid;grid-template-columns:160px 1fr auto;align-items:center;gap:14px;padding:14px 16px;border-top:1px solid #38383a}.row:first-child{border-top:0}h2{font-size:15px;margin:0}.current{color:#8e8e93;font-size:12px;margin-top:4px;overflow-wrap:anywhere}select{min-width:0;width:100%;height:38px;padding:0 10px;border:1px solid #48484a;border-radius:7px;background:#2c2c2e;color:#fff;font:14px inherit}button{height:38px;border:0;border-radius:7px;background:#0a84ff;color:#fff;padding:0 15px;font-weight:600}.status{margin-top:14px;color:#30d158}.error{color:#ff453a}@media(max-width:620px){.row{grid-template-columns:1fr}.wrap{padding-top:24px}button{width:100%}}</style></head><body><main class="wrap"><a href="/">返回设备管理</a><h1>节点管理</h1><p class="sub">手动选择只影响对应业务组；AI 组不使用香港节点。</p><div class="group" id="groups"></div><div class="status" id="status"></div></main><script>const csrf="__CSRF__",status=document.querySelector('#status');function esc(s){return String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]))}async function req(path,opt={}){let r=await fetch(path,{...opt,headers:{'Content-Type':'application/json','X-CSRF':csrf}}),d=await r.json();if(!r.ok)throw Error(d.error||'请求失败');return d}async function load(){try{let d=await req('/api/mihomo');document.querySelector('#groups').innerHTML=d.groups.map(g=>`<section class="row"><div><h2>${esc(g.name)}</h2><div class="current">当前：${esc(g.now||'未选择')}</div></div><select id="group-${esc(g.name)}">${g.all.map(n=>`<option ${n===g.now?'selected':''}>${esc(n)}</option>`).join('')}</select><button onclick="choose('${esc(g.name)}')">应用</button></section>`).join('')}catch(e){status.textContent=e.message;status.className='status error'}}async function choose(group){try{let node=document.querySelector('#group-'+group).value,d=await req('/api/mihomo/select',{method:'POST',body:JSON.stringify({group,node})});status.textContent=d.message;status.className='status';await load()}catch(e){status.textContent=e.message;status.className='status error'}}load()</script></body></html>'''
+
+MIHOMO_MAINTENANCE_PAGE = r'''<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mihomo 维护</title><style>:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#000;color:#f5f5f7}*{box-sizing:border-box}body{margin:0}.wrap{max-width:760px;margin:auto;padding:34px 18px}a{color:#0a84ff;text-decoration:none}h1{font-size:30px;margin:24px 0 7px}.sub,.detail{color:#8e8e93;line-height:1.55}.panel{margin-top:22px;padding:18px;border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e}.state{font-weight:650;color:#30d158}.state.bad{color:#ff453a}.state.warn{color:#ffd60a}.actions{display:flex;gap:9px;margin-top:16px;flex-wrap:wrap}button{height:38px;border:0;border-radius:7px;padding:0 14px;background:#2c2c2e;color:#f5f5f7;font:600 14px inherit}.primary{background:#0a84ff}.meta{margin-top:14px;font:12px ui-monospace,monospace;color:#8e8e93;overflow-wrap:anywhere}.release{margin-top:14px;padding:11px;border-radius:7px;background:#2c2c2e;color:#aeaeb2;font-size:13px;line-height:1.55}@media(max-width:520px){.actions button{width:100%}}</style><main class="wrap"><a href="/">返回设备管理</a><h1>Mihomo 维护</h1><p class="sub">不自动升级。检查不会拉取镜像或重启容器；升级只重建 Mihomo，并在失败时自动恢复旧镜像。</p><section class="panel"><div class="state" id="state">正在读取状态</div><p class="detail" id="message"></p><div class="actions"><button onclick="check()">检查更新</button><button class="primary" id="upgrade" onclick="upgrade()">升级并验证</button></div><div class="meta" id="meta"></div><div class="release" id="release">尚未取得发布说明</div></section></main><script>const csrf="__CSRF__",state=document.querySelector('#state'),message=document.querySelector('#message'),meta=document.querySelector('#meta'),release=document.querySelector('#release'),upgradeButton=document.querySelector('#upgrade');async function api(path,opt={}){let r=await fetch(path,{...opt,headers:{'Content-Type':'application/json','X-CSRF':csrf}}),d=await r.json();if(!r.ok)throw Error(d.error||'请求失败');return d}function render(d){let busy=['applying','busy'].includes(d.state),bad=['failed','check_failed','rolled_back'].includes(d.state),warn=['update_available','applying','busy'].includes(d.state);state.textContent=({unknown:'尚未检查',checked:'检查完成',current:'当前已是最新',update_available:'发现可用更新',applying:'正在升级',success:'升级完成',rolled_back:'已自动回退',failed:'维护失败',check_failed:'检查失败',busy:'维护任务进行中'})[d.state]||d.state;state.className='state '+(bad?'bad':warn?'warn':'');message.textContent=d.message||'';meta.textContent=[d.current_version?`当前内核：${d.current_version}`:'',d.latest_version?`最新通道：${d.latest_version}`:'',d.latest_published?`最新构建说明时间：${d.latest_published}`:'',d.old_image_id?`当前镜像：${d.old_image_id.slice(0,19)}`:'',d.new_image_id?`最新镜像：${d.new_image_id.slice(0,19)}`:''].filter(Boolean).join(' · ');release.textContent=(d.release_notes_zh||'官方未提供可翻译的逐项变更说明。')+(d.docker_proxy_ready?'':' Docker 守护进程没有代理，已禁止执行升级。');upgradeButton.disabled=busy||d.docker_proxy_ready===false}async function load(){try{render(await api('/api/mihomo/upgrade'))}catch(e){state.textContent=e.message;state.className='state bad'}}async function check(){try{await api('/api/mihomo/upgrade/check',{method:'POST'});state.textContent='正在检查镜像仓库';state.className='state warn';setTimeout(load,1500)}catch(e){state.textContent=e.message;state.className='state bad'}}async function upgrade(){if(!confirm('升级将短暂重建 Mihomo 容器。系统会备份当前配置、保留旧镜像并在验证失败时自动回退。继续？'))return;try{await api('/api/mihomo/upgrade/apply',{method:'POST'});state.textContent='正在升级并验证';state.className='state warn';upgradeButton.disabled=true;poll()}catch(e){state.textContent=e.message;state.className='state bad'}}async function poll(){await load();let text=state.textContent;if(['正在升级','维护任务进行中'].includes(text))setTimeout(poll,2000)}load()</script>'''
+
+
+MIHOMO_MAINTENANCE_PAGE = r'''<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>系统维护</title>
+<style>
+:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#000;color:#f5f5f7}*{box-sizing:border-box}body{margin:0;background:#000}.topbar{position:sticky;top:0;z-index:5;border-bottom:1px solid rgba(255,255,255,.1);background:rgba(18,18,20,.88);backdrop-filter:saturate(180%) blur(22px)}.topbar-inner,.wrap{width:min(1040px,calc(100% - 44px));margin:auto}.topbar-inner{min-height:58px;display:flex;align-items:center;justify-content:space-between;gap:18px}.brand{font-size:17px;font-weight:650}.nav{display:flex;gap:4px;padding:3px;border-radius:8px;background:#2c2c2e}.nav a{padding:7px 11px;border-radius:6px;color:#aeaeb2;text-decoration:none;font-size:13px;white-space:nowrap}.nav a.active{background:#636366;color:#fff}.wrap{padding:38px 0 64px}.intro{margin-bottom:24px}.intro h1{margin:0;font-size:30px;line-height:1.15}.intro p{margin:9px 0 0;color:#98989d;line-height:1.55}.summary{display:flex;gap:8px;flex-wrap:wrap;margin-top:17px}.summary-item{display:flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid #2c2c2e;border-radius:7px;background:#1c1c1e;color:#aeaeb2;font-size:12px}.dot{width:8px;height:8px;border-radius:50%;background:#636366}.dot.ok{background:#30d158}.dot.warn{background:#ffd60a}.dot.bad{background:#ff453a}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.card{overflow:hidden;border:1px solid #38383a;border-radius:8px;background:#1c1c1e}.card-head{display:flex;justify-content:space-between;gap:14px;padding:16px;border-bottom:1px solid #38383a}.card h2{margin:0;font-size:17px}.card-head p{margin:5px 0 0;color:#8e8e93;font-size:12px;line-height:1.5}.badge{align-self:flex-start;padding:4px 7px;border-radius:6px;background:rgba(48,209,88,.12);color:#30d158;font-size:12px;font-weight:650;white-space:nowrap}.badge.warn{background:rgba(255,214,10,.12);color:#ffd60a}.badge.bad{background:rgba(255,69,58,.12);color:#ff6961}.facts{display:grid;grid-template-columns:1fr 1fr}.fact{min-height:74px;padding:14px;border-left:1px solid #38383a;border-bottom:1px solid #38383a}.fact:nth-child(odd){border-left:0}.label{display:block;color:#8e8e93;font-size:12px}.value{display:block;margin-top:8px;font-size:13px;font-weight:650;overflow-wrap:anywhere}.detail{min-height:78px;padding:14px;border-bottom:1px solid #38383a;color:#aeaeb2;font-size:13px;line-height:1.55}.actions{display:flex;gap:8px;flex-wrap:wrap;padding:14px}button{height:36px;padding:0 13px;border:0;border-radius:7px;background:#3a3a3c;color:#f5f5f7;font:600 13px inherit;cursor:pointer}button.primary{background:#0a84ff}button:disabled{cursor:default;opacity:.45}.notice{margin-top:18px;padding:12px 14px;border-left:3px solid #636366;border-radius:0 7px 7px 0;background:#1c1c1e;color:#98989d;font-size:12px;line-height:1.6}@media(max-width:760px){.topbar-inner{min-height:auto;padding:10px 0;align-items:flex-start;flex-direction:column;gap:8px}.nav{width:100%;display:grid;grid-template-columns:repeat(5,1fr)}.nav a{text-align:center;padding:7px 4px;white-space:normal}.grid{grid-template-columns:1fr}.wrap{padding:28px 0 50px}}@media(max-width:420px){.facts{grid-template-columns:1fr}.fact{border-left:0}.actions button{flex:1 1 100%}}
+</style></head><body><header class="topbar"><div class="topbar-inner"><div class="brand">家庭旁路</div><nav class="nav"><a href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a class="active" href="/mihomo-maintenance">维护</a></nav></div></header><main class="wrap"><section class="intro"><h1>系统维护</h1><p>仅在手动确认后更新组件。检查不重启服务；升级会先备份并在健康检查失败时自动回退。</p><div class="summary"><span class="summary-item"><i id="mihomo-dot" class="dot"></i><span>Mihomo</span></span><span class="summary-item"><i id="mosdns-dot" class="dot"></i><span>MosDNS</span></span></div></section><section class="grid"><article class="card"><div class="card-head"><div><h2>Mihomo</h2><p>透明代理内核与候选池运行环境</p></div><span id="mihomo-badge" class="badge">读取中</span></div><div class="facts"><div class="fact"><span class="label">当前版本</span><span id="mihomo-current" class="value">--</span></div><div class="fact"><span class="label">可用版本</span><span id="mihomo-latest" class="value">--</span></div><div class="fact"><span class="label">检查时间</span><span id="mihomo-time" class="value">--</span></div><div class="fact"><span class="label">升级条件</span><span id="mihomo-ready" class="value">--</span></div></div><div id="mihomo-detail" class="detail">正在读取维护状态。</div><div class="actions"><button id="mihomo-check">检查更新</button><button id="mihomo-apply" class="primary">升级并验证</button></div></article><article class="card"><div class="card-head"><div><h2>MosDNS</h2><p>DNS 解析内核，不改变现有分流规则</p></div><span id="mosdns-badge" class="badge">读取中</span></div><div class="facts"><div class="fact"><span class="label">当前版本</span><span id="mosdns-current" class="value">--</span></div><div class="fact"><span class="label">官方镜像</span><span id="mosdns-latest" class="value">等待检查</span></div><div class="fact"><span class="label">检查时间</span><span id="mosdns-time" class="value">--</span></div><div class="fact"><span class="label">自动更新</span><span id="mosdns-auto" class="value">--</span></div></div><div id="mosdns-detail" class="detail">正在读取维护状态。</div><div class="actions"><button id="mosdns-check">检查更新</button><button id="mosdns-apply" class="primary" disabled>升级并验证</button></div></article></section><p class="notice">维护页只汇总组件软件更新。DNS 上游、规则数据、广告过滤、候选池和 RouterOS 设置仍在各自页面管理，保持原有行为不变。</p></main><script>
+const csrf='__CSRF__'; const $=s=>document.querySelector(s); const labels={unknown:'尚未检查',checked:'检查完成',current:'已是最新',update_available:'有可用更新',applying:'升级中',success:'升级完成',rolled_back:'已自动回退',failed:'维护失败',check_failed:'检查失败',busy:'任务进行中',idle:'尚未检查',checking:'检查中',available:'有可用更新',up_to_date:'已是最新',updating:'升级中',updated:'升级完成',rolling_back:'正在回退',error:'需要检查'};
+function stamp(value){if(!value)return '尚无记录';let d=new Date(value);return Number.isNaN(d.getTime())?String(value):d.toLocaleString('zh-CN',{hour12:false})}function shortImage(value){let text=String(value||'');return text.startsWith('sha256:')?'sha256:'+text.slice(7,19):text||'等待检查'}function setState(name,phase,bad,warn){let text=labels[phase]||phase||'尚未检查',klass=bad?'bad':warn?'warn':'';$('#'+name+'-badge').textContent=text;$('#'+name+'-badge').className='badge '+klass;$('#'+name+'-dot').className='dot '+(bad?'bad':warn?'warn':'ok')}
+async function api(path,options={}){let r=await fetch(path,{cache:'no-store',...options,headers:{'Content-Type':'application/json','X-CSRF':csrf,'X-Requested-With':'family-dns',...(options.headers||{})}});let d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||d.message||'请求失败');return d}
+function renderMihomo(d){let busy=['applying','busy'].includes(d.state),bad=['failed','check_failed','rolled_back'].includes(d.state),warn=busy||d.state==='update_available';setState('mihomo',d.state,bad,warn);$('#mihomo-current').textContent=d.current_version||'--';$('#mihomo-latest').textContent=d.latest_version||'等待检查';$('#mihomo-time').textContent=stamp(d.latest_published);$('#mihomo-ready').textContent=d.docker_proxy_ready===false?'Docker 代理未就绪':'已满足升级条件';$('#mihomo-detail').textContent=(d.message||'尚未检查更新')+(d.release_notes_zh?' · '+d.release_notes_zh:'');$('#mihomo-check').disabled=busy;$('#mihomo-apply').disabled=busy||d.docker_proxy_ready===false}
+function renderMosdns(d){let busy=Boolean(d.busy)||['checking','updating','rolling_back'].includes(d.phase),bad=['error','rolled_back'].includes(d.phase),warn=busy||Boolean(d.update_available);setState('mosdns',d.phase,bad,warn);$('#mosdns-current').textContent=d.current_version||'--';$('#mosdns-latest').textContent=shortImage(d.latest_image);$('#mosdns-time').textContent=stamp(d.completed_at||d.checked_at||d.updated_at);$('#mosdns-auto').textContent=d.config?.auto_enabled?'已开启':'已关闭';$('#mosdns-detail').textContent=(d.message||'尚未检查软件更新')+'。升级前会备份，验证失败将自动回退。';$('#mosdns-check').disabled=busy;$('#mosdns-apply').disabled=busy||!d.update_available}
+async function loadMihomo(){try{renderMihomo(await api('/api/mihomo/upgrade'))}catch(e){setState('mihomo','维护失败',true,false);$('#mihomo-detail').textContent=e.message}}async function loadMosdns(){try{renderMosdns(await api('/dns/maintenance-api/status'))}catch(e){setState('mosdns','维护失败',true,false);$('#mosdns-detail').textContent=e.message}}
+async function poll(load,selector){for(let n=0;n<180;n++){await new Promise(r=>setTimeout(r,2000));await load();if(!$(selector).textContent.match(/检查中|升级中|正在回退|任务进行中/))break}}
+$('#mihomo-check').onclick=async()=>{try{await api('/api/mihomo/upgrade/check',{method:'POST'});await poll(loadMihomo,'#mihomo-badge')}catch(e){$('#mihomo-detail').textContent=e.message}};$('#mihomo-apply').onclick=async()=>{if(confirm('升级将短暂重建 Mihomo。系统会保留旧镜像，验证失败自动回退。继续？'))try{await api('/api/mihomo/upgrade/apply',{method:'POST'});await poll(loadMihomo,'#mihomo-badge')}catch(e){$('#mihomo-detail').textContent=e.message}};$('#mosdns-check').onclick=async()=>{try{await api('/dns/maintenance-api/check',{method:'POST'});await poll(loadMosdns,'#mosdns-badge')}catch(e){$('#mosdns-detail').textContent=e.message}};$('#mosdns-apply').onclick=async()=>{if(confirm('升级将短暂重启 MosDNS。配置会先备份，验证失败自动回退。继续？'))try{await api('/dns/maintenance-api/update',{method:'POST'});await poll(loadMosdns,'#mosdns-badge')}catch(e){$('#mosdns-detail').textContent=e.message}};Promise.all([loadMihomo(),loadMosdns()]);
+</script></body></html>'''
+
+MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
+    '>官方镜像</span><span id="mosdns-latest"',
+    '>整合镜像源</span><span id="mosdns-latest"',
+)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1985,7 +2143,8 @@ class Handler(BaseHTTPRequestHandler):
             if nav_start >= 0 and nav_end >= 0:
                 navigation = ('<nav class="nav"><a href="/">设备</a><a href="/dns/">DNS</a>'
                               '<a href="/airport/">机场与候选池</a>'
-                              '<a class="active" href="/rules">规则</a></nav>')
+                              '<a class="active" href="/rules">规则</a>'
+                              '<a href="/mihomo-maintenance">维护</a></nav>')
                 template = template[:nav_start] + navigation + template[nav_end + len("</nav>"):]
             data = template.replace("__CSRF__", CSRF_TOKEN).encode()
             self.send_response(HTTPStatus.OK)
@@ -1998,6 +2157,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/mihomo":
             data = MIHOMO_PAGE.replace("__CSRF__", CSRF_TOKEN).encode()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Frame-Options", "DENY")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if path == "/mihomo-maintenance":
+            data = MIHOMO_MAINTENANCE_PAGE.replace("__CSRF__", CSRF_TOKEN).encode()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
@@ -2051,6 +2220,12 @@ class Handler(BaseHTTPRequestHandler):
             except RouterError as exc:
                 self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
             return
+        if path == "/api/mihomo/upgrade":
+            try:
+                self.reply(HTTPStatus.OK, mihomo_upgrade_status())
+            except (RouterError, OSError, subprocess.SubprocessError) as exc:
+                self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+            return
         if path == "/api/rules":
             try:
                 self.reply(HTTPStatus.OK, rules_payload())
@@ -2092,6 +2267,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(HTTPStatus.OK, delete_capture(body.get("id", "")))
             elif path == "/api/mihomo/select":
                 self.reply(HTTPStatus.OK, select_mihomo_node(body.get("group", ""), body.get("node", "")))
+            elif path == "/api/mihomo/upgrade/check":
+                self.reply(HTTPStatus.OK, start_mihomo_upgrade("family-mihomo-upgrade-check.service"))
+            elif path == "/api/mihomo/upgrade/apply":
+                self.reply(HTTPStatus.OK, start_mihomo_upgrade("family-mihomo-upgrade.service"))
             elif path == "/api/rules":
                 self.reply(HTTPStatus.OK, save_mihomo_rules(body.get("rules"), body.get("version", "")))
             else:

@@ -1076,7 +1076,7 @@ def metrics_summary():
 
 def do_check():
     with worker_lock:
-        set_status("checking", "正在检查官方 Docker 镜像")
+        set_status("checking", "正在检查 MosDNS 整合 Docker 镜像")
         try:
             local = running_image_id()
             remote = remote_image_id()
@@ -1109,7 +1109,7 @@ def do_update():
             old_image = running_image_id()
             set_status("updating", "正在备份 MosDNS 配置", current_image=old_image)
             backup = backup_config()
-            set_status("updating", "正在拉取官方 Docker 镜像", current_image=old_image, backup=backup)
+            set_status("updating", "正在拉取 MosDNS 整合 Docker 镜像", current_image=old_image, backup=backup)
             new_image = download_latest_image()
             if new_image == old_image:
                 set_status("up_to_date", "当前已经是最新版本", update_available=False, current_image=old_image, latest_image=new_image, current_version=core_version(), checked_at=now_iso())

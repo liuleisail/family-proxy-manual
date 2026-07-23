@@ -59,6 +59,7 @@ install -m 755 "$REPO_DIR/scripts/family-mihomo-tproxy-auto" /usr/local/sbin/fam
 install -m 755 "$REPO_DIR/scripts/refresh-cn-ipv4" /usr/local/sbin/refresh-family-cn-ipv4
 install -m 755 "$REPO_DIR/scripts/sync-routeros-cn-ipv4.py" /usr/local/sbin/sync-routeros-cn-ipv4
 install -m 755 "$REPO_DIR/scripts/refresh-mihomo-geodata.py" /usr/local/sbin/refresh-mihomo-geodata
+install -m 755 "$REPO_DIR/scripts/family-mihomo-upgrade" /usr/local/sbin/family-mihomo-upgrade
 install -d -m 700 /etc/family-proxy-ui /var/lib/family-proxy/docker/family-mihomo-sub-import/providers
 if [[ ! -e /etc/family-proxy-ui/managed-ips ]]; then
   install -m 600 /dev/null /etc/family-proxy-ui/managed-ips

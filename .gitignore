@@ -27,3 +27,7 @@ docker-data/
 cache.db
 __pycache__/
 *.pyc
+
+# Local browser test state and visual verification artifacts.
+.playwright-cli/
+output/

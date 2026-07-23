@@ -3,7 +3,7 @@ set -Eeuo pipefail
 for unit in family-proxy-ui family-mihomo-sub-import family-proxy-gateway; do
   systemctl is-active --quiet "$unit" || { echo "$unit is not active" >&2; exit 1; }
 done
-for executable in /usr/local/sbin/sync-routeros-cn-ipv4 /usr/local/sbin/refresh-mihomo-geodata; do
+for executable in /usr/local/sbin/sync-routeros-cn-ipv4 /usr/local/sbin/refresh-mihomo-geodata /usr/local/sbin/family-mihomo-upgrade; do
   [[ -x $executable ]] || { echo "$executable is missing" >&2; exit 1; }
 done
 systemctl is-enabled --quiet family-cn-ipv4-refresh.timer || { echo "CN refresh timer is disabled" >&2; exit 1; }

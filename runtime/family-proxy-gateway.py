@@ -196,11 +196,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(HTTPStatus.NO_CONTENT)
             self.end_headers()
             return
-        # Preserve the existing unauthenticated RouterOS health probe without
-        # exposing the interactive management interface.
-        if self.client_address[0] == "__FAMILY_ROUTER_IP__" and self.path == "/":
-            self.proxy("/api/health")
-            return
         if self.path == "/login":
             self.page()
             return
@@ -226,6 +221,19 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.UNAUTHORIZED)
             return
         self.proxy()
+
+
+class RouterHealthProbe(Handler):
+    """Expose the health probe on a dedicated RouterOS-only listener."""
+
+    def do_GET(self):
+        if self.client_address[0] != "__FAMILY_ROUTER_IP__":
+            self.send_error(HTTPStatus.FORBIDDEN)
+            return
+        if self.path != "/":
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        self.proxy("/api/health")
 
 
 class LegacyAirportRedirect(BaseHTTPRequestHandler):
@@ -254,4 +262,6 @@ class LegacyAirportRedirect(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     legacy = ThreadingHTTPServer(("__FAMILY_PROXY_IP__", 18090), LegacyAirportRedirect)
     threading.Thread(target=legacy.serve_forever, daemon=True).start()
+    health = ThreadingHTTPServer(("__FAMILY_PROXY_IP__", 18087), RouterHealthProbe)
+    threading.Thread(target=health.serve_forever, daemon=True).start()
     ThreadingHTTPServer(("__FAMILY_PROXY_IP__", 18088), Handler).serve_forever()
