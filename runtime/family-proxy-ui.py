@@ -1850,6 +1850,11 @@ PAGE = PAGE.replace(
     1,
 )
 PAGE = PAGE.replace(
+    "</style></head>",
+    ".dash-settings-grid{grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}.dash-setting>div{min-width:0;flex:1}.dash-setting b,.dash-setting span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dash-setting em{margin-left:auto;white-space:nowrap}</style></head>",
+    1,
+)
+PAGE = PAGE.replace(
     "healthItem('RB5009',summary.router==='connected','管理连接')",
     "healthItem('RB5009',summary.router==='connected',summary.router==='connected'?'已连接':'不可用',summary.router_resource?.available?'资源可读':'管理接口')",
     1,
