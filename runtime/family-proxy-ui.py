@@ -1821,12 +1821,12 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     "healthItem('DNS',checks.dns,'国内解析')",
-    "healthItem('国内 DNS',checks.dns,dnsText(summary.dns_performance?.groups?.domestic,summary.dns_performance?.p95_ms))+healthItem('国外 DNS',checks.dns,dnsText(summary.dns_performance?.groups?.foreign,summary.dns_performance?.p95_ms))",
+    "dnsHealthItem('国内 DNS',checks.dns,summary.dns_performance?.groups?.domestic,summary.dns_performance?.p95_ms)+dnsHealthItem('国外 DNS',checks.dns,summary.dns_performance?.groups?.foreign,summary.dns_performance?.p95_ms)",
     1,
 )
 PAGE = PAGE.replace(
     "function healthItem(name,ok,text){",
-    "function dnsText(item,fallback){return item?`${item.name||'上游'} · 平均 ${Number(item.average_ms||0).toFixed(1)} ms · P95 ${Number(item.p95_ms||0).toFixed(1)} ms · 错误 ${Number(item.error_rate||0).toFixed(2)}%`:`整体 P95 ${Number(fallback||0).toFixed(1)} ms`}function healthItem(name,ok,text){",
+    "function dnsHealthItem(name,ok,item,fallback){if(!item)return healthItem(name,ok,`整体 P95 ${Number(fallback||0).toFixed(1)} ms`);let avg=Number(item.average_ms||0),p95=Number(item.p95_ms||0),error=Number(item.error_rate||0),level=!ok?'bad':error>=10?'bad':error>=1?'warn':'';return `<div class=\"health-item dns-health ${level}\"><b>${esc(name)}</b><div class=\"dns-source\">${esc(item.name||'当前上游')}</div><div class=\"dns-metrics\"><div><span>平均</span><strong>${avg.toFixed(1)}<small> ms</small></strong></div><div><span>P95</span><strong>${p95.toFixed(1)}<small> ms</small></strong></div><div class=\"dns-error\"><span>错误率</span><strong>${error.toFixed(2)}<small>%</small></strong></div></div></div>`}function healthItem(name,ok,text){",
     1,
 )
 PAGE = PAGE.replace(
@@ -1849,8 +1849,9 @@ PAGE = PAGE.replace(
     '''.health-grid{display:flex;flex-wrap:wrap;background:#1c1c1e}
 .health-item,.health-item:last-child{flex:1 1 220px;min-width:220px;border:0;background:#1c1c1e;min-height:92px;box-shadow:inset -1px -1px 0 #38383a}
 .health-item span{white-space:normal;overflow:visible;text-overflow:clip;line-height:1.45;overflow-wrap:anywhere}
+.health-item.warn b:before{background:#ffd60a}.dns-health{min-height:132px}.dns-source{margin:7px 0 10px 14px;color:#aeaeb2;font-size:13px;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dns-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-left:14px}.dns-metrics div{min-width:0}.dns-metrics span{display:block;margin:0;color:#8e8e93;font-size:11px;line-height:1.2}.dns-metrics strong{display:block;margin-top:3px;color:#f5f5f7;font-size:17px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.15;white-space:nowrap}.dns-metrics small{font-size:11px;font-weight:500;color:#aeaeb2}.dns-error strong{color:#30d158}.dns-health.warn .dns-error strong{color:#ffd60a}.dns-health.bad .dns-error strong{color:#ff6961}
 @media(max-width:760px){.health-item,.health-item:nth-child(2n),.health-item:last-child{flex-basis:calc(50% - 1px);min-width:calc(50% - 1px);border:0}}
-@media(max-width:420px){.health-item,.health-item:nth-child(2n),.health-item:last-child{flex-basis:100%;min-width:100%;min-height:0}}</style></head>''',
+@media(max-width:600px){.dns-metrics{gap:6px}.dns-metrics strong{font-size:16px}}@media(max-width:420px){.health-item,.health-item:nth-child(2n),.health-item:last-child{flex-basis:100%;min-width:100%;min-height:0}}</style></head>''',
     1,
 )
 PAGE = PAGE.replace(
