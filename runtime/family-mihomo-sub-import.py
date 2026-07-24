@@ -62,7 +62,7 @@ NOISE = re.compile(
     re.I,
 )
 OPENER = build_opener(ProxyHandler({}))
-MONITORED_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto")
+MONITORED_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto", "GitHub-Auto")
 TEST_JOB_LOCK = threading.Lock()
 TEST_STATE_LOCK = threading.Lock()
 TEST_STATE = {
@@ -362,10 +362,28 @@ def generate_config(selected=None):
         insert_at = next((index for index, rule in enumerate(rules)
                           if str(rule).startswith("GEOSITE,telegram,")), len(rules))
         rules.insert(insert_at, telegram_ip_rule)
+    # GitHub uses long-lived HTTPS connections and large release/LFS transfers.
+    # Keep it out of the generic Hong Kong-first Others policy while preserving
+    # all domestic direct and existing application rules.
+    github_rules = (
+        "DOMAIN-SUFFIX,github.com,GitHub",
+        "DOMAIN-SUFFIX,githubusercontent.com,GitHub",
+        "DOMAIN-SUFFIX,githubassets.com,GitHub",
+        "DOMAIN-SUFFIX,githubapp.com,GitHub",
+    )
+    # `GEOSITE,microsoft` includes GitHub. Remove only our exact rules and
+    # reinsert them before that broader rule on every regeneration.
+    rules = [rule for rule in rules if str(rule) not in github_rules]
+    insert_at = next((index for index, rule in enumerate(rules)
+                      if str(rule).startswith("GEOSITE,microsoft,")), len(rules))
+    rules[insert_at:insert_at] = github_rules
     config["rules"] = rules
     hk, jp, sg, us, other_ai, tg, proxy = (selected[name] for name in POOLS)
     ai_groups = ["JP-AI", "SG-AI", "US-AI"] + (["其他-AI"] if other_ai else [])
     ai_nodes = jp + sg + us + other_ai
+    github = (jp[:2] + sg[:1] + proxy[:1] + us[:1])
+    if not github:
+        raise ValueError("GitHub 策略组缺少可用候选节点")
     groups = [
         {"name": "Apple", "type": "select", "proxies": ["DIRECT", "Proxy-Auto"] + proxy},
         {"name": "MicroSoft", "type": "select", "proxies": ["DIRECT", "Proxy-Auto"] + proxy},
@@ -375,6 +393,7 @@ def generate_config(selected=None):
         fallback("US-AI", us, "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
         fallback("TG-Auto", tg, "https://core.telegram.org", 300),
         fallback("Proxy-Auto", proxy, "https://www.gstatic.com/generate_204", 300, "204"),
+        fallback("GitHub-Auto", github, "https://github.com/", 300, "200"),
         fallback("DNS-Resolve", proxy, "https://dns.google/dns-query", 300),
         fallback("AI-Auto", ai_groups, "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
         {"name": "AI", "type": "select", "proxies": ["AI-Auto"] + ai_groups + ai_nodes},
@@ -383,6 +402,7 @@ def generate_config(selected=None):
         {"name": "TikTok", "type": "select", "proxies": ["Proxy-Auto"] + proxy},
         {"name": "Youtube", "type": "select", "proxies": ["HK-视频"] + hk},
         {"name": "Google", "type": "select", "proxies": ["Proxy-Auto"] + proxy},
+        {"name": "GitHub", "type": "select", "proxies": ["GitHub-Auto"] + github},
         {"name": "Others", "type": "select", "proxies": ["Proxy-Auto"] + proxy},
     ]
     if other_ai:
@@ -783,7 +803,7 @@ def status():
     result = {}
     events = read_json(RUNTIME_EVENTS, [])
     runtime = read_json(RUNTIME_STATE, {})
-    for group in ("AI", "AI-Auto", "JP-AI", "SG-AI", "US-AI", "其他-AI", "Youtube", "HK-视频", "Telegram", "TG-Auto", "Google", "Others", "Proxy-Auto"):
+    for group in ("AI", "AI-Auto", "JP-AI", "SG-AI", "US-AI", "其他-AI", "Youtube", "HK-视频", "Telegram", "TG-Auto", "Google", "GitHub", "GitHub-Auto", "Others", "Proxy-Auto"):
         try:
             data = proxy_api("/proxies/" + quote(group, safe=""))
             leaf = resolve_leaf(group)
