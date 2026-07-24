@@ -1851,7 +1851,7 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     "</style></head>",
-    ".dash-settings-grid{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}.dash-setting{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;min-height:118px}.dash-setting>div{min-width:0}.dash-setting b{min-width:0;overflow:visible!important;text-overflow:clip!important;white-space:normal!important}.dash-setting span{display:block;max-width:none!important;min-width:0;overflow:visible!important;text-overflow:clip!important;overflow-wrap:anywhere;white-space:normal!important;line-height:1.5}.dash-setting em{margin-left:10px;white-space:nowrap}</style></head>",
+    ".dash-settings-grid{grid-template-columns:repeat(auto-fit,minmax(220px,1fr));grid-auto-rows:1fr}.dash-setting{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;min-height:118px;height:100%}.dash-setting>div{min-width:0}.dash-setting b{min-width:0;overflow:visible!important;text-overflow:clip!important;white-space:normal!important}.dash-setting span{display:block;max-width:none!important;min-width:0;overflow:visible!important;text-overflow:clip!important;overflow-wrap:anywhere;white-space:normal!important;line-height:1.5}.dash-setting em{margin-left:10px;white-space:nowrap}</style></head>",
     1,
 )
 PAGE = PAGE.replace(
