@@ -1835,6 +1835,21 @@ PAGE = PAGE.replace(
     1,
 )
 PAGE = PAGE.replace(
+    "DNS ${foreignError.toFixed(1)}% 提醒",
+    "DNS ${foreignError.toFixed(1)}% 尝试异常（累计）",
+    1,
+)
+PAGE = PAGE.replace(
+    "国外 DNS 需关注 · 错误率 ${foreignError.toFixed(2)}%",
+    "国外 DNS 累计尝试异常 ${foreignError.toFixed(2)}% · 双上游竞速不等于设备解析失败",
+    1,
+)
+PAGE = PAGE.replace(
+    "<span>错误率</span>",
+    "<span title=\"容器启动以来的单上游尝试异常；双上游竞速时不等于设备 DNS 失败\">上游尝试异常</span>",
+    1,
+)
+PAGE = PAGE.replace(
     "healthItem('RB5009',summary.router==='connected','管理连接')",
     "healthItem('RB5009',summary.router==='connected',summary.router==='connected'?'已连接':'不可用',summary.router_resource?.available?'资源可读':'管理接口')",
     1,
