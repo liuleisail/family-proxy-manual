@@ -1791,7 +1791,7 @@ function deviceActions(d){''',
 )
 PAGE = PAGE.replace(
     "load();setInterval(()=>{if(!document.querySelector('#renameDialog').open)load()},30000)",
-    "load();loadSystem();loadWireGuard();setInterval(loadSystem,10000);setInterval(loadWireGuard,10000);setInterval(()=>{if(!document.querySelector('#renameDialog').open)load()},30000)",
+    "setupRuntimeFold('bypassStatus');setupRuntimeFold('z4Status');load();loadSystem();loadWireGuard();setInterval(loadSystem,10000);setInterval(loadWireGuard,10000);setInterval(()=>{if(!document.querySelector('#renameDialog').open)load()},30000)",
     1,
 )
 PAGE = PAGE.replace(
@@ -1811,7 +1811,7 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     "badge.className='overall '+(ready?'':'bad');badge.innerHTML=`<span class=\"dot\"></span><span>${ready?'旁路运行正常':'旁路需要检查'}</span>`;",
-    "badge.className='overall '+(!ready?'bad':warn?'warn':'');badge.innerHTML=`<span class=\"dot\"></span><span>${!ready?'旁路需要检查':warn?'运行正常 · 配置需核对':'旁路运行正常'}</span>`;",
+    "badge.className='overall '+(!ready?'bad':warn?'warn':'');badge.innerHTML=`<span class=\"dot\"></span><span>${!ready?'旁路需要检查':warn?'运行正常 · 配置需核对':'旁路运行正常'}</span>`;let bypassSummary=document.querySelector('#bypassUpdated');if(bypassSummary){let foreignError=Number(summary.dns_performance?.groups?.foreign?.error_rate||0),critical=!ready||drift.length>0;bypassSummary.textContent=critical?'核心服务需要检查':foreignError>=1?`核心服务正常 · DNS ${foreignError.toFixed(1)}% 提醒`:'RB5009、Mihomo、自动回退正常';bypassSummary.className='summary-hint '+(critical?'runtime-bad':foreignError>=1?'runtime-warn':'runtime-good');autoOpenFold('bypassStatus',critical)}",
     1,
 )
 PAGE = PAGE.replace(
@@ -1940,6 +1940,21 @@ def collapse_diagnostic_section(page, heading, hint, updated_id):
 
 PAGE = collapse_diagnostic_section(PAGE, "RB5009 运行状态", "按需查看路由器资源", "routerUpdated")
 PAGE = collapse_diagnostic_section(PAGE, "WireGuard 远程互联", "按需查看远程连接", "wireguardUpdated")
+
+
+def collapse_runtime_section(page, heading, section_id, summary_id):
+    start, end, section = page_section(page, heading)
+    title_start = section.index('<div class="section-title">')
+    title_end = section.index('</div>', title_start) + len('</div>')
+    content = section[title_end:-len('</section>')]
+    replacement = (f'<details class="section diagnostic-section runtime-section" id="{section_id}">'
+                   f'<summary><span>{heading}</span><span class="summary-hint" id="{summary_id}">正在读取</span></summary>'
+                   f'<div class="diagnostic-content">{content}</div></details>')
+    return page[:start] + replacement + page[end:]
+
+
+PAGE = collapse_runtime_section(PAGE, "旁路运行状态", "bypassStatus", "bypassUpdated")
+PAGE = collapse_runtime_section(PAGE, "Z4Pro 运行状态", "z4Status", "systemUpdated")
 PAGE = PAGE.replace(
     '.manual-add>summary{display:flex;',
     '.diagnostic-section>summary,.manual-add>summary{display:flex;',
@@ -1963,6 +1978,21 @@ PAGE = PAGE.replace(
 PAGE = PAGE.replace(
     '.manual-add[open]>summary:after{transform:rotate(-90deg)}',
     '.diagnostic-section[open]>summary:after,.manual-add[open]>summary:after{transform:rotate(-90deg)}.diagnostic-content{margin-top:9px}',
+    1,
+)
+PAGE = PAGE.replace(
+    '</style></head>',
+    '''.runtime-section>summary{color:#f5f5f7}.runtime-section>summary .summary-hint{display:block;min-width:0;margin-left:auto;color:#8e8e93;font-size:12px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.runtime-section>summary .summary-hint.runtime-good{color:#30d158}.runtime-section>summary .summary-hint.runtime-warn{color:#ffd60a}.runtime-section>summary .summary-hint.runtime-bad{color:#ff6961}@media(max-width:600px){.runtime-section>summary .summary-hint{max-width:52%;font-size:11px}}</style></head>''',
+    1,
+)
+PAGE = PAGE.replace(
+    'function deviceActions(d){',
+    '''function runtimeFoldKey(id){return `family-proxy-fold-${id}`}function setupRuntimeFold(id){let section=document.querySelector(`#${id}`);if(!section||section.dataset.foldReady)return;section.dataset.foldReady='1';let saved=localStorage.getItem(runtimeFoldKey(id));if(saved!==null)section.open=saved==='open';section.addEventListener('toggle',()=>localStorage.setItem(runtimeFoldKey(id),section.open?'open':'closed'))}function autoOpenFold(id,critical){let section=document.querySelector(`#${id}`);if(section&&critical&&localStorage.getItem(runtimeFoldKey(id))===null)section.open=true}function deviceActions(d){''',
+    1,
+)
+PAGE = PAGE.replace(
+    "document.querySelector('#systemUpdated').textContent=`${s.healthy?'状态正常':'需要检查'} · ${new Date(s.updated_at*1000).toLocaleTimeString('zh-CN',{hour12:false})}`",
+    "let systemCritical=!s.healthy||Number(c.percent)>=90||Number(m.percent)>=90||Number(d.percent)>=90||Number(t.cpu_c)>=60||Number(t.nvme_c)>=60||Number(x.unhealthy||0)>0,systemSummary=document.querySelector('#systemUpdated');systemSummary.textContent=`${s.healthy?'状态正常':'需要检查'} · CPU ${Number(c.percent).toFixed(1)}% · 内存 ${Number(m.percent).toFixed(1)}% · M.2 ${t.nvme_c==null?'--':`${Number(t.nvme_c).toFixed(0)}°C`} · Docker ${dockerValue}`;systemSummary.className='summary-hint '+(systemCritical?'runtime-bad':'runtime-good');autoOpenFold('z4Status',systemCritical)",
     1,
 )
 PAGE = PAGE.replace(
