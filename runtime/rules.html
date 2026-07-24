@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>代理规则</title>
+  <style>
+    :root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC","Segoe UI",sans-serif;background:#000;color:#f5f5f7;letter-spacing:0}
+    *{box-sizing:border-box}body{margin:0;background:#000;color:#f5f5f7}
+    .topbar{position:sticky;top:0;z-index:10;border-bottom:1px solid rgba(255,255,255,.1);background:rgba(18,18,20,.88);backdrop-filter:saturate(180%) blur(22px);-webkit-backdrop-filter:saturate(180%) blur(22px)}
+    .topbar-inner{max-width:1120px;min-height:58px;margin:auto;padding:0 22px;display:flex;align-items:center;justify-content:space-between;gap:18px}
+    .brand{font-size:17px;font-weight:650;color:#fff;white-space:nowrap}.nav{display:flex;align-items:center;gap:4px;padding:3px;background:#2c2c2e;border-radius:8px}
+    .nav a{padding:7px 11px;border-radius:6px;color:#aeaeb2;text-decoration:none;font-size:13px;white-space:nowrap}.nav a.active{background:#636366;color:#fff}
+    .wrap{max-width:1120px;margin:auto;padding:38px 22px 64px}.intro{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:25px}
+    .intro h1{font-size:30px;line-height:1.15;margin:0;font-weight:700}.intro p{margin:9px 0 0;color:#98989d;font-size:14px}
+    .count{padding:8px 11px;border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;color:#30d158;font-size:13px;white-space:nowrap}.dirty .count{color:#ffd60a}
+    .toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:9px}.toolbar-left,.toolbar-right{display:flex;align-items:center;gap:8px}.toolbar h2{font-size:13px;color:#8e8e93;font-weight:600;margin:0}.hint{margin:0 0 14px;padding:10px 12px;border-left:3px solid #0a84ff;border-radius:0 7px 7px 0;background:#1c1c1e;color:#aeaeb2;font-size:12px;line-height:1.55}.hint strong{color:#f5f5f7}
+    .mode{display:flex;align-items:center;gap:7px;color:#aeaeb2;font-size:12px;cursor:pointer}.mode input{appearance:none;width:31px;height:18px;margin:0;border-radius:9px;background:#48484a;position:relative;transition:.18s}.mode input:after{content:"";position:absolute;width:14px;height:14px;left:2px;top:2px;border-radius:50%;background:#fff;transition:.18s}.mode input:checked{background:#0a84ff}.mode input:checked:after{transform:translateX(13px)}
+    .group{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.rule-row{display:grid;grid-template-columns:30px minmax(150px,.85fr) minmax(230px,1.5fr) minmax(150px,.8fr) auto;align-items:end;gap:10px;padding:12px 13px;border-top:1px solid #38383a}.rule-row:first-child{border-top:0}
+    .rule-index{align-self:center;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#636366;text-align:right}.field{min-width:0}.raw-field{grid-column:2/5}.field label{display:block;margin:0 0 5px;color:#8e8e93;font-size:11px}.control{width:100%;height:38px;border:1px solid transparent;border-radius:7px;background:#2c2c2e;color:#f5f5f7;padding:0 10px;font:13px inherit;outline:none}.control:focus{border-color:#0a84ff;box-shadow:0 0 0 3px rgba(10,132,255,.18)}.control:disabled,.control[readonly]{color:#8e8e93;opacity:1}.raw{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+    .icon-set{display:flex;gap:3px;align-self:end}.icon{width:34px;height:38px;border:0;border-radius:6px;background:transparent;color:#0a84ff;font-size:17px;cursor:pointer}.icon:hover{background:rgba(10,132,255,.12)}.icon.danger{color:#ff453a}.icon:disabled{color:#48484a;cursor:default;background:transparent}
+    .meaning{grid-column:2/5;display:flex;align-items:center;gap:7px;min-width:0;color:#aeaeb2;font-size:12px;line-height:1.45}.meaning:before{content:"";width:6px;height:6px;border-radius:50%;background:#30d158;flex:0 0 auto}.meaning.protected:before{background:#ffd60a}.badge{padding:2px 5px;border-radius:4px;background:#3a3320;color:#ffd60a;font-size:10px;white-space:nowrap}
+    .button{height:36px;border:0;border-radius:7px;padding:0 13px;font:600 13px inherit;cursor:pointer}.primary{background:#0a84ff;color:#fff}.secondary{background:#2c2c2e;color:#f5f5f7}.button:disabled{opacity:.5;cursor:default}
+    .footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px}.status{min-height:20px;color:#30d158;font-size:13px}.status.error{color:#ff6961}.empty{padding:28px;text-align:center;color:#8e8e93}
+    @media(max-width:800px){.topbar-inner{height:auto;padding:10px 14px;align-items:flex-start;flex-direction:column;gap:8px}.nav{width:100%;display:grid;grid-template-columns:repeat(4,1fr)}.nav a{text-align:center;padding:7px 5px;white-space:normal}.wrap{padding:28px 14px 50px}.intro{align-items:flex-start;flex-direction:column}.toolbar{align-items:stretch;flex-direction:column}.toolbar-left,.toolbar-right{justify-content:space-between}.toolbar-right .button{flex:1}.rule-row{grid-template-columns:27px minmax(0,1fr);align-items:start;padding:12px 10px}.rule-index{grid-row:1/5;padding-top:31px}.field,.raw-field,.meaning,.icon-set{grid-column:2}.meaning{grid-row:auto}.icon-set{justify-content:flex-end}.footer{align-items:stretch;flex-direction:column}.footer .button{width:100%}}
+  </style>
+</head>
+<body>
+  <header class="topbar"><div class="topbar-inner"><div class="brand">家庭旁路</div><nav class="nav"><a href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a class="active" href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav></div></header>
+  <main class="wrap" id="app">
+    <div class="intro"><div><h1>代理规则</h1><p>选择访问对象和访问方式，无需记忆 Mihomo 语法。</p></div><div class="count" id="count">正在载入</div></div>
+    <div class="toolbar"><div class="toolbar-left"><h2>从上到下依次匹配</h2><label class="mode"><input id="advanced" type="checkbox" onchange="toggleAdvanced(this.checked)"><span>高级模式</span></label></div><div class="toolbar-right"><button class="button secondary" onclick="reloadRules()">重新载入</button></div></div>
+    <p class="hint"><strong>直连（不经机场）</strong>只控制 Mihomo 的出口选择。中国 IP 已由路由器优先直出；解析到海外 CDN 的域名仍可能先到 Z4Pro，但不会使用机场节点。添加后会自动排在通用中国规则之前；填写根域名时请使用“域名及子域名”。</p>
+    <div class="group" id="rules"><div class="empty">正在读取规则</div></div>
+    <div class="footer"><div class="status" id="status"></div><div class="toolbar-right"><button class="button secondary" onclick="addRule()">添加代理规则</button><button class="button secondary" onclick="addDirectRule()">添加直连域名</button><button class="button primary" id="save" onclick="saveRules()" disabled>应用更改</button></div></div>
+  </main>
+  <datalist id="category-options"><option value="apple"><option value="microsoft"><option value="openai"><option value="telegram"><option value="tiktok"><option value="youtube"><option value="google"><option value="CN"></datalist>
+  <script>
+    const csrf="__CSRF__",app=document.querySelector('#app'),list=document.querySelector('#rules'),statusEl=document.querySelector('#status'),saveButton=document.querySelector('#save'),countEl=document.querySelector('#count');
+    const typeLabels={DOMAIN:'单个域名','DOMAIN-SUFFIX':'域名及子域名','DOMAIN-KEYWORD':'域名关键词',GEOSITE:'网站分类','IP-CIDR':'IPv4 网段','IP-CIDR6':'IPv6 网段',GEOIP:'IP 国家或地区',MATCH:'其他所有流量'};
+    const simpleTypes=new Set(Object.keys(typeLabels));
+    let rules=[],version='',policies=[],protectedRules=new Set(),dirty=false,advanced=false;
+    function esc(value){return String(value??'').replace(/[&<>"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[char]))}
+    function policyLabel(value){return {DIRECT:'直连（不经机场）',REJECT:'拦截',"REJECT-DROP":'静默拦截',PASS:'继续匹配',Others:'默认代理',Youtube:'YouTube',AI:'AI',Telegram:'Telegram',Google:'Google',Gemini:'Gemini',Apple:'Apple',MicroSoft:'Microsoft',TikTok:'TikTok'}[value]||value}
+    function parseRule(raw){let parts=raw.split(','),type=(parts[0]||'').toUpperCase();if(type==='MATCH'&&parts.length===2)return{type,value:'',policy:parts[1],extra:[]};if(simpleTypes.has(type)&&type!=='MATCH'&&parts.length>=3)return{type,value:parts[1],policy:parts[2],extra:parts.slice(3)};return{type:'RAW',raw}}
+    function serialize(model){if(model.type==='RAW')return model.raw;if(model.type==='MATCH')return`MATCH,${model.policy||'Others'}`;return[model.type,model.value||'',model.policy||'Others',...(model.extra||[])].join(',')}
+    function typeOption(value,current){return`<option value="${value}" ${value===current?'selected':''}>${typeLabels[value]}</option>`}
+    function policyOption(value,current){return`<option value="${esc(value)}" ${value===current?'selected':''}>${esc(policyLabel(value))}</option>`}
+    function objectText(model){if(model.type==='MATCH')return'未被前面规则匹配的流量';let value=`「${model.value||'未填写'}」`;return{DOMAIN:`域名 ${value}`,"DOMAIN-SUFFIX":`${value} 及其子域名`,"DOMAIN-KEYWORD":`域名中包含 ${value}`,GEOSITE:`网站分类 ${value}`,"IP-CIDR":`IPv4 网段 ${value}`,"IP-CIDR6":`IPv6 网段 ${value}`,GEOIP:`${value} 地区的 IP`}[model.type]||value}
+    function actionText(policy){if(policy==='DIRECT')return'通过本地网络直连，不经过机场代理';if(policy==='REJECT'||policy==='REJECT-DROP')return'拦截';if(policy==='PASS')return'继续匹配下一层';return`使用「${policyLabel(policy)}」`}
+    function explanation(model){return`访问 ${objectText(model)} 时，${actionText(model.policy)}`}
+    async function api(path,opt={}){let response=await fetch(new URL(path,location.origin),{...opt,headers:{'Content-Type':'application/json','X-CSRF':csrf,...(opt.headers||{})}}),body=await response.json();if(!response.ok)throw Error(body.error||'请求失败');return body}
+    function setStatus(message,ok=true){statusEl.textContent=message;statusEl.className='status '+(ok?'':'error')}
+    function setDirty(value=true){dirty=value;app.classList.toggle('dirty',dirty);saveButton.disabled=!dirty;countEl.textContent=`${rules.length} 条${dirty?' · 未应用':''}`}
+    function renderStructured(rule,index){let model=parseRule(rule),terminal=model.type==='MATCH',locked=protectedRules.has(rule)||terminal,blockDown=index===rules.length-1||rules[index+1]?.toUpperCase().startsWith('MATCH,');if(model.type==='RAW')return renderRaw(rule,index,locked,blockDown,true);let valueHint=model.type==='GEOSITE'?'选择或填写网站分类':model.type==='GEOIP'?'例如 CN':model.type.startsWith('IP-')?'例如 192.168.1.0/24':'例如 example.com';return`<div class="rule-row"><div class="rule-index">${index+1}</div><div class="field"><label>匹配方式</label><select class="control" onchange="editModel(${index},'type',this.value)" ${locked?'disabled':''}>${Object.keys(typeLabels).map(type=>typeOption(type,model.type)).join('')}</select></div><div class="field"><label>匹配内容</label><input class="control" value="${esc(model.value)}" placeholder="${valueHint}" ${model.type==='GEOSITE'?'list="category-options"':''} oninput="editModel(${index},'value',this.value)" ${locked||terminal?'readonly':''}></div><div class="field"><label>访问方式</label><select class="control" onchange="editModel(${index},'policy',this.value)" ${locked?'disabled':''}>${policies.map(policy=>policyOption(policy,model.policy)).join('')}</select></div>${ruleActions(index,terminal,locked,blockDown)}<div class="meaning ${locked?'protected':''}">${esc(explanation(model))}${locked?'<span class="badge">系统保护</span>':''}</div></div>`}
+    function renderRaw(rule,index,locked,blockDown,unsupported=false){let terminal=rule.toUpperCase().startsWith('MATCH,');return`<div class="rule-row"><div class="rule-index">${index+1}</div><div class="field raw-field"><label>${unsupported?'复杂规则 · 使用高级语法':'Mihomo 原始规则'}</label><input class="control raw" value="${esc(rule)}" oninput="editRule(${index},this.value)" ${locked?'readonly':''}></div>${ruleActions(index,terminal,locked,blockDown)}<div class="meaning ${locked?'protected':''}">${unsupported?'此规则无法拆成简易表单，仍会原样保留':'高级模式直接编辑 Mihomo 规则文本'}${locked?'<span class="badge">系统保护</span>':''}</div></div>`}
+    function ruleActions(index,terminal,locked,blockDown){return`<div class="icon-set"><button class="icon" title="上移" aria-label="上移" onclick="moveRule(${index},-1)" ${index===0||terminal?'disabled':''}>↑</button><button class="icon" title="下移" aria-label="下移" onclick="moveRule(${index},1)" ${blockDown||terminal?'disabled':''}>↓</button><button class="icon danger" title="删除" aria-label="删除" onclick="removeRule(${index})" ${locked?'disabled':''}>×</button></div>`}
+    function render(){list.innerHTML=rules.length?rules.map((rule,index)=>{let terminal=rule.toUpperCase().startsWith('MATCH,'),locked=protectedRules.has(rule)||terminal,blockDown=index===rules.length-1||rules[index+1]?.toUpperCase().startsWith('MATCH,');return advanced?renderRaw(rule,index,locked,blockDown):renderStructured(rule,index)}).join(''):'<div class="empty">没有规则</div>';setDirty(dirty)}
+    function applyData(data){rules=[...data.rules];version=data.version;policies=[...new Set(['DIRECT','Others',...(data.policies||[])])];protectedRules=new Set(data.protected||[]);dirty=false;render();setStatus('规则已载入')}
+    async function reloadRules(){if(dirty&&!confirm('放弃尚未应用的修改？'))return;try{applyData(await api('/api/rules'))}catch(error){setStatus(error.message,false)}}
+    function toggleAdvanced(value){advanced=value;render()}
+    function editRule(index,value){rules[index]=value;setDirty()}
+    function directAnchor(){return rules.findIndex(rule=>rule.toUpperCase()==='GEOSITE,CN,DIRECT')}
+    function insertRule(rule){let isDirect=parseRule(rule).policy==='DIRECT',anchor=isDirect?directAnchor():rules.findIndex(item=>item.toUpperCase().startsWith('MATCH,')),insertAt=anchor<0?rules.length:anchor;rules.splice(insertAt,0,rule);dirty=true;render();requestAnimationFrame(()=>document.querySelectorAll('.rule-row')[insertAt]?.querySelector('input')?.focus())}
+    function moveDirectBeforeCn(index){let anchor=directAnchor();if(anchor<0||index<=anchor)return index;let [rule]=rules.splice(index,1);rules.splice(anchor,0,rule);return anchor}
+    function editModel(index,key,value){let model=parseRule(rules[index]);if(key==='type'){if(value==='MATCH')model={type:'MATCH',value:'',policy:'Others',extra:[]};else{let defaults={GEOSITE:'openai',GEOIP:'CN','IP-CIDR':'192.168.1.0/24','IP-CIDR6':'2001:db8::/32'};model={type:value,value:model.type==='MATCH'?'':model.value||defaults[value]||'example.com',policy:model.policy||'Others',extra:value.startsWith('IP-')?['no-resolve']:[]}}}else model[key]=value;rules[index]=serialize(model);if(model.policy==='DIRECT')index=moveDirectBeforeCn(index);setDirty();render()}
+    function moveRule(index,delta){let target=index+delta;if(target<0||target>=rules.length||rules[target].toUpperCase().startsWith('MATCH,'))return;[rules[index],rules[target]]=[rules[target],rules[index]];dirty=true;render()}
+    function removeRule(index){rules.splice(index,1);dirty=true;render()}
+    function addRule(){insertRule('DOMAIN-SUFFIX,example.com,Others')}
+    function addDirectRule(){insertRule('DOMAIN-SUFFIX,example.com,DIRECT')}
+    async function saveRules(){if(!dirty)return;if(!confirm(`应用当前 ${rules.length} 条代理规则？`))return;saveButton.disabled=true;setStatus('正在校验并应用…');try{applyData(await api('/api/rules',{method:'POST',body:JSON.stringify({rules,version})}));setStatus('规则已通过校验并生效')}catch(error){setStatus(error.message,false);saveButton.disabled=false}}
+    reloadRules();
+  </script>
+</body>
+</html>

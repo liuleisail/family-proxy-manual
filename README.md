@@ -180,6 +180,8 @@ RouterOS 对 `family_mihomo_devices` 中的所有纳管设备快速拒绝外网 
 
 规则页提供面向业务的填写方式。每次修改前先阅读当前命中方向，新增规则后用一个目标应用验证。建议遵循：
 
+- 对某个服务强制不经机场节点，点击“添加直连域名”，填写根域名并保持“域名及子域名”。它会生成 `DOMAIN-SUFFIX,你的域名,DIRECT`，自动放在通用中国规则前面。`DIRECT` 只控制 Mihomo 出口：命中中国 IP 的流量本来已由 RouterOS 前置直出；若域名解析到海外 CDN，流量仍可能到达 Z4Pro，但不会使用机场节点。
+
 - 国内应用、购物、短视频和本地服务优先直连。
 - 接管设备的中国 IPv4 流量由 RouterOS 在策略打标前直接送往 WAN；国外 TCP/UDP 才进入 Z4Pro 和 Mihomo TPROXY。Z4Pro 的国内直转仅作为防错兜底，不能替代 RouterOS 前置直连，否则会形成 `RouterOS -> Z4Pro -> RouterOS` 的额外往返。
 - Z4Pro 的中国 IPv4 集合每周从 APNIC 官方数据源通过本地直连更新，更新前校验条目数量，更新后只重载旁路转发规则，不重启 Docker 容器。启用 `ROUTER_CN_AUTO_SYNC=true` 时，同一任务只同步 RouterOS 的 `family_cn_ipv4` 地址表：差异超过 20% 会拒绝，变更前保存 JSON，先加后删，最终对账失败会自动恢复；不会修改 mangle、NAT 或路由表。
