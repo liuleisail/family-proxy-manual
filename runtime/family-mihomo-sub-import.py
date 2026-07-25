@@ -39,7 +39,11 @@ POOLS = {
     "SG-AI": ("sg", "新加坡", "sgp"),
     "US-AI": ("us", "美国", "usa"),
     "其他-AI": (),
-    "TG": ("jp", "日本", "jpn", "sg", "新加坡", "sgp"),
+    # Telegram candidates are selected by observed reachability, not a fixed
+    # Japan-first rule. Limit automatic suggestions to nearby Asian regions.
+    "TG": ("hk", "香港", "hkg", "tw", "台湾", "twn", "jp", "日本", "jpn",
+           "sg", "新加坡", "sgp", "kr", "韩国", "kor", "th", "泰国", "tha",
+           "my", "马来", "mys", "vn", "越南", "vnm", "id", "印尼", "idn"),
     "Proxy": ("hk", "香港", "hkg"),
 }
 AI_REGIONAL_POOLS = ("JP-AI", "SG-AI", "US-AI")
