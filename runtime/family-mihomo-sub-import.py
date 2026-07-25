@@ -48,7 +48,7 @@ POOLS = {
 }
 AI_REGIONAL_POOLS = ("JP-AI", "SG-AI", "US-AI")
 HK_NODE = re.compile(r"(?:香港|hong[ -]?kong|(?<![a-z])hkg?(?![a-z]))", re.I)
-SUGGESTION_SCHEMA = 2
+SUGGESTION_SCHEMA = 3
 CANDIDATES = PROVIDERS / "candidates.json"
 PREVIOUS = PROVIDERS / "candidates.previous.json"
 LAST_TESTS = PROVIDERS / "last-tests.json"
@@ -67,6 +67,17 @@ NOISE = re.compile(
 )
 OPENER = build_opener(ProxyHandler({}))
 MONITORED_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto", "GitHub-Auto")
+# Full-library screening stays inexpensive. Before a candidate pool is applied,
+# each selected node is tested three times against the actual service it serves.
+POOL_TEST_URLS = {
+    "HK-视频": "https://www.youtube.com/generate_204",
+    "JP-AI": "https://chatgpt.com/cdn-cgi/trace",
+    "SG-AI": "https://chatgpt.com/cdn-cgi/trace",
+    "US-AI": "https://chatgpt.com/cdn-cgi/trace",
+    "其他-AI": "https://chatgpt.com/cdn-cgi/trace",
+    "TG": "https://core.telegram.org",
+    "Proxy": "https://www.gstatic.com/generate_204",
+}
 TEST_JOB_LOCK = threading.Lock()
 TEST_STATE_LOCK = threading.Lock()
 TEST_STATE = {
@@ -192,7 +203,7 @@ def suggestions():
             "pools": {name: [] for name in POOLS},
             "generated_at": None,
             "ready": False,
-            "reason": "AI 候选地域规则已更新，请重新进行全量稳定性测速",
+            "reason": "候选池标准已更新，请重新进行全量稳定性测速",
         }
     proposal = data.get("pools") if isinstance(data.get("pools"), dict) else {}
     return {
@@ -221,7 +232,7 @@ def test_score(result):
 
 
 def rank_pool_candidates(entries):
-    """Keep stable primary nodes first, then fill with stable backups."""
+    """Prefer stable primary nodes, then retain one good node per backup source."""
     chosen = []
     for position, source in enumerate(source_slots()):
         limit = 3 if position == 0 else 1
@@ -612,10 +623,10 @@ def proxy_api(path, method="GET", data=None):
         return json.loads(response.read() or b"{}")
 
 
-def test_one(name):
+def test_one(name, url="https://www.gstatic.com/generate_204"):
     delays = []
     for _ in range(3):
-        query = urlencode({"url": "https://www.gstatic.com/generate_204", "timeout": 5000})
+        query = urlencode({"url": url, "timeout": 5000})
         try:
             data = proxy_api("/proxies/" + quote(name, safe="") + "/delay?" + query)
             if data.get("delay"):
@@ -643,6 +654,25 @@ def test_nodes(names, progress=None, result_path=LAST_TESTS):
     results = sorted(results, key=lambda item: (not item["ok"], item["delay"] or 999999,
                                                  item["jitter"] or 999999, item["name"]))
     atomic_json(result_path, {"tested_at": datetime.now().astimezone().isoformat(), "results": results})
+    return results
+
+
+def test_pool_candidates(selected, progress=None):
+    """Confirm each pool against its own service, not one generic URL."""
+    tasks = [(pool, name) for pool, entries in selected.items() for name in entries]
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = {
+            executor.submit(test_one, name, POOL_TEST_URLS[pool]): (pool, name)
+            for pool, name in tasks
+        }
+        results = []
+        for completed, future in enumerate(as_completed(futures), 1):
+            pool, _ = futures[future]
+            item = future.result()
+            item["pool"] = pool
+            results.append(item)
+            if progress:
+                progress(completed, len(tasks))
     return results
 
 
@@ -700,10 +730,10 @@ def start_retest_apply(value):
     selected = validate_pools(value)
     if not TEST_JOB_LOCK.acquire(blocking=False):
         return {"started": False, **test_status()}
-    names = list(dict.fromkeys(name for entries in selected.values() for name in entries))
+    total = sum(len(entries) for entries in selected.values())
     now = datetime.now().astimezone().isoformat()
     with TEST_STATE_LOCK:
-        TEST_STATE.update({"running": True, "total": len(names), "completed": 0,
+        TEST_STATE.update({"running": True, "total": total, "completed": 0,
                            "started_at": now, "finished_at": None, "error": None,
                            "action": "retest-apply", "proposal_ready": True, "applied": False})
 
@@ -713,14 +743,16 @@ def start_retest_apply(value):
 
     def run():
         try:
-            results = test_nodes(names, update_progress, CONFIRM_TESTS)
+            results = test_pool_candidates(selected, update_progress)
+            atomic_json(CONFIRM_TESTS, {"tested_at": datetime.now().astimezone().isoformat(),
+                                        "results": results})
             indexed = node_index()
-            result_by_name = {item["name"]: item for item in results}
+            result_by_name = {(item["pool"], item["name"]): item for item in results}
             confirmed = {}
             for pool, entries in selected.items():
                 stable = []
                 for name in entries:
-                    result = result_by_name.get(name)
+                    result = result_by_name.get((pool, name))
                     if result and result.get("success") == 3 and result.get("delay") is not None:
                         stable.append({"name": name, "source": indexed[name]["source"], "score": test_score(result)})
                 confirmed[pool] = rank_pool_candidates(stable)
