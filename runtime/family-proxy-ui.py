@@ -476,16 +476,13 @@ def send_alert_test():
         raise RouterError("请先保存 Telegram 告警设置") from exc
     if not data.get("enabled") or not token or not chat_id:
         raise RouterError("请先启用并完成 Telegram 告警设置")
-    request = Request(f"https://api.telegram.org/bot{token}/sendMessage",
-                      data=urlencode({"chat_id": chat_id, "text": "家庭旁路测试通知\nTelegram 告警通道已验证"}).encode(),
-                      method="POST")
+    target = "https://api.telegram.org/bot" + token + "/sendMessage?" + urlencode({
+        "chat_id": chat_id, "text": "家庭旁路测试通知\nTelegram 告警通道已验证",
+    })
     try:
-        with urlopen(request, timeout=10) as response:
-            result = json.loads(response.read() or b"{}")
-    except (HTTPError, URLError, OSError, ValueError) as exc:
+        mihomo_request("/proxies/TG-Notify/delay?" + urlencode({"url": target, "timeout": 15000}))
+    except RouterError as exc:
         raise RouterError("Telegram 测试消息发送失败") from exc
-    if not result.get("ok"):
-        raise RouterError("Telegram 拒绝测试消息，请检查 Bot Token 与 Chat ID")
     audit("alert_settings", "test_sent", "telegram")
     return {"message": "测试消息已发送"}
 

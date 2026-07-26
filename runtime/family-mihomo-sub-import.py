@@ -381,6 +381,14 @@ def generate_config(selected=None):
         insert_at = next((index for index, rule in enumerate(rules)
                           if str(rule).startswith("GEOSITE,telegram,")), len(rules))
         rules.insert(insert_at, telegram_ip_rule)
+    # The notification bot is control-plane traffic. Keep it separate from
+    # normal Telegram client sessions so a failing regional TG route cannot
+    # suppress an alert about that very failure.
+    telegram_api_rule = "DOMAIN,api.telegram.org,TG-Notify"
+    rules = [rule for rule in rules if str(rule) != telegram_api_rule]
+    insert_at = next((index for index, rule in enumerate(rules)
+                      if str(rule).startswith("GEOSITE,telegram,")), len(rules))
+    rules.insert(insert_at, telegram_api_rule)
     # GitHub uses long-lived HTTPS connections and large release/LFS transfers.
     # Keep it out of the generic Hong Kong-first Others policy while preserving
     # all domestic direct and existing application rules.
@@ -401,6 +409,7 @@ def generate_config(selected=None):
     ai_groups = ["JP-AI", "SG-AI", "US-AI"] + (["其他-AI"] if other_ai else [])
     ai_nodes = jp + sg + us + other_ai
     github = (jp[:2] + sg[:1] + proxy[:1] + us[:1])
+    notify = us[:2] + jp[:1] + sg[:1]
     if not github:
         raise ValueError("GitHub 策略组缺少可用候选节点")
     groups = [
@@ -411,6 +420,7 @@ def generate_config(selected=None):
         fallback("SG-AI", sg, "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
         fallback("US-AI", us, "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
         fallback("TG-Auto", tg, "https://core.telegram.org", 300),
+        fallback("TG-Notify", notify, "https://api.telegram.org", 300),
         fallback("Proxy-Auto", proxy, "https://www.gstatic.com/generate_204", 300, "204"),
         fallback("GitHub-Auto", github, "https://github.com/", 300, "200"),
         fallback("DNS-Resolve", proxy, "https://dns.google/dns-query", 300),
@@ -820,15 +830,12 @@ def send_telegram_alert(message):
     config = alert_config()
     if not config["enabled"] or not config["token"] or not config["chat_id"]:
         return False, "未启用或未完成 Telegram 通知配置"
-    payload = urlencode({"chat_id": config["chat_id"], "text": message}).encode()
-    request = Request(f"https://api.telegram.org/bot{config['token']}/sendMessage",
-                      data=payload, method="POST")
+    target = "https://api.telegram.org/bot" + config["token"] + "/sendMessage?" + urlencode({
+        "chat_id": config["chat_id"], "text": message,
+    })
     try:
-        with urlopen(request, timeout=10) as response:
-            result = json.loads(response.read() or b"{}")
-        if result.get("ok"):
-            return True, "已发送"
-        return False, "Telegram 接口拒绝请求"
+        proxy_api("/proxies/TG-Notify/delay?" + urlencode({"url": target, "timeout": 15000}))
+        return True, "已发送"
     except Exception as exc:
         return False, f"Telegram 通知发送失败：{type(exc).__name__}"
 
