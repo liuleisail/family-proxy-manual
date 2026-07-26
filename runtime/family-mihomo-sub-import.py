@@ -409,7 +409,15 @@ def generate_config(selected=None):
     ai_groups = ["JP-AI", "SG-AI", "US-AI"] + (["其他-AI"] if other_ai else [])
     ai_nodes = jp + sg + us + other_ai
     github = (jp[:2] + sg[:1] + proxy[:1] + us[:1])
-    notify = us[:2] + jp[:1] + sg[:1]
+    # Bot API needs a real HTTPS request, not merely a controller delay probe.
+    # Prefer the separately verified backup Hysteria2 candidates. They are only
+    # used by alerts and do not influence normal Telegram client routing.
+    notify = list(dict.fromkeys(
+        name for name in (jp + sg + us + other_ai + tg + proxy)
+        if name.startswith("[备用2] ")
+    ))[:5]
+    if not notify:
+        notify = us[:2] + jp[:1] + sg[:1]
     if not github:
         raise ValueError("GitHub 策略组缺少可用候选节点")
     groups = [
@@ -830,12 +838,17 @@ def send_telegram_alert(message):
     config = alert_config()
     if not config["enabled"] or not config["token"] or not config["chat_id"]:
         return False, "未启用或未完成 Telegram 通知配置"
-    target = "https://api.telegram.org/bot" + config["token"] + "/sendMessage?" + urlencode({
-        "chat_id": config["chat_id"], "text": message,
-    })
     try:
-        proxy_api("/proxies/TG-Notify/delay?" + urlencode({"url": target, "timeout": 15000}))
-        return True, "已发送"
+        response = subprocess.run([
+            "curl", "-sS", "--max-time", "20", "--proxy", "http://127.0.0.1:7890",
+            "--data-urlencode", "chat_id=" + config["chat_id"],
+            "--data-urlencode", "text=" + message,
+            "https://api.telegram.org/bot" + config["token"] + "/sendMessage",
+        ], capture_output=True, text=True, timeout=25)
+        result = json.loads(response.stdout or "{}")
+        if response.returncode == 0 and result.get("ok"):
+            return True, "已发送"
+        return False, "Telegram 未确认接收"
     except Exception as exc:
         return False, f"Telegram 通知发送失败：{type(exc).__name__}"
 
