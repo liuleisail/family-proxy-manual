@@ -608,6 +608,62 @@ def routeros_upgrade_status():
         }
 
 
+def mihomo_component_update_status(check=False):
+    if check:
+        try:
+            subprocess.run([MIHOMO_UPGRADE_SCRIPT, "check"], text=True, capture_output=True, timeout=55)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        payload = mihomo_upgrade_status()
+    except (RouterError, OSError, subprocess.SubprocessError) as exc:
+        return {"state": "check_failed", "available": False, "current_version": "未知",
+                "latest_version": "未知", "detail": f"Mihomo 更新检查失败：{exc}", "checked_at": int(time.time())}
+    return {
+        "state": str(payload.get("state", "unknown")),
+        "available": payload.get("state") == "update_available",
+        "current_version": str(payload.get("current_version") or "未知"),
+        "latest_version": str(payload.get("latest_version") or "未知"),
+        "detail": str(payload.get("message") or "Mihomo 更新状态已读取"),
+        "checked_at": int(payload.get("updated_at") or 0),
+    }
+
+
+def mosdns_component_update_status(check=False):
+    if check:
+        try:
+            secret = GATEWAY_SECRET_PATH.read_text(encoding="utf-8").strip()
+            request = Request("http://127.0.0.1:18102/check", method="POST", headers={
+                "X-Family-Gateway": secret, "X-Requested-With": "family-dns",
+            })
+            with urlopen(request, timeout=8):
+                pass
+            # The updater switches to "checking" in its worker thread. Give it
+            # a moment to publish that state before deciding whether to poll.
+            time.sleep(1)
+        except (OSError, HTTPError, URLError):
+            pass
+    status_path = Path("/etc/family-proxy-ui/mosdns-updater-status.json")
+    for _ in range(25 if check else 1):
+        try:
+            payload = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        if payload.get("phase") != "checking" or not check:
+            break
+        time.sleep(1)
+    phase = str(payload.get("phase", "unknown"))
+    checked_at = str(payload.get("checked_at") or payload.get("updated_at") or "")
+    return {
+        "state": "update_available" if payload.get("update_available") else ("check_failed" if phase == "error" else phase),
+        "available": bool(payload.get("update_available")),
+        "current_version": str(payload.get("current_version") or payload.get("current_image") or "未知"),
+        "latest_version": str(payload.get("latest_image") or "未知"),
+        "detail": str(payload.get("message") or "MosDNS 更新状态尚未读取"),
+        "checked_at": checked_at,
+    }
+
+
 def send_platform_update_alert(updates):
     try:
         data = json.loads(ALERT_CONFIG_PATH.read_text(encoding="utf-8"))
@@ -636,11 +692,16 @@ def send_platform_update_alert(updates):
 def check_platform_updates():
     previous = read_platform_update_status()
     routeros, z4pro = routeros_upgrade_status(), zos_upgrade_status()
+    mihomo, mosdns = mihomo_component_update_status(check=True), mosdns_component_update_status(check=True)
     updates = []
     if routeros.get("available"):
         updates.append({"name": "RouterOS", **routeros})
     if z4pro.get("available"):
         updates.append({"name": "Z4Pro ZOS", **z4pro})
+    if mihomo.get("available"):
+        updates.append({"name": "Mihomo", **mihomo})
+    if mosdns.get("available"):
+        updates.append({"name": "MosDNS", **mosdns})
     fingerprint = json.dumps([(item["name"], item["current_version"], item["latest_version"]) for item in updates], ensure_ascii=False)
     notification = {"state": "not_needed", "message": "当前没有可推送的系统更新"}
     notified_fingerprint = previous.get("notified_fingerprint", "")
@@ -649,8 +710,11 @@ def check_platform_updates():
         notification = {"state": "sent" if sent else "pending", "message": message}
         if sent:
             notified_fingerprint = fingerprint
+    elif updates:
+        notification = {"state": "already_sent", "message": "当前可用版本已经提醒，不重复推送"}
     result = {
         "checked_at": int(time.time()), "routeros": routeros, "z4pro": z4pro,
+        "mihomo": mihomo, "mosdns": mosdns,
         "notification": notification, "notified_fingerprint": notified_fingerprint,
     }
     atomic_json(PLATFORM_UPDATE_STATUS_PATH, result)
@@ -2388,9 +2452,9 @@ MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
     'Promise.all([loadMihomo(),loadMosdns()]);', _ALERT_SCRIPT + 'Promise.all([loadMihomo(),loadMosdns(),loadAlerts()]);', 1,
 )
 
-_PLATFORM_UPDATE_CARD = r'''<section class="platform-update-card"><div class="platform-update-head"><div><h2>设备系统更新</h2><p>仅检查官方稳定通道与极空间官方升级服务。发现新版本时通过已启用的 Telegram 告警推送一次；不会自动升级或重启设备。</p></div><button id="platform-check">检查设备更新</button></div><div class="platform-update-grid"><article class="platform-update-item"><div><span>RouterOS</span><b id="routeros-update-state">读取中</b></div><dl><div><dt>当前版本</dt><dd id="routeros-update-current">--</dd></div><div><dt>可用版本</dt><dd id="routeros-update-latest">--</dd></div><div><dt>通道</dt><dd id="routeros-update-channel">--</dd></div><div><dt>检查时间</dt><dd id="routeros-update-time">--</dd></div></dl><p id="routeros-update-detail">正在读取 RouterOS 官方通道。</p></article><article class="platform-update-item"><div><span>Z4Pro ZOS</span><b id="z4pro-update-state">读取中</b></div><dl><div><dt>当前版本</dt><dd id="z4pro-update-current">--</dd></div><div><dt>可用版本</dt><dd id="z4pro-update-latest">--</dd></div><div><dt>检查时间</dt><dd id="z4pro-update-time">--</dd></div><div><dt>通知</dt><dd id="platform-update-notice">--</dd></div></dl><p id="z4pro-update-detail">正在读取极空间官方升级服务。</p></article></div><div class="platform-update-foot" id="platform-update-foot">每日自动检查一次；手动检查只读取官方检查结果与 RouterOS 官方通道。</div></section>'''
+_PLATFORM_UPDATE_CARD = r'''<section class="platform-update-card"><div class="platform-update-head"><div><h2>系统更新与通知</h2><p>检查 RouterOS 官方通道、极空间官方升级服务，以及 Mihomo、MosDNS 的只读镜像检查。发现新版本时通过已启用的 Telegram 告警推送一次；不会自动升级或重启设备。</p></div><button id="platform-check">检查系统更新</button></div><div class="platform-update-grid"><article class="platform-update-item"><div><span>RouterOS</span><b id="routeros-update-state">读取中</b></div><dl><div><dt>当前版本</dt><dd id="routeros-update-current">--</dd></div><div><dt>可用版本</dt><dd id="routeros-update-latest">--</dd></div><div><dt>通道</dt><dd id="routeros-update-channel">--</dd></div><div><dt>检查时间</dt><dd id="routeros-update-time">--</dd></div></dl><p id="routeros-update-detail">正在读取 RouterOS 官方通道。</p></article><article class="platform-update-item"><div><span>Z4Pro ZOS</span><b id="z4pro-update-state">读取中</b></div><dl><div><dt>当前版本</dt><dd id="z4pro-update-current">--</dd></div><div><dt>可用版本</dt><dd id="z4pro-update-latest">--</dd></div><div><dt>检查时间</dt><dd id="z4pro-update-time">--</dd></div><div><dt>通知</dt><dd id="platform-update-notice">--</dd></div></dl><p id="z4pro-update-detail">正在读取极空间官方升级服务。</p></article></div><div class="platform-update-foot" id="platform-update-foot">每日自动检查一次；Mihomo、MosDNS 更新也纳入相同的去重通知。</div></section>'''
 
-_PLATFORM_UPDATE_SCRIPT = r'''function platformTime(value){let n=Number(value||0);if(!n)return '尚无记录';if(n<100000000000)n*=1000;let d=new Date(n);return isNaN(d.getTime())?'尚无记录':d.toLocaleString('zh-CN',{hour12:false})}function renderPlatformItem(prefix,item){item=item||{};let state={current:'当前已是最新',update_available:'发现可用更新',check_failed:'检查失败',unknown:'等待官方检查'}[item.state]||'等待检查',tone=item.state==='update_available'?'warn':item.state==='check_failed'?'bad':'';$('#'+prefix+'-update-state').textContent=state;$('#'+prefix+'-update-state').className=tone;$('#'+prefix+'-update-current').textContent=item.current_version||'--';$('#'+prefix+'-update-latest').textContent=item.latest_version||'--';if(prefix==='routeros')$('#routeros-update-channel').textContent=item.channel||'--';$('#'+prefix+'-update-time').textContent=platformTime(item.checked_at);$('#'+prefix+'-update-detail').textContent=item.detail||'尚无可用信息'}function renderPlatformUpdates(data){renderPlatformItem('routeros',data.routeros);renderPlatformItem('z4pro',data.z4pro);let note=data.notification||{},notice={sent:'已推送 Telegram',pending:'等待 Telegram 推送',not_needed:'无需推送'}[note.state]||'尚未推送';$('#platform-update-notice').textContent=notice;$('#platform-update-foot').textContent=(note.message||'每日自动检查一次；手动检查只读取官方检查结果与 RouterOS 官方通道。')+'。自动检查每天 09:15 左右运行，不会自动升级。'}async function loadPlatformUpdates(){try{renderPlatformUpdates(await api('/api/platform/updates'))}catch(e){$('#platform-update-foot').textContent='设备系统更新读取失败：'+e.message}}async function checkPlatformUpdates(){let button=$('#platform-check'),original=button.textContent;button.disabled=true;button.textContent='正在检查';$('#platform-update-foot').textContent='正在读取 RouterOS 官方通道与极空间官方升级结果，请稍候…';try{await api('/api/platform/updates/check',{method:'POST'});for(let n=0;n<30;n++){await new Promise(r=>setTimeout(r,1000));let d=await api('/api/platform/updates');if(Number(d.checked_at||0)*1000>Date.now()-90000){renderPlatformUpdates(d);break}}}catch(e){$('#platform-update-foot').textContent='检查失败：'+e.message}finally{button.disabled=false;button.textContent=original}}$('#platform-check').onclick=checkPlatformUpdates;'''
+_PLATFORM_UPDATE_SCRIPT = r'''function platformTime(value){let n=Number(value||0);if(!n)return '尚无记录';if(n<100000000000)n*=1000;let d=new Date(n);return isNaN(d.getTime())?'尚无记录':d.toLocaleString('zh-CN',{hour12:false})}function renderPlatformItem(prefix,item){item=item||{};let state={current:'当前已是最新',update_available:'发现可用更新',check_failed:'检查失败',unknown:'等待官方检查'}[item.state]||'等待检查',tone=item.state==='update_available'?'warn':item.state==='check_failed'?'bad':'';$('#'+prefix+'-update-state').textContent=state;$('#'+prefix+'-update-state').className=tone;$('#'+prefix+'-update-current').textContent=item.current_version||'--';$('#'+prefix+'-update-latest').textContent=item.latest_version||'--';if(prefix==='routeros')$('#routeros-update-channel').textContent=item.channel||'--';$('#'+prefix+'-update-time').textContent=platformTime(item.checked_at);$('#'+prefix+'-update-detail').textContent=item.detail||'尚无可用信息'}function renderPlatformUpdates(data){renderPlatformItem('routeros',data.routeros);renderPlatformItem('z4pro',data.z4pro);let note=data.notification||{},notice={sent:'已推送 Telegram',already_sent:'已提醒',pending:'等待 Telegram 推送',not_needed:'无需推送'}[note.state]||'尚未推送';$('#platform-update-notice').textContent=notice;let components=[data.mihomo?.available?'Mihomo 有更新':'Mihomo 已检查',data.mosdns?.available?'MosDNS 有更新':'MosDNS 已检查'].join(' · ');$('#platform-update-foot').textContent=(note.message||'每日自动检查一次；Mihomo、MosDNS 更新也纳入相同的去重通知。')+'。'+components+'；自动检查每天 09:15 左右运行，不会自动升级。'}async function loadPlatformUpdates(){try{renderPlatformUpdates(await api('/api/platform/updates'))}catch(e){$('#platform-update-foot').textContent='系统更新读取失败：'+e.message}}async function checkPlatformUpdates(){let button=$('#platform-check'),original=button.textContent;button.disabled=true;button.textContent='正在检查';$('#platform-update-foot').textContent='正在执行四项只读更新检查，请稍候…';try{await api('/api/platform/updates/check',{method:'POST'});for(let n=0;n<70;n++){await new Promise(r=>setTimeout(r,1000));let d=await api('/api/platform/updates');if(Number(d.checked_at||0)*1000>Date.now()-90000){renderPlatformUpdates(d);break}}}catch(e){$('#platform-update-foot').textContent='检查失败：'+e.message}finally{button.disabled=false;button.textContent=original}}$('#platform-check').onclick=checkPlatformUpdates;'''
 
 MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
     _ALERT_CARD,

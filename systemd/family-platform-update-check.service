@@ -6,5 +6,6 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 User=root
+TimeoutStartSec=120
 EnvironmentFile=/etc/family-proxy-ui/router.env
 ExecStart=/usr/bin/python3 /opt/family-proxy-ui/family-proxy-ui.py platform-update-check

@@ -94,7 +94,7 @@ MosDNS-T 的推荐加固配置见 [MOSDNS.md](MOSDNS.md)。其中包含分流前
 
 Mihomo 的“维护”页默认只读。检查更新只读取镜像仓库元数据，仓库不可达时显示失败且不拉取、不重启。点击“升级并验证”后，系统才会备份当前 `config.yaml` 和 Compose 文件、为旧镜像保存本地回滚标签、拉取新镜像、用现有配置校验，再重建唯一的 `family-mihomo-fallback` 容器。控制接口或 `Proxy-Auto` 策略组验证失败会自动恢复旧镜像；不会启动任何历史停用容器。当前镜像使用 Alpha 浮动标签，因此建议只在网络稳定时手动升级，不启用定时自动更新。
 
-维护页的“设备系统更新”每天约 09:15 检查一次（随机延后最多 10 分钟），并可手动检查。RouterOS 读取已设置的官方更新通道；Z4Pro 读取极空间 ZOS 自带升级服务的最近一次官方结果。若发现版本变化，会使用已启用的 Telegram 告警仅推送一次；不执行 RouterOS、ZOS、Docker 或 `apt` 升级，也不会重启任何服务。系统更新请仍在 RouterOS 或极空间官方界面确认后手动完成。
+维护页的“系统更新与通知”每天约 09:15 检查一次（随机延后最多 10 分钟），并可手动检查。RouterOS 读取已设置的官方更新通道；Z4Pro 读取极空间 ZOS 自带升级服务的最近一次官方结果；Mihomo 与 MosDNS 仅执行镜像元数据比对。任何组件发现版本变化时，会使用已启用的 Telegram 告警仅推送一次；不执行 RouterOS、ZOS、Docker 或 `apt` 升级，也不会重启任何服务。系统更新请仍在 RouterOS 或极空间官方界面确认后手动完成。
 
 若家庭网络无法直连 Docker Hub，可把 `systemd/docker-mihomo-proxy.conf` 安装为 Docker 服务的 `http-proxy.conf`。该配置只让 Docker 守护进程通过本机 `127.0.0.1:7890` 拉取镜像，NAS 默认网关、局域网访问和既有容器运行流量不改。应用配置需重启 Docker；先确认 `docker info` 的 `Live Restore Enabled` 为 `true`，并备份、记录容器状态后再操作。
 
