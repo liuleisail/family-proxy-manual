@@ -1272,6 +1272,23 @@ def mask_endpoint(value):
     return f"{host}:{port}" if port else host
 
 
+def mobile_peer_display_name(name):
+    labels = {
+        "surge-ios-home": "iPhone",
+        "shadowrocket-ipadmini-home": "iPad mini",
+        "surge-mba-home": "MacBook Air",
+    }
+    return labels.get(name, name)
+
+
+def mobile_peer_state(age):
+    if age is not None and age <= 180:
+        return "up", "已连接"
+    if age is not None and age <= 600:
+        return "warn", "握手偏久"
+    return "idle", "待机"
+
+
 def load_wireguard_events(now=None):
     now = int(now or time.time())
     try:
@@ -1371,12 +1388,18 @@ def wireguard_status():
                 endpoint_port = peer.get("current-endpoint-port") or peer.get("endpoint-port", "")
                 if endpoint_value and endpoint_port:
                     endpoint_value = f"{endpoint_value}:{endpoint_port}"
+                peer_name = peer.get("name") or peer.get("comment") or f"对端 {index}"
+                peer_state, peer_state_text = mobile_peer_state(age)
                 peer_rows.append({
-                    "name": peer.get("name") or peer.get("comment") or f"对端 {index}",
+                    "name": peer_name,
+                    "display_name": mobile_peer_display_name(peer_name),
+                    "visible_mobile_client": bool(peer.get("name")) and not re.fullmatch(r"peer\d+", peer_name, re.I),
                     "allowed_address": peer.get("allowed-address", ""),
                     "endpoint": mask_endpoint(endpoint_value),
                     "last_handshake_seconds": age,
                     "active": active,
+                    "state": peer_state,
+                    "state_text": peer_state_text,
                     "rx_bytes": rx,
                     "tx_bytes": tx,
                 })
@@ -2104,8 +2127,8 @@ PAGE = PAGE.replace(
 function trafficBytes(value){let n=Number(value||0),units=['B','KB','MB','GB','TB'],i=0;while(n>=1024&&i<units.length-1){n/=1024;i++}return `${n.toFixed(i?1:0)} ${units[i]}`}
 function handshakeAge(seconds){if(seconds==null)return '从未';let n=Number(seconds);return n<60?`${n} 秒前`:n<3600?`${Math.floor(n/60)} 分钟前`:n<86400?`${Math.floor(n/3600)} 小时前`:`${Math.floor(n/86400)} 天前`}
 function wireguardStateText(item){return item.kind==='site'&&item.probe?.reachable?`${item.state_text} · ${item.probe.latency_ms} ms`:item.state_text}
-function renderWireGuard(){let target=document.querySelector('#wireguardStatus');target.innerHTML=wireguardData.interfaces.length?wireguardData.interfaces.map(item=>`<div class="wireguard-row"><div class="wg-identity"><span class="wg-dot ${esc(item.state)}"></span><div><b>${esc(item.label)}</b><div class="muted">${esc(item.name)} · UDP ${esc(item.listen_port||'--')}</div></div></div><div class="wg-metric"><span>状态</span><b class="wg-tone ${esc(item.state)}">${esc(wireguardStateText(item))}</b></div><div class="wg-metric"><span>最近握手</span><b>${esc(handshakeAge(item.last_handshake_seconds))}</b></div><div class="wg-metric"><span>对端</span><b>${item.peer_active} / ${item.peer_total} 活跃</b></div><div class="wg-metric"><span>累计流量</span><b>↓ ${trafficBytes(item.rx_bytes)} · ↑ ${trafficBytes(item.tx_bytes)}</b></div><button class="wg-detail" onclick="openWireGuard('${esc(item.name)}')" aria-label="查看 ${esc(item.label)} 详情">详情 <span>›</span></button></div>`).join(''):'<div class="empty">未发现 WireGuard 接口</div>'}
-function wireguardDetail(item){let routes=item.routes.length?item.routes.map(route=>`<div class="wg-detail-row"><span>${esc(route.destination)}</span><b class="${route.active?'good':'bad-text'}">${route.active?'路由生效':'路由未生效'}</b></div>`).join(''):'<div class="empty compact">该接口没有独立远端路由</div>',peers=item.peers.length?item.peers.map(peer=>`<div class="wg-peer"><div><b>${esc(peer.name)}</b><span>${esc(peer.allowed_address||'未声明地址')}</span></div><div><b class="${peer.active?'good':''}">${handshakeAge(peer.last_handshake_seconds)}</b><span>${esc(peer.endpoint)} · ↓ ${trafficBytes(peer.rx_bytes)} / ↑ ${trafficBytes(peer.tx_bytes)}</span></div></div>`).join(''):'<div class="empty compact">没有对端</div>',events=wireguardData.events.filter(event=>event.interface===item.name);document.querySelector('#wireguardDialogTitle').textContent=item.label;document.querySelector('#wireguardDialogBody').innerHTML=`<div class="wg-detail-summary"><div><span>当前状态</span><b class="wg-tone ${esc(item.state)}">${esc(wireguardStateText(item))}</b></div><div><span>接口</span><b>${esc(item.name)} · MTU ${esc(item.mtu||'--')}</b></div><div><span>NAT</span><b>${item.kind==='mobile'?(item.nat_ready?'已就绪':'需要检查'):'不适用'}</b></div></div><h3>对端</h3><div class="wg-detail-group">${peers}</div><h3>远端路由</h3><div class="wg-detail-group">${routes}</div><h3>最近状态变化</h3><div class="wg-detail-group">${events.length?events.slice().reverse().map(event=>`<div class="wg-detail-row"><span>${new Date(event.timestamp*1000).toLocaleString('zh-CN',{hour12:false})}</span><b>${esc(event.message)}</b></div>`).join(''):'<div class="empty compact">最近 7 天没有状态变化</div>'}</div>`}
+function wireguardInterfaceRow(item){return `<div class="wireguard-row"><div class="wg-identity"><span class="wg-dot ${esc(item.state)}"></span><div><b>${esc(item.label)}</b><div class="muted">${esc(item.name)} · UDP ${esc(item.listen_port||'--')}</div></div></div><div class="wg-metric"><span>状态</span><b class="wg-tone ${esc(item.state)}">${esc(wireguardStateText(item))}</b></div><div class="wg-metric"><span>最近握手</span><b>${esc(handshakeAge(item.last_handshake_seconds))}</b></div><div class="wg-metric"><span>对端</span><b>${item.peer_active} / ${item.peer_total} 活跃</b></div><div class="wg-metric"><span>累计流量</span><b>↓ ${trafficBytes(item.rx_bytes)} · ↑ ${trafficBytes(item.tx_bytes)}</b></div><button class="wg-detail" onclick="openWireGuard('${esc(item.name)}')" aria-label="查看 ${esc(item.label)} 详情">详情 <span>›</span></button></div>`}function wireguardMobilePeerRow(item,peer){return `<div class="wireguard-row wg-mobile-peer"><div class="wg-identity"><span class="wg-dot ${esc(peer.state)}"></span><div><b>${esc(peer.display_name||peer.name)}</b><div class="muted">回家设备 · ${esc(peer.name)}</div></div></div><div class="wg-metric"><span>状态</span><b class="wg-tone ${esc(peer.state)}">${esc(peer.state_text)}</b></div><div class="wg-metric"><span>最近握手</span><b>${esc(handshakeAge(peer.last_handshake_seconds))}</b></div><div class="wg-metric"><span>分配地址</span><b>${esc(peer.allowed_address||'--')}</b></div><div class="wg-metric"><span>累计流量</span><b>↓ ${trafficBytes(peer.rx_bytes)} · ↑ ${trafficBytes(peer.tx_bytes)}</b></div><button class="wg-detail" onclick="openWireGuard('${esc(item.name)}')" aria-label="查看 ${esc(peer.display_name||peer.name)} 所在隧道详情">详情 <span>›</span></button></div>`}function renderWireGuard(){let target=document.querySelector('#wireguardStatus'),rows=[];wireguardData.interfaces.forEach(item=>{if(item.kind!=='mobile'){rows.push(wireguardInterfaceRow(item));return}let clients=(item.peers||[]).filter(peer=>peer.visible_mobile_client);if(clients.length)rows.push(...clients.map(peer=>wireguardMobilePeerRow(item,peer)));else rows.push(wireguardInterfaceRow(item))});target.innerHTML=rows.length?rows.join(''):'<div class="empty">未发现 WireGuard 接口</div>'}
+function wireguardDetail(item){let routes=item.routes.length?item.routes.map(route=>`<div class="wg-detail-row"><span>${esc(route.destination)}</span><b class="${route.active?'good':'bad-text'}">${route.active?'路由生效':'路由未生效'}</b></div>`).join(''):'<div class="empty compact">该接口没有独立远端路由</div>',peers=item.peers.length?item.peers.map(peer=>`<div class="wg-peer"><div><b>${esc(peer.display_name||peer.name)}</b><span>${esc(peer.name)} · ${esc(peer.allowed_address||'未声明地址')}</span></div><div><b class="wg-tone ${esc(peer.state)}">${esc(peer.state_text)} · ${handshakeAge(peer.last_handshake_seconds)}</b><span>${esc(peer.endpoint)} · ↓ ${trafficBytes(peer.rx_bytes)} / ↑ ${trafficBytes(peer.tx_bytes)}</span></div></div>`).join(''):'<div class="empty compact">没有对端</div>',events=wireguardData.events.filter(event=>event.interface===item.name);document.querySelector('#wireguardDialogTitle').textContent=item.label;document.querySelector('#wireguardDialogBody').innerHTML=`<div class="wg-detail-summary"><div><span>当前状态</span><b class="wg-tone ${esc(item.state)}">${esc(wireguardStateText(item))}</b></div><div><span>接口</span><b>${esc(item.name)} · MTU ${esc(item.mtu||'--')}</b></div><div><span>NAT</span><b>${item.kind==='mobile'?(item.nat_ready?'已就绪':'需要检查'):'不适用'}</b></div></div><h3>对端</h3><div class="wg-detail-group">${peers}</div><h3>远端路由</h3><div class="wg-detail-group">${routes}</div><h3>最近状态变化</h3><div class="wg-detail-group">${events.length?events.slice().reverse().map(event=>`<div class="wg-detail-row"><span>${new Date(event.timestamp*1000).toLocaleString('zh-CN',{hour12:false})}</span><b>${esc(event.message)}</b></div>`).join(''):'<div class="empty compact">最近 7 天没有状态变化</div>'}</div>`}
 function openWireGuard(name){let item=wireguardData.interfaces.find(value=>value.name===name);if(!item)return;wireguardSelected=name;wireguardDetail(item);document.querySelector('#wireguardDialog').showModal()}
 function closeWireGuard(){wireguardSelected='';document.querySelector('#wireguardDialog').close()}
 async function loadWireGuard(){try{wireguardData=await api('/api/wireguard/status');renderWireGuard();if(wireguardSelected){let item=wireguardData.interfaces.find(value=>value.name===wireguardSelected);if(item)wireguardDetail(item)}document.querySelector('#wireguardUpdated').textContent=new Date(wireguardData.updated_at*1000).toLocaleTimeString('zh-CN',{hour12:false})}catch(e){document.querySelector('#wireguardStatus').innerHTML=`<div class="empty">读取失败：${esc(e.message)}</div>`;document.querySelector('#wireguardUpdated').textContent='读取失败'}}
