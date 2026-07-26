@@ -21,7 +21,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -29,6 +29,7 @@ CONFIG_PATH = Path("/etc/family-proxy-ui/router.env")
 GATEWAY_SECRET_PATH = Path("/etc/family-proxy-ui/gateway.secret")
 MANAGED_IPS_PATH = Path("/etc/family-proxy-ui/managed-ips")
 DEVICE_PREFS_PATH = Path("/etc/family-proxy-ui/device-preferences.json")
+ALERT_CONFIG_PATH = Path("/etc/family-proxy-ui/mihomo-alert.json")
 TPROXY_SYNC = "/usr/local/sbin/family-mihomo-tproxy-auto"
 MIHOMO_API = "http://127.0.0.1:9091"
 MIHOMO_CONFIG_PATH = Path("__FAMILY_DOCKER_ROOT__/family-mihomo-fallback/config.yaml")
@@ -408,6 +409,66 @@ def start_mihomo_upgrade(unit):
     if result.returncode:
         raise RouterError("Mihomo 维护任务无法启动")
     return {"message": "维护任务已启动，请等待状态刷新", "status": mihomo_upgrade_status()}
+
+
+def load_alert_settings():
+    try:
+        data = json.loads(ALERT_CONFIG_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        data = {}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RouterError("Telegram 告警设置读取失败") from exc
+    return {
+        "enabled": bool(data.get("enabled")),
+        "configured": bool(str(data.get("token", "")).strip() and str(data.get("chat_id", "")).strip()),
+        "chat_id_masked": ("*" * max(0, len(str(data.get("chat_id", ""))) - 4) + str(data.get("chat_id", ""))[-4:]) if data.get("chat_id") else "",
+        "notify_recovery": bool(data.get("notify_recovery", True)),
+    }
+
+
+def save_alert_settings(payload):
+    try:
+        existing = json.loads(ALERT_CONFIG_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        existing = {}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RouterError("Telegram 告警设置读取失败") from exc
+    token = str(payload.get("token", "")).strip() or str(existing.get("token", "")).strip()
+    chat_id = str(payload.get("chat_id", "")).strip() or str(existing.get("chat_id", "")).strip()
+    enabled = bool(payload.get("enabled"))
+    if enabled and (not token or not chat_id):
+        raise RouterError("启用告警需要同时填写 Bot Token 和 Chat ID")
+    data = {"enabled": enabled, "token": token, "chat_id": chat_id,
+            "notify_recovery": bool(payload.get("notify_recovery", True))}
+    ALERT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = ALERT_CONFIG_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, ALERT_CONFIG_PATH)
+    audit("alert_settings", "saved", "enabled=" + str(enabled))
+    return load_alert_settings()
+
+
+def send_alert_test():
+    try:
+        data = json.loads(ALERT_CONFIG_PATH.read_text(encoding="utf-8"))
+        token, chat_id = str(data.get("token", "")).strip(), str(data.get("chat_id", "")).strip()
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RouterError("请先保存 Telegram 告警设置") from exc
+    if not data.get("enabled") or not token or not chat_id:
+        raise RouterError("请先启用并完成 Telegram 告警设置")
+    request = Request(f"https://api.telegram.org/bot{token}/sendMessage",
+                      data=urlencode({"chat_id": chat_id, "text": "家庭旁路测试通知\nTelegram 告警通道已验证"}).encode(),
+                      method="POST")
+    try:
+        with urlopen(request, timeout=10) as response:
+            result = json.loads(response.read() or b"{}")
+    except (HTTPError, URLError, OSError, ValueError) as exc:
+        raise RouterError("Telegram 测试消息发送失败") from exc
+    if not result.get("ok"):
+        raise RouterError("Telegram 拒绝测试消息，请检查 Bot Token 与 Chat ID")
+    audit("alert_settings", "test_sent", "telegram")
+    return {"message": "测试消息已发送"}
 
 
 def rules_version(rules):
@@ -2128,6 +2189,18 @@ MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
     '>整合镜像源</span><span id="mosdns-latest"',
 )
 
+_ALERT_CARD = r'''<section class="card alert-card"><div class="card-head"><div><h2>Telegram 告警</h2><p>仅当某业务候选池全部节点连续两轮不可用时通知；恢复后可选发送恢复消息。</p></div><span id="alert-badge" class="badge">读取中</span></div><div class="alert-form"><label><span>Bot Token</span><input id="alert-token" type="password" autocomplete="new-password" placeholder="留空则保持已保存的 Token"></label><label><span>Chat ID</span><input id="alert-chat" autocomplete="off" placeholder="填写接收通知的 Chat ID"></label><label class="toggle"><input id="alert-enabled" type="checkbox"><span>启用候选池故障告警</span></label><label class="toggle"><input id="alert-recovery" type="checkbox" checked><span>节点恢复时发送恢复通知</span></label></div><div id="alert-detail" class="detail">正在读取告警设置。</div><div class="actions"><button id="alert-save" class="primary">保存告警设置</button><button id="alert-test">发送测试消息</button></div></section>'''
+
+_ALERT_SCRIPT = r'''function renderAlerts(d){let enabled=Boolean(d.enabled),configured=Boolean(d.configured);$('#alert-badge').textContent=enabled&&configured?'已启用':configured?'已配置':'未配置';$('#alert-badge').className='badge '+(enabled&&configured?'':'warn');$('#alert-enabled').checked=enabled;$('#alert-recovery').checked=d.notify_recovery!==false;$('#alert-chat').placeholder=d.chat_id_masked?`已保存：${d.chat_id_masked}；留空保持不变`:'填写接收通知的 Chat ID';$('#alert-detail').textContent=enabled&&configured?'候选池全体不可用将推送；同一故障只通知一次。':configured?'凭据已保存，启用后开始监控。':'请填写 Bot Token 与 Chat ID 后保存。'}async function loadAlerts(){try{renderAlerts(await api('/api/alerts'))}catch(e){$('#alert-badge').textContent='读取失败';$('#alert-badge').className='badge bad';$('#alert-detail').textContent=e.message}}$('#alert-save').onclick=async()=>{try{let d=await api('/api/alerts',{method:'POST',body:JSON.stringify({enabled:$('#alert-enabled').checked,notify_recovery:$('#alert-recovery').checked,token:$('#alert-token').value.trim(),chat_id:$('#alert-chat').value.trim()})});$('#alert-token').value='';$('#alert-chat').value='';renderAlerts(d)}catch(e){$('#alert-detail').textContent=e.message}};$('#alert-test').onclick=async()=>{try{let d=await api('/api/alerts/test',{method:'POST'});$('#alert-detail').textContent=d.message}catch(e){$('#alert-detail').textContent=e.message}};'''
+
+MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
+    '</section><p class="notice">', '</section>' + _ALERT_CARD + '<p class="notice">', 1,
+).replace(
+    '</style>', '.alert-card{margin-top:14px}.alert-form{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:14px;border-bottom:1px solid #38383a}.alert-form label{display:grid;gap:6px;color:#aeaeb2;font-size:12px}.alert-form input[type="password"],.alert-form input:not([type]){height:36px;padding:0 10px;border:1px solid #48484a;border-radius:7px;background:#2c2c2e;color:#f5f5f7;font:14px inherit}.alert-form .toggle{display:flex;align-items:center;gap:8px;font-size:13px}.alert-form .toggle input{width:16px;height:16px;accent-color:#0a84ff}@media(max-width:760px){.alert-form{grid-template-columns:1fr}}</style>', 1,
+).replace(
+    'Promise.all([loadMihomo(),loadMosdns()]);', _ALERT_SCRIPT + 'Promise.all([loadMihomo(),loadMosdns(),loadAlerts()]);', 1,
+)
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
@@ -2297,6 +2370,12 @@ class Handler(BaseHTTPRequestHandler):
             except (RouterError, OSError, subprocess.SubprocessError) as exc:
                 self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
             return
+        if path == "/api/alerts":
+            try:
+                self.reply(HTTPStatus.OK, load_alert_settings())
+            except RouterError as exc:
+                self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+            return
         if path == "/api/rules":
             try:
                 self.reply(HTTPStatus.OK, rules_payload())
@@ -2342,6 +2421,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(HTTPStatus.OK, start_mihomo_upgrade("family-mihomo-upgrade-check.service"))
             elif path == "/api/mihomo/upgrade/apply":
                 self.reply(HTTPStatus.OK, start_mihomo_upgrade("family-mihomo-upgrade.service"))
+            elif path == "/api/alerts":
+                self.reply(HTTPStatus.OK, save_alert_settings(body))
+            elif path == "/api/alerts/test":
+                self.reply(HTTPStatus.OK, send_alert_test())
             elif path == "/api/rules":
                 self.reply(HTTPStatus.OK, save_mihomo_rules(body.get("rules"), body.get("version", "")))
             else:

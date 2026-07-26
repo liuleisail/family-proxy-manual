@@ -57,6 +57,8 @@ SUGGESTIONS = PROVIDERS / "pool-suggestions.json"
 SOURCES = PROVIDERS / "sources.json"
 RUNTIME_STATE = PROVIDERS / "runtime-state.json"
 RUNTIME_EVENTS = PROVIDERS / "runtime-events.json"
+ALERT_STATE = PROVIDERS / "alert-state.json"
+ALERT_CONFIG = Path("/etc/family-proxy-ui/mihomo-alert.json")
 VERSIONS = BASE / "family-mihomo-fallback/config-versions"
 MAX_BYTES = 12 * 1024 * 1024
 CSRF = secrets.token_urlsafe(32)
@@ -67,6 +69,8 @@ NOISE = re.compile(
 )
 OPENER = build_opener(ProxyHandler({}))
 MONITORED_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto", "GitHub-Auto")
+ALERT_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto", "GitHub-Auto")
+ALERT_FAILURE_THRESHOLD = 2
 # Full-library screening stays inexpensive. Before a candidate pool is applied,
 # each selected node is tested three times against the actual service it serves.
 POOL_TEST_URLS = {
@@ -801,11 +805,54 @@ def read_json(path, default):
         return default
 
 
+def alert_config():
+    data = read_json(ALERT_CONFIG, {})
+    return {
+        "enabled": bool(data.get("enabled")),
+        "token": str(data.get("token", "")).strip(),
+        "chat_id": str(data.get("chat_id", "")).strip(),
+        "notify_recovery": bool(data.get("notify_recovery", True)),
+    }
+
+
+def send_telegram_alert(message):
+    config = alert_config()
+    if not config["enabled"] or not config["token"] or not config["chat_id"]:
+        return False, "未启用或未完成 Telegram 通知配置"
+    payload = urlencode({"chat_id": config["chat_id"], "text": message}).encode()
+    request = Request(f"https://api.telegram.org/bot{config['token']}/sendMessage",
+                      data=payload, method="POST")
+    try:
+        with urlopen(request, timeout=10) as response:
+            result = json.loads(response.read() or b"{}")
+        if result.get("ok"):
+            return True, "已发送"
+        return False, "Telegram 接口拒绝请求"
+    except Exception as exc:
+        return False, f"Telegram 通知发送失败：{type(exc).__name__}"
+
+
+def pool_is_all_down(proxies, group):
+    data = proxies.get(group, {})
+    names = data.get("all") or []
+    if not names:
+        return False
+    leaves = [proxies.get(name, {}) for name in names]
+    # Mihomo owns the periodic health checks. The controller only consumes its
+    # per-node alive state, so notifications do not add a second probe loop.
+    return bool(leaves) and all(item.get("alive") is False for item in leaves)
+
+
 def monitor_once():
     previous = read_json(RUNTIME_STATE, {})
     events = read_json(RUNTIME_EVENTS, [])
+    alert_state = read_json(ALERT_STATE, {})
     current = {}
     now = datetime.now().astimezone().isoformat()
+    try:
+        all_proxies = proxy_api("/proxies").get("proxies", {})
+    except Exception:
+        all_proxies = {}
     for group in MONITORED_GROUPS:
         try:
             data = proxy_api("/proxies/" + quote(group, safe=""))
@@ -822,8 +869,26 @@ def monitor_once():
         if old and selected and old != selected:
             events.append({"time": now, "group": group, "from": old, "to": selected,
                            "reason": "健康检查触发 fallback"})
+        if group in ALERT_GROUPS and all_proxies:
+            state = alert_state.get(group, {})
+            if pool_is_all_down(all_proxies, group):
+                checks = int(state.get("down_checks", 0)) + 1
+                alerted = bool(state.get("alerted"))
+                if checks >= ALERT_FAILURE_THRESHOLD and not alerted:
+                    ok, detail = send_telegram_alert(
+                        f"家庭旁路告警\n{group} 候选池全部节点不可用\n时间：{now}")
+                    alerted = ok
+                    state["last_error"] = None if ok else detail
+                    state["alerted_at"] = now if ok else None
+                state.update({"down_checks": checks, "alerted": alerted, "checked_at": now})
+            else:
+                if state.get("alerted") and alert_config().get("notify_recovery"):
+                    send_telegram_alert(f"家庭旁路恢复\n{group} 候选池已有可用节点\n时间：{now}")
+                state = {"down_checks": 0, "alerted": False, "checked_at": now, "last_error": None}
+            alert_state[group] = state
     atomic_json(RUNTIME_STATE, current)
     atomic_json(RUNTIME_EVENTS, events[-100:])
+    atomic_json(ALERT_STATE, alert_state)
 
 
 def monitor_loop():
