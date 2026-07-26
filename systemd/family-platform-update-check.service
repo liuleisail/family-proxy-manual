@@ -1,0 +1,10 @@
+[Unit]
+Description=Check RouterOS channel and Z4Pro official system update state
+After=network-online.target family-proxy-ui.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/etc/family-proxy-ui/router.env
+ExecStart=/usr/bin/python3 /opt/family-proxy-ui/family-proxy-ui.py platform-update-check

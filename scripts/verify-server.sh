@@ -7,6 +7,7 @@ for executable in /usr/local/sbin/sync-routeros-cn-ipv4 /usr/local/sbin/refresh-
   [[ -x $executable ]] || { echo "$executable is missing" >&2; exit 1; }
 done
 systemctl is-enabled --quiet family-cn-ipv4-refresh.timer || { echo "CN refresh timer is disabled" >&2; exit 1; }
+systemctl is-enabled --quiet family-platform-update-check.timer || { echo "platform update check timer is disabled" >&2; exit 1; }
 if grep -qx 'MIHOMO_GEODATA_AUTO_UPDATE=true' /etc/family-proxy-ui/router.env; then
   systemctl is-enabled --quiet family-mihomo-geodata-refresh.timer || { echo "Mihomo geodata auto-update is configured but its timer is disabled" >&2; exit 1; }
 fi

@@ -46,7 +46,7 @@ python3 "$REPO_DIR/scripts/prepare-config.py" "$CONFIG"
 stamp=$(date +%Y%m%d-%H%M%S)
 backup=/var/backups/family-proxy/$stamp
 install -d -m 700 "$backup" /opt/family-proxy-ui /var/lib/family-proxy/docker
-for item in /opt/family-proxy-ui /etc/family-proxy-ui /etc/systemd/system/family-proxy-ui.service /etc/systemd/system/family-mihomo-sub-import.service /etc/systemd/system/family-proxy-gateway.service /etc/systemd/system/family-mihomo-tproxy-auto.service; do
+for item in /opt/family-proxy-ui /etc/family-proxy-ui /etc/systemd/system/family-proxy-ui.service /etc/systemd/system/family-mihomo-sub-import.service /etc/systemd/system/family-proxy-gateway.service /etc/systemd/system/family-mihomo-tproxy-auto.service /etc/systemd/system/family-platform-update-check.service /etc/systemd/system/family-platform-update-check.timer; do
   [[ -e $item ]] && cp -a "$item" "$backup/" || true
 done
 install -d -m 700 /opt/family-proxy-ui/rendered
@@ -72,6 +72,7 @@ for unit in "$REPO_DIR"/systemd/*.timer; do install -m 644 "$unit" /etc/systemd/
 systemctl daemon-reload
 systemctl enable family-proxy-ui family-mihomo-sub-import family-proxy-gateway family-mihomo-tproxy-auto
 systemctl enable --now family-cn-ipv4-refresh.timer
+systemctl enable --now family-platform-update-check.timer
 if grep -qx 'MIHOMO_GEODATA_AUTO_UPDATE=true' "$CONFIG" && docker inspect family-mihomo-fallback >/dev/null 2>&1; then
   systemctl enable --now family-mihomo-geodata-refresh.timer
 else

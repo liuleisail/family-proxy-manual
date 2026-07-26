@@ -13,6 +13,7 @@ import signal
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import yaml
@@ -30,6 +31,7 @@ GATEWAY_SECRET_PATH = Path("/etc/family-proxy-ui/gateway.secret")
 MANAGED_IPS_PATH = Path("/etc/family-proxy-ui/managed-ips")
 DEVICE_PREFS_PATH = Path("/etc/family-proxy-ui/device-preferences.json")
 ALERT_CONFIG_PATH = Path("/etc/family-proxy-ui/mihomo-alert.json")
+PLATFORM_UPDATE_STATUS_PATH = Path("/var/lib/family-proxy/platform-update-status.json")
 ALERT_SOURCES_PATH = Path("/tmp/zfsv3/nvme13/18053615760/data/docker/family-mihomo-sub-import/providers/sources.json")
 TPROXY_SYNC = "/usr/local/sbin/family-mihomo-tproxy-auto"
 MIHOMO_API = "http://127.0.0.1:9091"
@@ -507,6 +509,153 @@ def send_alert_test():
         raise RouterError("Telegram 未确认测试消息，请检查通知出口或 Bot 设置")
     audit("alert_settings", "test_sent", "telegram")
     return {"message": "测试消息已发送"}
+
+
+def atomic_json(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def read_platform_update_status():
+    try:
+        payload = json.loads(PLATFORM_UPDATE_STATUS_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"checked_at": 0, "routeros": {"state": "unknown"}, "z4pro": {"state": "unknown"}}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RouterError("系统更新状态读取失败") from exc
+    return payload if isinstance(payload, dict) else {"checked_at": 0}
+
+
+def parse_zos_timestamp(value):
+    try:
+        return int(time.mktime(time.strptime(value, "%Y-%m-%d %H:%M:%S")))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def zos_upgrade_status():
+    current_version = "未知"
+    try:
+        for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+            if line.startswith("ZOS_VERSION="):
+                current_version = line.split("=", 1)[1].strip().strip('"')
+                break
+    except OSError:
+        pass
+    log_dir = Path("/zspace/applications/logs/upgrader")
+    logs = sorted(log_dir.glob("upgradeInfo*.log"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in logs[:4]:
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in reversed(lines[-1600:]):
+            marker = "response="
+            if marker not in line:
+                continue
+            try:
+                response = json.loads(line.split(marker, 1)[1])
+                entries = response.get("data", {}).get("list", [])
+            except (ValueError, AttributeError):
+                continue
+            if not isinstance(entries, list):
+                continue
+            updates = [item for item in entries if isinstance(item, dict)
+                       and (str(item.get("upgrade_level", "NO")).upper() != "NO" or item.get("app_version"))]
+            checked_at = parse_zos_timestamp(line[:19]) or int(path.stat().st_mtime)
+            if updates:
+                system = next((item for item in updates if item.get("app_id") == "Z043_SYSTEM"), updates[0])
+                return {
+                    "state": "update_available", "available": True,
+                    "current_version": current_version,
+                    "latest_version": str(system.get("app_version") or "官方更新"),
+                    "detail": str(system.get("version_content") or "极空间官方检测到可用系统或服务更新"),
+                    "checked_at": checked_at,
+                }
+            return {
+                "state": "current", "available": False, "current_version": current_version,
+                "latest_version": current_version, "detail": "极空间官方升级服务最近一次检查未发现可用更新",
+                "checked_at": checked_at,
+            }
+    return {
+        "state": "unknown", "available": False, "current_version": current_version,
+        "latest_version": "等待极空间官方检查", "detail": "尚未读取到有效的极空间官方升级检查结果", "checked_at": 0,
+    }
+
+
+def routeros_upgrade_status():
+    try:
+        with RouterOS() as api:
+            records = api.print("/system/package/update")
+        record = records[0] if records else {}
+        current = str(record.get("installed-version") or record.get("installed-version", "未知"))
+        latest = str(record.get("latest-version") or current)
+        state = "update_available" if latest and current and latest != current else "current"
+        return {
+            "state": state, "available": state == "update_available", "current_version": current,
+            "latest_version": latest, "channel": str(record.get("channel") or "未知"),
+            "detail": str(record.get("status") or ("有可用更新" if state == "update_available" else "当前已是最新")),
+            "checked_at": int(time.time()),
+        }
+    except (RouterError, OSError, ValueError) as exc:
+        return {
+            "state": "check_failed", "available": False, "current_version": "未知",
+            "latest_version": "未知", "channel": "未知", "detail": f"RouterOS 官方通道检查失败：{exc}",
+            "checked_at": int(time.time()),
+        }
+
+
+def send_platform_update_alert(updates):
+    try:
+        data = json.loads(ALERT_CONFIG_PATH.read_text(encoding="utf-8"))
+        token, chat_id = str(data.get("token", "")).strip(), str(data.get("chat_id", "")).strip()
+    except (OSError, json.JSONDecodeError):
+        return False, "Telegram 告警未配置"
+    if not data.get("enabled") or not token or not chat_id:
+        return False, "Telegram 告警未启用"
+    lines = ["家庭旁路发现系统更新，请在官方界面确认后手动升级："]
+    for item in updates:
+        channel = f"（{item['channel']}）" if item.get("channel") else ""
+        lines.append(f"• {item['name']}{channel}：{item['current_version']} -> {item['latest_version']}")
+    try:
+        response = subprocess.run([
+            "curl", "-sS", "--max-time", "20", "--proxy", "http://127.0.0.1:7890",
+            "--data-urlencode", "chat_id=" + chat_id,
+            "--data-urlencode", "text=" + "\n".join(lines),
+            "https://api.telegram.org/bot" + token + "/sendMessage",
+        ], capture_output=True, text=True, timeout=25)
+        result = json.loads(response.stdout or "{}")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False, "Telegram 推送失败"
+    return (True, "已发送 Telegram 更新提醒") if response.returncode == 0 and result.get("ok") else (False, "Telegram 未确认更新提醒")
+
+
+def check_platform_updates():
+    previous = read_platform_update_status()
+    routeros, z4pro = routeros_upgrade_status(), zos_upgrade_status()
+    updates = []
+    if routeros.get("available"):
+        updates.append({"name": "RouterOS", **routeros})
+    if z4pro.get("available"):
+        updates.append({"name": "Z4Pro ZOS", **z4pro})
+    fingerprint = json.dumps([(item["name"], item["current_version"], item["latest_version"]) for item in updates], ensure_ascii=False)
+    notification = {"state": "not_needed", "message": "当前没有可推送的系统更新"}
+    notified_fingerprint = previous.get("notified_fingerprint", "")
+    if updates and fingerprint != notified_fingerprint:
+        sent, message = send_platform_update_alert(updates)
+        notification = {"state": "sent" if sent else "pending", "message": message}
+        if sent:
+            notified_fingerprint = fingerprint
+    result = {
+        "checked_at": int(time.time()), "routeros": routeros, "z4pro": z4pro,
+        "notification": notification, "notified_fingerprint": notified_fingerprint,
+    }
+    atomic_json(PLATFORM_UPDATE_STATUS_PATH, result)
+    audit("platform_update_check", "checked", notification["state"])
+    return result
 
 
 def rules_version(rules):
@@ -2239,6 +2388,24 @@ MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
     'Promise.all([loadMihomo(),loadMosdns()]);', _ALERT_SCRIPT + 'Promise.all([loadMihomo(),loadMosdns(),loadAlerts()]);', 1,
 )
 
+_PLATFORM_UPDATE_CARD = r'''<section class="platform-update-card"><div class="platform-update-head"><div><h2>设备系统更新</h2><p>仅检查官方稳定通道与极空间官方升级服务。发现新版本时通过已启用的 Telegram 告警推送一次；不会自动升级或重启设备。</p></div><button id="platform-check">检查设备更新</button></div><div class="platform-update-grid"><article class="platform-update-item"><div><span>RouterOS</span><b id="routeros-update-state">读取中</b></div><dl><div><dt>当前版本</dt><dd id="routeros-update-current">--</dd></div><div><dt>可用版本</dt><dd id="routeros-update-latest">--</dd></div><div><dt>通道</dt><dd id="routeros-update-channel">--</dd></div><div><dt>检查时间</dt><dd id="routeros-update-time">--</dd></div></dl><p id="routeros-update-detail">正在读取 RouterOS 官方通道。</p></article><article class="platform-update-item"><div><span>Z4Pro ZOS</span><b id="z4pro-update-state">读取中</b></div><dl><div><dt>当前版本</dt><dd id="z4pro-update-current">--</dd></div><div><dt>可用版本</dt><dd id="z4pro-update-latest">--</dd></div><div><dt>检查时间</dt><dd id="z4pro-update-time">--</dd></div><div><dt>通知</dt><dd id="platform-update-notice">--</dd></div></dl><p id="z4pro-update-detail">正在读取极空间官方升级服务。</p></article></div><div class="platform-update-foot" id="platform-update-foot">每日自动检查一次；手动检查只读取官方检查结果与 RouterOS 官方通道。</div></section>'''
+
+_PLATFORM_UPDATE_SCRIPT = r'''function platformTime(value){let n=Number(value||0);if(!n)return '尚无记录';if(n<100000000000)n*=1000;let d=new Date(n);return isNaN(d.getTime())?'尚无记录':d.toLocaleString('zh-CN',{hour12:false})}function renderPlatformItem(prefix,item){item=item||{};let state={current:'当前已是最新',update_available:'发现可用更新',check_failed:'检查失败',unknown:'等待官方检查'}[item.state]||'等待检查',tone=item.state==='update_available'?'warn':item.state==='check_failed'?'bad':'';$('#'+prefix+'-update-state').textContent=state;$('#'+prefix+'-update-state').className=tone;$('#'+prefix+'-update-current').textContent=item.current_version||'--';$('#'+prefix+'-update-latest').textContent=item.latest_version||'--';if(prefix==='routeros')$('#routeros-update-channel').textContent=item.channel||'--';$('#'+prefix+'-update-time').textContent=platformTime(item.checked_at);$('#'+prefix+'-update-detail').textContent=item.detail||'尚无可用信息'}function renderPlatformUpdates(data){renderPlatformItem('routeros',data.routeros);renderPlatformItem('z4pro',data.z4pro);let note=data.notification||{},notice={sent:'已推送 Telegram',pending:'等待 Telegram 推送',not_needed:'无需推送'}[note.state]||'尚未推送';$('#platform-update-notice').textContent=notice;$('#platform-update-foot').textContent=(note.message||'每日自动检查一次；手动检查只读取官方检查结果与 RouterOS 官方通道。')+'。自动检查每天 09:15 左右运行，不会自动升级。'}async function loadPlatformUpdates(){try{renderPlatformUpdates(await api('/api/platform/updates'))}catch(e){$('#platform-update-foot').textContent='设备系统更新读取失败：'+e.message}}async function checkPlatformUpdates(){let button=$('#platform-check'),original=button.textContent;button.disabled=true;button.textContent='正在检查';$('#platform-update-foot').textContent='正在读取 RouterOS 官方通道与极空间官方升级结果，请稍候…';try{await api('/api/platform/updates/check',{method:'POST'});for(let n=0;n<30;n++){await new Promise(r=>setTimeout(r,1000));let d=await api('/api/platform/updates');if(Number(d.checked_at||0)*1000>Date.now()-90000){renderPlatformUpdates(d);break}}}catch(e){$('#platform-update-foot').textContent='检查失败：'+e.message}finally{button.disabled=false;button.textContent=original}}$('#platform-check').onclick=checkPlatformUpdates;'''
+
+MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
+    _ALERT_CARD,
+    _PLATFORM_UPDATE_CARD + _ALERT_CARD,
+    1,
+).replace(
+    '</style>',
+    '.platform-update-card{margin-top:14px;border:1px solid #38383a;border-radius:8px;background:#1c1c1e;overflow:hidden}.platform-update-head{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:17px;border-bottom:1px solid #38383a}.platform-update-head h2{margin:0;font-size:16px}.platform-update-head p{margin:6px 0 0;max-width:670px;color:#8e8e93;font-size:12px;line-height:1.55}.platform-update-grid{display:grid;grid-template-columns:1fr 1fr}.platform-update-item{min-width:0;padding:17px;border-right:1px solid #38383a}.platform-update-item:last-child{border-right:0}.platform-update-item>div:first-child{display:flex;align-items:baseline;justify-content:space-between;gap:12px}.platform-update-item>div span{font-size:14px;font-weight:650}.platform-update-item>div b{color:#30d158;font-size:12px}.platform-update-item>div b.warn{color:#ffd60a}.platform-update-item>div b.bad{color:#ff6961}.platform-update-item dl{display:grid;grid-template-columns:1fr 1fr;gap:14px 18px;margin:17px 0 14px}.platform-update-item dl div{min-width:0}.platform-update-item dt{color:#8e8e93;font-size:11px}.platform-update-item dd{margin:5px 0 0;color:#f5f5f7;font-size:13px;font-weight:600;overflow-wrap:anywhere}.platform-update-item p{min-height:38px;margin:0;color:#8e8e93;font-size:12px;line-height:1.55}.platform-update-foot{padding:11px 17px;border-top:1px solid #38383a;color:#8e8e93;font-size:12px;line-height:1.55}@media(max-width:760px){.platform-update-head{align-items:flex-start;flex-direction:column}.platform-update-grid{grid-template-columns:1fr}.platform-update-item{border-right:0;border-bottom:1px solid #38383a}.platform-update-item:last-child{border-bottom:0}.platform-update-head button{width:100%}}</style>',
+    1,
+).replace(
+    'Promise.all([loadMihomo(),loadMosdns(),loadAlerts()]);',
+    _PLATFORM_UPDATE_SCRIPT + 'Promise.all([loadMihomo(),loadMosdns(),loadAlerts(),loadPlatformUpdates()]);',
+    1,
+)
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
@@ -2411,6 +2578,12 @@ class Handler(BaseHTTPRequestHandler):
             except (RouterError, OSError, subprocess.SubprocessError) as exc:
                 self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
             return
+        if path == "/api/platform/updates":
+            try:
+                self.reply(HTTPStatus.OK, read_platform_update_status())
+            except RouterError as exc:
+                self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+            return
         if path == "/api/alerts":
             try:
                 self.reply(HTTPStatus.OK, load_alert_settings())
@@ -2462,6 +2635,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(HTTPStatus.OK, start_mihomo_upgrade("family-mihomo-upgrade-check.service"))
             elif path == "/api/mihomo/upgrade/apply":
                 self.reply(HTTPStatus.OK, start_mihomo_upgrade("family-mihomo-upgrade.service"))
+            elif path == "/api/platform/updates/check":
+                result = subprocess.run(
+                    ["systemctl", "start", "--no-block", "family-platform-update-check.service"],
+                    text=True, capture_output=True, timeout=8,
+                )
+                if result.returncode:
+                    raise RouterError("设备系统更新检查任务无法启动")
+                self.reply(HTTPStatus.OK, {"message": "设备系统更新检查已启动"})
             elif path == "/api/alerts":
                 self.reply(HTTPStatus.OK, save_alert_settings(body))
             elif path == "/api/alerts/test":
@@ -2475,6 +2656,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 2 and sys.argv[1] == "platform-update-check":
+        print(json.dumps(check_platform_updates(), ensure_ascii=False))
+        raise SystemExit(0)
     with CAPTURE_LOCK:
         cleanup_captures()
     threading.Thread(target=capture_cleanup_loop, daemon=True).start()

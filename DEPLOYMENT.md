@@ -145,6 +145,8 @@ sudo ./scripts/upgrade-server.sh
 
 Mihomo 镜像维护通过管理页“维护”按需执行，不属于上述控制平面升级。检查仓库只读；实际升级会备份当前配置并保留旧镜像标签，且只允许重建 `family-mihomo-fallback`。若配置校验、控制接口或 `Proxy-Auto` 验证失败，脚本会自动回退旧镜像。不要为该功能设置自动计时器。
 
+安装器还会启用 `family-platform-update-check.timer`：每天约 09:15 查询 RouterOS 当前官方通道，并读取 Z4Pro 自带极空间升级服务的最新官方检查结果。该任务只写入维护页状态；发现新版本才经现有 Telegram 告警推送一次，不会升级 RouterOS、ZOS、`apt` 软件包、Docker 镜像或重启设备。
+
 极空间把持久化数据挂载在 `/tmp/zfsv3/...` 时，`family-mihomo-sub-import` 必须保持 `PrivateTmp=false`，否则 systemd 的私有 `/tmp` 会遮住机场文件并让候选池显示为 `0/5`。安装包已内置该设置；`verify-server.sh` 也会比较磁盘候选池与 API 返回数量，发现路径不可见时立即报错。
 
 失败时停止相关服务，从本次时间戳备份恢复 `/opt/family-proxy-ui/`、服务单元和本地配置，再执行：
