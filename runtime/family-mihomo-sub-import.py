@@ -812,6 +812,7 @@ def alert_config():
         "token": str(data.get("token", "")).strip(),
         "chat_id": str(data.get("chat_id", "")).strip(),
         "notify_recovery": bool(data.get("notify_recovery", True)),
+        "source_slots": [str(item) for item in data.get("source_slots", []) if isinstance(item, str)],
     }
 
 
@@ -832,9 +833,9 @@ def send_telegram_alert(message):
         return False, f"Telegram 通知发送失败：{type(exc).__name__}"
 
 
-def pool_is_all_down(proxies, group):
+def pool_is_all_down(proxies, group, prefix):
     data = proxies.get(group, {})
-    names = data.get("all") or []
+    names = [name for name in data.get("all", []) if name.startswith(prefix)]
     if not names:
         return False
     leaves = [proxies.get(name, {}) for name in names]
@@ -870,22 +871,29 @@ def monitor_once():
             events.append({"time": now, "group": group, "from": old, "to": selected,
                            "reason": "健康检查触发 fallback"})
         if group in ALERT_GROUPS and all_proxies:
-            state = alert_state.get(group, {})
-            if pool_is_all_down(all_proxies, group):
-                checks = int(state.get("down_checks", 0)) + 1
-                alerted = bool(state.get("alerted"))
-                if checks >= ALERT_FAILURE_THRESHOLD and not alerted:
-                    ok, detail = send_telegram_alert(
-                        f"家庭旁路告警\n{group} 候选池全部节点不可用\n时间：{now}")
-                    alerted = ok
-                    state["last_error"] = None if ok else detail
-                    state["alerted_at"] = now if ok else None
-                state.update({"down_checks": checks, "alerted": alerted, "checked_at": now})
-            else:
-                if state.get("alerted") and alert_config().get("notify_recovery"):
-                    send_telegram_alert(f"家庭旁路恢复\n{group} 候选池已有可用节点\n时间：{now}")
-                state = {"down_checks": 0, "alerted": False, "checked_at": now, "last_error": None}
-            alert_state[group] = state
+            config = alert_config()
+            for slot in config["source_slots"]:
+                source = source_map().get(slot)
+                if not source:
+                    continue
+                key = f"{group}:{slot}"
+                state = alert_state.get(key, {})
+                title = f"{group} · {source['label']}"
+                if pool_is_all_down(all_proxies, group, source["prefix"]):
+                    checks = int(state.get("down_checks", 0)) + 1
+                    alerted = bool(state.get("alerted"))
+                    if checks >= ALERT_FAILURE_THRESHOLD and not alerted:
+                        ok, detail = send_telegram_alert(
+                            f"家庭旁路告警\n{title} 的候选节点全部不可用\n时间：{now}")
+                        alerted = ok
+                        state["last_error"] = None if ok else detail
+                        state["alerted_at"] = now if ok else None
+                    state.update({"down_checks": checks, "alerted": alerted, "checked_at": now})
+                else:
+                    if state.get("alerted") and config.get("notify_recovery"):
+                        send_telegram_alert(f"家庭旁路恢复\n{title} 已恢复可用节点\n时间：{now}")
+                    state = {"down_checks": 0, "alerted": False, "checked_at": now, "last_error": None}
+                alert_state[key] = state
     atomic_json(RUNTIME_STATE, current)
     atomic_json(RUNTIME_EVENTS, events[-100:])
     atomic_json(ALERT_STATE, alert_state)

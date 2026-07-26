@@ -30,6 +30,7 @@ GATEWAY_SECRET_PATH = Path("/etc/family-proxy-ui/gateway.secret")
 MANAGED_IPS_PATH = Path("/etc/family-proxy-ui/managed-ips")
 DEVICE_PREFS_PATH = Path("/etc/family-proxy-ui/device-preferences.json")
 ALERT_CONFIG_PATH = Path("/etc/family-proxy-ui/mihomo-alert.json")
+ALERT_SOURCES_PATH = Path("/tmp/zfsv3/nvme13/18053615760/data/docker/family-mihomo-sub-import/providers/sources.json")
 TPROXY_SYNC = "/usr/local/sbin/family-mihomo-tproxy-auto"
 MIHOMO_API = "http://127.0.0.1:9091"
 MIHOMO_CONFIG_PATH = Path("__FAMILY_DOCKER_ROOT__/family-mihomo-fallback/config.yaml")
@@ -418,12 +419,25 @@ def load_alert_settings():
         data = {}
     except (OSError, json.JSONDecodeError) as exc:
         raise RouterError("Telegram 告警设置读取失败") from exc
+    available = available_alert_sources()
+    valid_slots = {item["slot"] for item in available}
     return {
         "enabled": bool(data.get("enabled")),
         "configured": bool(str(data.get("token", "")).strip() and str(data.get("chat_id", "")).strip()),
         "chat_id_masked": ("*" * max(0, len(str(data.get("chat_id", ""))) - 4) + str(data.get("chat_id", ""))[-4:]) if data.get("chat_id") else "",
         "notify_recovery": bool(data.get("notify_recovery", True)),
+        "source_slots": [slot for slot in data.get("source_slots", []) if slot in valid_slots],
+        "available_sources": available,
     }
+
+
+def available_alert_sources():
+    try:
+        data = json.loads(ALERT_SOURCES_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        data = [{"slot": "primary", "label": "主力机场"}]
+    return [{"slot": str(item["slot"]), "label": str(item.get("label", item["slot"]))}
+            for item in data if isinstance(item, dict) and item.get("slot")]
 
 
 def save_alert_settings(payload):
@@ -436,10 +450,15 @@ def save_alert_settings(payload):
     token = str(payload.get("token", "")).strip() or str(existing.get("token", "")).strip()
     chat_id = str(payload.get("chat_id", "")).strip() or str(existing.get("chat_id", "")).strip()
     enabled = bool(payload.get("enabled"))
+    source_slots = [str(item) for item in payload.get("source_slots", []) if isinstance(item, str)]
+    valid_slots = {item["slot"] for item in available_alert_sources()}
+    source_slots = [slot for slot in source_slots if slot in valid_slots]
     if enabled and (not token or not chat_id):
         raise RouterError("启用告警需要同时填写 Bot Token 和 Chat ID")
+    if enabled and not source_slots:
+        raise RouterError("启用告警至少选择一个机场来源")
     data = {"enabled": enabled, "token": token, "chat_id": chat_id,
-            "notify_recovery": bool(payload.get("notify_recovery", True))}
+            "notify_recovery": bool(payload.get("notify_recovery", True)), "source_slots": source_slots}
     ALERT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     temporary = ALERT_CONFIG_PATH.with_suffix(".tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -2189,14 +2208,14 @@ MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
     '>整合镜像源</span><span id="mosdns-latest"',
 )
 
-_ALERT_CARD = r'''<section class="card alert-card"><div class="card-head"><div><h2>Telegram 告警</h2><p>仅当某业务候选池全部节点连续两轮不可用时通知；恢复后可选发送恢复消息。</p></div><span id="alert-badge" class="badge">读取中</span></div><div class="alert-form"><label><span>Bot Token</span><input id="alert-token" type="password" autocomplete="new-password" placeholder="留空则保持已保存的 Token"></label><label><span>Chat ID</span><input id="alert-chat" autocomplete="off" placeholder="填写接收通知的 Chat ID"></label><label class="toggle"><input id="alert-enabled" type="checkbox"><span>启用候选池故障告警</span></label><label class="toggle"><input id="alert-recovery" type="checkbox" checked><span>节点恢复时发送恢复通知</span></label></div><div id="alert-detail" class="detail">正在读取告警设置。</div><div class="actions"><button id="alert-save" class="primary">保存告警设置</button><button id="alert-test">发送测试消息</button></div></section>'''
+_ALERT_CARD = r'''<section class="card alert-card"><div class="card-head"><div><h2>Telegram 告警</h2><p>所选机场来源在某业务池的候选节点全部连续两轮不可用时通知；恢复后可选发送恢复消息。</p></div><span id="alert-badge" class="badge">读取中</span></div><div class="alert-form"><label><span>Bot Token</span><input id="alert-token" type="password" autocomplete="new-password" placeholder="留空则保持已保存的 Token"></label><label><span>Chat ID</span><input id="alert-chat" autocomplete="off" placeholder="填写接收通知的 Chat ID"></label><div class="source-select"><span>告警机场来源</span><div id="alert-sources" class="source-options"></div></div><label class="toggle"><input id="alert-enabled" type="checkbox"><span>启用候选池故障告警</span></label><label class="toggle"><input id="alert-recovery" type="checkbox" checked><span>节点恢复时发送恢复通知</span></label></div><div id="alert-detail" class="detail">正在读取告警设置。</div><div class="actions"><button id="alert-save" class="primary">保存告警设置</button><button id="alert-test">发送测试消息</button></div></section>'''
 
-_ALERT_SCRIPT = r'''function renderAlerts(d){let enabled=Boolean(d.enabled),configured=Boolean(d.configured);$('#alert-badge').textContent=enabled&&configured?'已启用':configured?'已配置':'未配置';$('#alert-badge').className='badge '+(enabled&&configured?'':'warn');$('#alert-enabled').checked=enabled;$('#alert-recovery').checked=d.notify_recovery!==false;$('#alert-chat').placeholder=d.chat_id_masked?`已保存：${d.chat_id_masked}；留空保持不变`:'填写接收通知的 Chat ID';$('#alert-detail').textContent=enabled&&configured?'候选池全体不可用将推送；同一故障只通知一次。':configured?'凭据已保存，启用后开始监控。':'请填写 Bot Token 与 Chat ID 后保存。'}async function loadAlerts(){try{renderAlerts(await api('/api/alerts'))}catch(e){$('#alert-badge').textContent='读取失败';$('#alert-badge').className='badge bad';$('#alert-detail').textContent=e.message}}$('#alert-save').onclick=async()=>{try{let d=await api('/api/alerts',{method:'POST',body:JSON.stringify({enabled:$('#alert-enabled').checked,notify_recovery:$('#alert-recovery').checked,token:$('#alert-token').value.trim(),chat_id:$('#alert-chat').value.trim()})});$('#alert-token').value='';$('#alert-chat').value='';renderAlerts(d)}catch(e){$('#alert-detail').textContent=e.message}};$('#alert-test').onclick=async()=>{try{let d=await api('/api/alerts/test',{method:'POST'});$('#alert-detail').textContent=d.message}catch(e){$('#alert-detail').textContent=e.message}};'''
+_ALERT_SCRIPT = r'''function renderAlerts(d){let enabled=Boolean(d.enabled),configured=Boolean(d.configured),selected=new Set(d.source_slots||[]);$('#alert-badge').textContent=enabled&&configured?'已启用':configured?'已配置':'未配置';$('#alert-badge').className='badge '+(enabled&&configured?'':'warn');$('#alert-enabled').checked=enabled;$('#alert-recovery').checked=d.notify_recovery!==false;$('#alert-chat').placeholder=d.chat_id_masked?`已保存：${d.chat_id_masked}；留空保持不变`:'填写接收通知的 Chat ID';$('#alert-sources').innerHTML=(d.available_sources||[]).map(s=>`<label class="source-option"><input type="checkbox" value="${s.slot}" ${selected.has(s.slot)?'checked':''}><span>${s.label}</span></label>`).join('')||'<span class="muted">尚无可选机场</span>';$('#alert-detail').textContent=enabled&&configured?'所选机场来源的候选节点全部不可用时推送；同一故障只通知一次。':configured?'凭据已保存，选择机场来源并启用后开始监控。':'请填写 Bot Token 与 Chat ID 后保存。'}async function loadAlerts(){try{renderAlerts(await api('/api/alerts'))}catch(e){$('#alert-badge').textContent='读取失败';$('#alert-badge').className='badge bad';$('#alert-detail').textContent=e.message}}$('#alert-save').onclick=async()=>{try{let sources=[...document.querySelectorAll('#alert-sources input:checked')].map(x=>x.value),d=await api('/api/alerts',{method:'POST',body:JSON.stringify({enabled:$('#alert-enabled').checked,notify_recovery:$('#alert-recovery').checked,source_slots:sources,token:$('#alert-token').value.trim(),chat_id:$('#alert-chat').value.trim()})});$('#alert-token').value='';$('#alert-chat').value='';renderAlerts(d)}catch(e){$('#alert-detail').textContent=e.message}};$('#alert-test').onclick=async()=>{try{let d=await api('/api/alerts/test',{method:'POST'});$('#alert-detail').textContent=d.message}catch(e){$('#alert-detail').textContent=e.message}};'''
 
 MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
     '</section><p class="notice">', '</section>' + _ALERT_CARD + '<p class="notice">', 1,
 ).replace(
-    '</style>', '.alert-card{margin-top:14px}.alert-form{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:14px;border-bottom:1px solid #38383a}.alert-form label{display:grid;gap:6px;color:#aeaeb2;font-size:12px}.alert-form input[type="password"],.alert-form input:not([type]){height:36px;padding:0 10px;border:1px solid #48484a;border-radius:7px;background:#2c2c2e;color:#f5f5f7;font:14px inherit}.alert-form .toggle{display:flex;align-items:center;gap:8px;font-size:13px}.alert-form .toggle input{width:16px;height:16px;accent-color:#0a84ff}@media(max-width:760px){.alert-form{grid-template-columns:1fr}}</style>', 1,
+    '</style>', '.alert-card{margin-top:14px}.alert-form{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:14px;border-bottom:1px solid #38383a}.alert-form label,.source-select{display:grid;gap:6px;color:#aeaeb2;font-size:12px}.alert-form input[type="password"],.alert-form input:not([type]){height:36px;padding:0 10px;border:1px solid #48484a;border-radius:7px;background:#2c2c2e;color:#f5f5f7;font:14px inherit}.source-options{display:flex;flex-wrap:wrap;gap:7px}.source-options .source-option{display:flex;align-items:center;gap:6px;padding:7px 8px;border:1px solid #48484a;border-radius:6px;background:#2c2c2e;font-size:13px}.source-option input{width:15px;height:15px;accent-color:#0a84ff}.alert-form .toggle{display:flex;align-items:center;gap:8px;font-size:13px}.alert-form .toggle input{width:16px;height:16px;accent-color:#0a84ff}@media(max-width:760px){.alert-form{grid-template-columns:1fr}}</style>', 1,
 ).replace(
     'Promise.all([loadMihomo(),loadMosdns()]);', _ALERT_SCRIPT + 'Promise.all([loadMihomo(),loadMosdns(),loadAlerts()]);', 1,
 )
