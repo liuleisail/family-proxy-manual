@@ -1545,6 +1545,58 @@ def connection_packets(connections, ip):
     return active, packets
 
 
+def egress_policy_contract(api, mangle, nat, ipv6_filters):
+    """Read the shared policy contract once; this function never mutates RouterOS."""
+    routes = api.print("/ip/route")
+    return {
+        "mark_rule": any(item.get("comment") == SHARED_TAG + " mark connection" for item in mangle),
+        "route_rule": any(item.get("comment") == SHARED_TAG + " route to z4pro" for item in mangle),
+        "shared_route": any(item.get("comment") == SHARED_TAG + " route" for item in routes),
+        "dns_redirect": all(any(item.get("comment") == SHARED_TAG + f" DNS {protocol}" for item in nat)
+                            for protocol in ("TCP", "UDP")),
+        "ipv6_filters": ipv6_filters,
+    }
+
+
+def device_egress(ip, mac, is_managed, connections, contract):
+    active, packets = connection_packets(connections, ip)
+    marked = 0
+    for connection in connections:
+        source = connection.get("src-address", "").rsplit(":", 1)[0]
+        reply_destination = connection.get("reply-dst-address", "").rsplit(":", 1)[0]
+        if (source == ip or reply_destination == ip) and connection.get("connection-mark") == SHARED_CONN_MARK:
+            marked += 1
+    if not is_managed:
+        return {
+            "mode": "direct",
+            "headline": "未接管，保持 RB5009 直连",
+            "active_connections": active,
+            "marked_connections": 0,
+            "packets": packets,
+            "checks": {},
+        }
+    ipv6_guard = any(
+        item.get("comment") == managed_tag(ip) + " IPv6 bypass guard"
+        and item.get("src-mac-address", "").upper() == mac.upper()
+        for item in contract["ipv6_filters"]
+    )
+    checks = {
+        "membership": True,
+        "mark_rule": contract["mark_rule"],
+        "route_rule": contract["route_rule"] and contract["shared_route"],
+        "dns_redirect": contract["dns_redirect"],
+        "ipv6_guard": ipv6_guard,
+    }
+    return {
+        "mode": "managed" if all(checks.values()) else "degraded",
+        "headline": "经 Z4Pro 分流" if all(checks.values()) else "旁路规则需核对",
+        "active_connections": active,
+        "marked_connections": marked,
+        "packets": packets,
+        "checks": checks,
+    }
+
+
 def configuration_drift(api, leases, router_managed, file_managed):
     issues = []
     lease_by_ip = {item.get("address"): item for item in leases}
@@ -1583,6 +1635,9 @@ def list_devices():
         leases = api.print("/ip/dhcp-server/lease")
         mangle = api.print("/ip/firewall/mangle")
         connections = api.print("/ip/firewall/connection")
+        nat_rules = api.print("/ip/firewall/nat")
+        ipv6_filters = api.print("/ipv6/firewall/filter")
+        egress_contract = egress_policy_contract(api, mangle, nat_rules, ipv6_filters)
         managed = address_list_managed(api)
         legacy_managed = set()
         for rule in mangle:
@@ -1619,10 +1674,11 @@ def list_devices():
                 "packets": packets,
                 "connections": active_connections,
                 "effective": is_managed and active_connections > 0,
+                "egress": device_egress(ip, mac, is_managed, connections, egress_contract),
             })
         summary = router_summary(api)
         drift = configuration_drift(api, leases, address_list_managed(api), file_managed)
-        upnp = [item for item in api.print("/ip/firewall/nat")
+        upnp = [item for item in nat_rules
                 if item.get("dynamic") == "true" and item.get("comment", "").startswith("upnp ")]
         upnp_settings = api.print("/ip/upnp")
         upnp_enabled = bool(upnp_settings and upnp_settings[0].get("enabled") == "true")
@@ -2417,6 +2473,41 @@ PAGE = PAGE.replace(
 PAGE = PAGE.replace(
     "!document.querySelector('#captureDialog').open)load()",
     "!document.querySelector('#captureDialog').open&&!document.querySelector('#wireguardDialog').open)load()",
+    1,
+)
+
+# Device egress is deliberately a read-only explanation of the current shared
+# policy. It makes the non-obvious Z4Pro return path inspectable without
+# adding a second routing decision or changing any RouterOS rule.
+PAGE = PAGE.replace(
+    '</main><dialog id="wireguardDialog"',
+    '''</main><dialog id="egressDialog" class="egress-dialog"><div class="dialog-body"><h2>设备出站链路</h2><p id="egressSubtitle">正在读取设备状态</p><div id="egressBody"></div></div><div class="dialog-actions"><button type="button" class="dialog-cancel" onclick="closeEgress()">关闭</button></div></dialog><dialog id="wireguardDialog"''',
+    1,
+)
+PAGE = PAGE.replace(
+    '</style></head>',
+    '''.egress-dialog{width:min(760px,calc(100% - 28px))}.egress-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;margin-top:17px;border:1px solid #38383a;border-radius:7px;background:#38383a;overflow:hidden}.egress-summary>div{min-width:0;padding:12px;background:#242426}.egress-summary span,.egress-checks span{display:block;color:#8e8e93;font-size:11px}.egress-summary b{display:block;margin-top:5px;font-size:13px;line-height:1.35;overflow-wrap:anywhere}.egress-summary b.good{color:#30d158}.egress-summary b.bad{color:#ff6961}.egress-observation{margin-top:12px;padding:10px 12px;border-radius:7px;background:#2c2c2e;color:#aeaeb2;font-size:12px;line-height:1.55}.egress-heading{margin:20px 0 8px;color:#8e8e93;font-size:12px;font-weight:600}.egress-steps,.egress-checks{border:1px solid #38383a;border-radius:7px;overflow:hidden}.egress-step{display:grid;grid-template-columns:27px minmax(0,1fr);gap:10px;padding:12px;border-top:1px solid #38383a}.egress-step:first-child,.egress-check:first-child{border-top:0}.egress-step i{display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:#173527;color:#30d158;font-size:11px;font-style:normal;font-weight:700}.egress-step b{display:block;font-size:13px}.egress-step span{display:block;margin-top:4px;color:#8e8e93;font-size:12px;line-height:1.5;overflow-wrap:anywhere}.egress-check{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 12px;border-top:1px solid #38383a}.egress-check b{font-size:12px}.egress-check em{border-radius:999px;padding:4px 8px;background:#173527;color:#30d158;font-size:12px;font-style:normal;font-weight:650}.egress-check em.bad{background:#35201f;color:#ff6961}@media(max-width:520px){.egress-summary{grid-template-columns:1fr}.egress-summary>div{border-top:1px solid #38383a}.egress-summary>div:first-child{border-top:0}}</style></head>''',
+    1,
+)
+PAGE = PAGE.replace(
+    'function deviceActions(d){',
+    r'''let egressIp='';
+function egressCheck(label,ok){return `<div class="egress-check"><b>${esc(label)}</b><em class="${ok?'':'bad'}">${ok?'已校验':'需要检查'}</em></div>`}
+function egressStep(number,title,detail){return `<div class="egress-step"><i>${number}</i><div><b>${esc(title)}</b><span>${esc(detail)}</span></div></div>`}
+function openEgress(ip){let device=devices.find(item=>item.ip===ip),egress=device?.egress;if(!device||!egress)return;egressIp=ip;let managed=device.managed,checks=egress.checks||{},good=egress.mode==='managed',summary=managed?`当前经 Z4Pro 分流${good?'，规则校验完整':'，但有规则需要核对'}`:'未接管，保持 RB5009 直连';document.querySelector('#egressSubtitle').textContent=`${device.name} · ${device.ip}。${summary}`;let details=managed?`${egressStep('1','局域网访问','设备 → RB5009。局域网地址不进入旁路，不经 Z4Pro。')}${egressStep('2','DNS 解析','设备 → RB5009 DNS 重定向 → Z4Pro MosDNS；国内与国外上游按现有规则分流。')}${egressStep('3','国内 IPv4','设备 → RB5009 → Z4Pro → RB5009 → WAN。Z4Pro 识别中国 IP 后直连返回路由器，不进入 Mihomo。')}${egressStep('4','国外 TCP/UDP','设备 → RB5009 → Z4Pro TPROXY → Mihomo 业务策略与候选池 → 当前节点。')}${egressStep('5','IPv6','RouterOS 拒绝纳管设备的外网 IPv6，客户端回退至受控 IPv4 路径。')}`:egressStep('1','当前状态','该设备未加入旁路，所有访问继续由 RB5009 按原有网络配置直接处理。');let verification=managed?`${egressCheck('设备已在 RouterOS 旁路名单',checks.membership)}${egressCheck('连接标记与去 Z4Pro 的策略路由',checks.mark_rule&&checks.route_rule)}${egressCheck('DNS TCP / UDP 重定向',checks.dns_redirect)}${egressCheck('IPv6 防漏规则',checks.ipv6_guard)}`:'';document.querySelector('#egressBody').innerHTML=`<div class="egress-summary"><div><span>路径状态</span><b class="${good?'good':'bad'}">${esc(egress.headline||summary)}</b></div><div><span>当前连接</span><b>${Number(egress.active_connections||0)} 条</b></div><div><span>已标记连接</span><b>${Number(egress.marked_connections||0)} 条</b></div></div><div class="egress-observation">“已标记连接”是 RouterOS 此刻观察到、已命中旁路连接标记的会话数；为 0 通常表示设备暂时没有新的外网连接，不代表规则失效。</div><h3 class="egress-heading">实际策略路径</h3><div class="egress-steps">${details}</div>${managed?`<h3 class="egress-heading">RouterOS 规则校验</h3><div class="egress-checks">${verification}</div>`:''}`;document.querySelector('#egressDialog').showModal()}
+function closeEgress(){egressIp='';document.querySelector('#egressDialog').close()}
+document.querySelector('#egressDialog').addEventListener('click',event=>{if(event.target.id==='egressDialog')closeEgress()});
+function deviceActions(d){''',
+    1,
+)
+PAGE = PAGE.replace(
+    '''if(d.managed)return rename+`<button class="secondary" onclick="openCapture('${d.ip}')">诊断</button>`+''',
+    '''if(d.managed)return rename+`<button class="secondary" onclick="openEgress('${d.ip}')">链路</button>`+`<button class="secondary" onclick="openCapture('${d.ip}')">诊断</button>`+''',
+    1,
+)
+PAGE = PAGE.replace(
+    "!document.querySelector('#captureDialog').open&&!document.querySelector('#wireguardDialog').open)load()",
+    "!document.querySelector('#captureDialog').open&&!document.querySelector('#wireguardDialog').open&&!document.querySelector('#egressDialog').open)load()",
     1,
 )
 
