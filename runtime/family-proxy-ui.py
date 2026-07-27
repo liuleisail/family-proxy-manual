@@ -2098,6 +2098,21 @@ def verify_device_rules(api, ip):
         raise RouterError("规则创建不完整：" + ", ".join(missing))
 
 
+def ensure_static_dhcp_lease(api, lease, ip):
+    """Pin a managed device to its current DHCP address and verify the result."""
+    mac = str(lease.get("mac-address") or "").upper()
+    if not mac:
+        raise RouterError("该 DHCP 租约没有 MAC 地址")
+    if lease.get("dynamic") == "true":
+        api.talk("/ip/dhcp-server/lease/make-static", {".id": lease[".id"]})
+    refreshed = next((item for item in api.print("/ip/dhcp-server/lease")
+                      if item.get("address") == ip
+                      and str(item.get("mac-address") or "").upper() == mac), None)
+    if not refreshed or refreshed.get("dynamic") == "true":
+        raise RouterError("DHCP 静态绑定校验失败；未写入旁路规则")
+    return refreshed
+
+
 def enable_device(ip):
     ip = validate_ip(ip)
     tag = managed_tag(ip)
@@ -2118,8 +2133,7 @@ def enable_device(ip):
         if conflict:
             raise RouterError(f"设备仍命中其它策略：{conflict}；请先解除冲突")
 
-        if lease.get("dynamic") == "true":
-            api.talk("/ip/dhcp-server/lease/make-static", {".id": lease[".id"]})
+        ensure_static_dhcp_lease(api, lease, ip)
         try:
             ensure_shared_policy(api)
             api.add("/ip/firewall/address-list", list=SHARED_LIST, address=ip,
@@ -2146,7 +2160,7 @@ def enable_device(ip):
                 pass
             audit("enable", ip, "rolled_back", str(exc))
             raise
-        return {"ip": ip, "message": "已加入旁路并通过规则校验；旧连接已清理，请重新打开应用验证"}
+        return {"ip": ip, "message": "已固定 DHCP IP，加入旁路并通过规则校验；旧连接已清理，请重新打开应用验证"}
 
 
 def remove_device(ip):
