@@ -53,6 +53,7 @@ CANDIDATES = PROVIDERS / "candidates.json"
 PREVIOUS = PROVIDERS / "candidates.previous.json"
 LAST_TESTS = PROVIDERS / "last-tests.json"
 CONFIRM_TESTS = PROVIDERS / "last-confirm-tests.json"
+POOL_PROBES = PROVIDERS / "pool-probes.json"
 SUGGESTIONS = PROVIDERS / "pool-suggestions.json"
 SOURCES = PROVIDERS / "sources.json"
 RUNTIME_STATE = PROVIDERS / "runtime-state.json"
@@ -84,6 +85,8 @@ POOL_TEST_URLS = {
 }
 TEST_JOB_LOCK = threading.Lock()
 TEST_STATE_LOCK = threading.Lock()
+POOL_PROBE_LOCK = threading.Lock()
+POOL_PROBE_STATE_LOCK = threading.Lock()
 TEST_STATE = {
     "running": False,
     "total": 0,
@@ -94,6 +97,15 @@ TEST_STATE = {
     "action": None,
     "proposal_ready": False,
     "applied": False,
+}
+POOL_PROBE_STATE = {
+    "running": False,
+    "pool": None,
+    "total": 0,
+    "completed": 0,
+    "started_at": None,
+    "finished_at": None,
+    "error": None,
 }
 
 
@@ -698,6 +710,86 @@ def test_pool_candidates(selected, progress=None):
     return results
 
 
+def probe_status():
+    with POOL_PROBE_STATE_LOCK:
+        return dict(POOL_PROBE_STATE)
+
+
+def summarize_probe(pool, selected, record):
+    rows = record.get("results", []) if isinstance(record, dict) else []
+    rows = [row for row in rows if row.get("pool") == pool and row.get("name") in selected]
+    stable = [row for row in rows if row.get("success") == 3 and row.get("delay") is not None]
+    return {
+        "target": POOL_TEST_URLS[pool],
+        "protocol": urlparse(POOL_TEST_URLS[pool]).scheme.upper(),
+        "location": "Z4Pro 经 Mihomo",
+        "tested_at": record.get("tested_at") if rows and isinstance(record, dict) else None,
+        "candidate_count": len(selected),
+        "completed_count": len(rows),
+        "stable_count": len(stable),
+        "median_delay": round(statistics.median(row["delay"] for row in stable)) if stable else None,
+        "max_jitter": max((row.get("jitter") or 0) for row in stable) if stable else None,
+    }
+
+
+def probe_report():
+    active = pools()
+    manual = read_json(POOL_PROBES, {}).get("pools", {})
+    confirmed = read_json(CONFIRM_TESTS, {})
+    result = {}
+    for pool, selected in active.items():
+        record = manual.get(pool)
+        if not isinstance(record, dict):
+            record = confirmed
+        result[pool] = summarize_probe(pool, selected, record)
+    return {"pools": result, "running": probe_status()}
+
+
+def start_pool_probe(pool):
+    if pool not in POOLS:
+        raise ValueError("无效业务池")
+    selected = pools().get(pool, [])
+    if not selected:
+        raise ValueError("该业务池没有已生效候选节点")
+    # A full test and a service probe use the same local Mihomo API and exit path.
+    # Serialize them so a manual probe remains representative instead of competing
+    # with a potentially large all-node test.
+    if not TEST_JOB_LOCK.acquire(blocking=False):
+        raise ValueError("已有全量测速或业务复测正在进行")
+    if not POOL_PROBE_LOCK.acquire(blocking=False):
+        TEST_JOB_LOCK.release()
+        return {"started": False, **probe_status()}
+    now = datetime.now().astimezone().isoformat()
+    with POOL_PROBE_STATE_LOCK:
+        POOL_PROBE_STATE.update({"running": True, "pool": pool, "total": len(selected), "completed": 0,
+                                 "started_at": now, "finished_at": None, "error": None})
+
+    def update_progress(completed, _total):
+        with POOL_PROBE_STATE_LOCK:
+            POOL_PROBE_STATE["completed"] = completed
+
+    def run():
+        try:
+            results = test_pool_candidates({pool: selected}, update_progress)
+            stored = read_json(POOL_PROBES, {})
+            entries = stored.get("pools", {}) if isinstance(stored.get("pools"), dict) else {}
+            entries[pool] = {"tested_at": datetime.now().astimezone().isoformat(), "results": results}
+            atomic_json(POOL_PROBES, {"pools": entries})
+            with POOL_PROBE_STATE_LOCK:
+                POOL_PROBE_STATE.update({"running": False, "completed": len(selected),
+                                         "finished_at": datetime.now().astimezone().isoformat()})
+        except Exception as exc:
+            with POOL_PROBE_STATE_LOCK:
+                POOL_PROBE_STATE.update({"running": False, "error": str(exc),
+                                         "finished_at": datetime.now().astimezone().isoformat()})
+        finally:
+            POOL_PROBE_LOCK.release()
+            TEST_JOB_LOCK.release()
+
+    threading.Thread(target=run, name=f"mihomo-pool-probe-{pool}", daemon=True).start()
+    return {"started": True, **probe_status()}
+
+
 def test_all(progress=None):
     return test_nodes([item["name"] for item in nodes()], progress)
 
@@ -969,6 +1061,7 @@ PAGE = PAGE.replace(
     1,
 )
 PAGE = PAGE.replace('</style>', '@media(max-width:760px){.nav{grid-template-columns:repeat(5,1fr)}}</style>', 1)
+PAGE = PAGE.replace('</style>', '.probe-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}.probe-card{padding:14px}.probe-card h3{margin:0;font-size:15px}.probe-target{margin-top:7px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#aeaeb2;overflow-wrap:anywhere}.probe-meta{margin-top:10px;color:#8e8e93;font-size:12px;line-height:1.55}.probe-result{margin-top:7px;font-size:13px;font-variant-numeric:tabular-nums}.probe-actions{margin-top:12px}.probe-actions .btn{width:100%}</style>', 1)
 _slot_card_start = PAGE.find("function slotCard(s){")
 _slot_card_end = PAGE.find("async function load(){", _slot_card_start)
 if _slot_card_start < 0 or _slot_card_end < 0:
@@ -985,20 +1078,26 @@ PAGE = PAGE.replace(_history_marker, _stable_marker + _history_marker, 1)
 # Keep the subscription landing page small. The full node catalogue is only
 # needed once the user opens the candidate-pool tab.
 PAGE = PAGE.replace("if(id==='runtime')loadStatus()", "if(id==='pools')loadPools();if(id==='runtime')loadStatus()")
-PAGE = PAGE.replace("let all=[],pools={},delays={};", "let all=[],pools={},activePools={},suggestion=null,delays={},catalogLoaded=false,testPoll=null;")
+PAGE = PAGE.replace("let all=[],pools={},delays={};", "let all=[],pools={},activePools={},suggestion=null,delays={},catalogLoaded=false,testPoll=null,probePoll=null,probeData={};")
 PAGE = PAGE.replace("poolNames=['HK-视频','JP-AI','SG-AI','US-AI','TG','Proxy']", "poolNames=['HK-视频','JP-AI','SG-AI','US-AI','其他-AI','TG','Proxy']")
 PAGE = PAGE.replace("async function load(){let d=await api('/api/state');", "async function load(){let d=await api('/api/nodes');")
-PAGE = PAGE.replace("renderPools()}function options", "catalogLoaded=true;renderPools()}async function loadSummary(){let d=await api('/api/state');document.querySelector('#slots').innerHTML=d.slots.map(slotCard).join('');pools=d.pools;if(d.tests&&d.tests.tested_at)document.querySelector('#testStatus').textContent='上次稳定性测速：'+d.tests.tested_at}async function loadPools(){if(catalogLoaded)return;try{await load();await refreshTestStatus()}catch(e){pageError(e)}}function pageError(e){let box=document.querySelector('#pageStatus');if(!box){box=document.createElement('div');box.id='pageStatus';box.className='status bad';document.querySelector('.intro').append(box)}box.innerHTML='页面数据加载失败。<button class=\"btn\" onclick=\"loadSummary().catch(pageError)\">重试</button>';console.error(e)}function options")
+PAGE = PAGE.replace("renderPools()}function options", "catalogLoaded=true;renderPools()}async function loadSummary(){let d=await api('/api/state');document.querySelector('#slots').innerHTML=d.slots.map(slotCard).join('');pools=d.pools;if(d.tests&&d.tests.tested_at)document.querySelector('#testStatus').textContent='上次稳定性测速：'+d.tests.tested_at}async function loadPools(){if(catalogLoaded){await loadProbeReport();return}try{await load();await refreshTestStatus();await loadProbeReport()}catch(e){pageError(e)}}function pageError(e){let box=document.querySelector('#pageStatus');if(!box){box=document.createElement('div');box.id='pageStatus';box.className='status bad';document.querySelector('.intro').append(box)}box.innerHTML='页面数据加载失败。<button class=\"btn\" onclick=\"loadSummary().catch(pageError)\">重试</button>';console.error(e)}function options")
 PAGE = PAGE.replace("}load()", "}loadSummary().catch(pageError)")
 PAGE = PAGE.replace("async function imp(s){", "async function addSource(){try{await api('/api/sources',{method:'POST',body:'{}'});await loadSummary()}catch(e){pageError(e)}}async function deleteSource(s){if(!confirm('删除机场会清空该来源的节点；若节点正在被当前候选池使用，操作将被拒绝。确定删除？'))return;try{await api('/api/source-remove',{method:'POST',body:JSON.stringify({slot:s})});await loadSummary()}catch(e){alert(e.message)}}async function imp(s){")
 PAGE = PAGE.replace("all=d.nodes;pools=d.pools;", "all=d.nodes;activePools=d.pools;suggestion=d.suggestions||null;pools=suggestion&&suggestion.generated_at?suggestion.pools:activePools;")
 PAGE = PAGE.replace('<button class="btn primary" onclick="testAll()">稳定性测速</button><button class="btn" onclick="save()">校验并应用</button>', '<button class="btn primary" onclick="testAll()">全量稳定性测速</button><button class="btn" onclick="confirmApply()">复测并生效</button>')
-PAGE = PAGE.replace('<div class="section-title"><h2>业务候选池</h2></div>', '<div class="section-title"><h2>待生效候选池</h2><span class="muted">测速建议不会自动替换当前出口</span></div>')
+PAGE = PAGE.replace('<div class="section-title"><h2>业务候选池</h2></div>', '<div class="section-title"><h2>业务可达性报告</h2><span class="muted">只验证当前候选池，不改变排序或出口</span></div><div id="probeGrid" class="probe-grid"></div><div class="section-title"><h2>待生效候选池</h2><span class="muted">测速建议不会自动替换当前出口</span></div>')
 _old_speed_test = "async function testAll(){let status=document.querySelector('#testStatus');try{status.textContent='正在对每个节点连续测试三次，本次操作完成后即停止…';status.className='status';let d=await api('/api/test-all',{method:'POST',body:'{}'});delays=Object.fromEntries(d.results.map(function(x){return [x.name,x]}));status.textContent='测速完成：'+d.results.filter(function(x){return x.ok}).length+'/'+d.results.length+' 稳定可用';renderPools()}catch(e){status.textContent=e.message;status.className='status bad'}}"
 _new_speed_test = "function showTestStatus(d){let status=document.querySelector('#testStatus');clearTimeout(testPoll);if(d.running){status.textContent=(d.action==='retest-apply'?'候选池复测中：':'全量测速中：')+d.completed+'/'+d.total+' 个节点已完成；可继续浏览页面';status.className='status';testPoll=setTimeout(refreshTestStatus,1000);return}if(d.error){status.textContent=(d.action==='retest-apply'?'复测未生效：':'测速未完成：')+d.error;status.className='status bad';return}if(d.finished_at&&d.action==='retest-apply'){status.textContent=d.applied?'复测、配置校验和运行验证均通过，候选池已生效':'复测完成，但未生效';status.className=d.applied?'status':'status bad';catalogLoaded=false;loadPools();return}if(d.finished_at&&d.action==='full-test'){status.textContent=d.suggestions&&d.suggestions.ready?'全量测速完成，已生成待生效建议；确认后点击“复测并生效”':'测速完成，但有业务池没有连续三次成功的节点';status.className=d.suggestions&&d.suggestions.ready?'status':'status bad';catalogLoaded=false;loadPools();return}if(d.suggestions&&d.suggestions.ready){status.textContent='已生成待生效建议；当前出口保持不变，点击“复测并生效”后才会更新';status.className='status';return}if(d.last_tested_at){status.textContent='上次稳定性测速：'+d.last_tested_at}}async function refreshTestStatus(){try{showTestStatus(await api('/api/test-status'))}catch(e){let status=document.querySelector('#testStatus');status.textContent='测速状态读取失败：'+e.message;status.className='status bad'}}async function testAll(){try{showTestStatus(await api('/api/test-all',{method:'POST',body:'{}'}))}catch(e){let status=document.querySelector('#testStatus');status.textContent=e.message;status.className='status bad'}}async function confirmApply(){let status=document.querySelector('#testStatus');try{showTestStatus(await api('/api/retest-apply',{method:'POST',body:JSON.stringify({pools:pools})}))}catch(e){status.textContent=e.message;status.className='status bad'}}"
 if _old_speed_test not in PAGE:
     raise RuntimeError("speed test template marker missing")
 PAGE = PAGE.replace(_old_speed_test, _new_speed_test, 1)
+
+_probe_marker = "function options(pool){"
+_probe_js = r'''function stampProbe(value){if(!value)return '尚无记录';let d=new Date(value);return isNaN(d.getTime())?value:d.toLocaleString()}function renderProbeReport(data){probeData=data||{};clearTimeout(probePoll);let grid=document.querySelector('#probeGrid');if(!grid)return;let running=probeData.running||{};grid.innerHTML=poolNames.map(function(pool){let item=(probeData.pools||{})[pool]||{},busy=Boolean(running.running&&running.pool===pool),latest=item.tested_at?'最近专项复测：'+stampProbe(item.tested_at):'尚无专项复测',result=item.stable_count?'连续三次通过 '+item.stable_count+'/'+item.candidate_count+' 个候选 · 中位 '+item.median_delay+' ms · 最大抖动 '+item.max_jitter+' ms':(item.completed_count?'本次没有连续三次成功的节点':'等待业务专项复测'),error=running.error&&running.pool===pool?'<div class="status bad">复测失败：'+esc(running.error)+'</div>':'';return '<article class="card probe-card"><div class="card-head"><h3>'+esc(pool)+'</h3><span class="count">'+(item.candidate_count||0)+'/5</span></div><div class="probe-target">'+esc(item.protocol||'HTTPS')+' · '+esc(item.target||'')+'</div><div class="probe-meta">发起位置：'+esc(item.location||'Z4Pro 经 Mihomo')+'<br>'+esc(latest)+'</div><div class="probe-result">'+esc(result)+'</div>'+error+'<div class="probe-actions"><button class="btn" '+(busy?'disabled':'')+' onclick="probePool(\''+pool+'\')">'+(busy?'正在复测 '+running.completed+'/'+running.total:'复测此业务池')+'</button></div></article>'}).join('');if(running.running)probePoll=setTimeout(loadProbeReport,1000)}async function loadProbeReport(){try{renderProbeReport(await api('/api/probes'))}catch(e){let grid=document.querySelector('#probeGrid');if(grid)grid.innerHTML='<div class="status bad">业务探针报告读取失败：'+esc(e.message)+'</div>'}}async function probePool(pool){try{let active=activePools[pool]||[];renderProbeReport({pools:probeData.pools||{},running:{running:true,pool:pool,total:active.length,completed:0}});renderProbeReport({pools:probeData.pools||{},running:await api('/api/pool-probe',{method:'POST',body:JSON.stringify({pool:pool})})})}catch(e){let grid=document.querySelector('#probeGrid');if(grid)grid.insertAdjacentHTML('afterbegin','<div class="status bad">无法开始专项复测：'+esc(e.message)+'</div>')}}'''
+if _probe_marker not in PAGE:
+    raise RuntimeError("probe template marker missing")
+PAGE = PAGE.replace(_probe_marker, _probe_js + _probe_marker, 1)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1040,6 +1139,8 @@ class Handler(BaseHTTPRequestHandler):
                              "tests": read_json(LAST_TESTS, {}), "suggestions": suggestions()})
         elif path == "/api/test-status":
             self.reply(200, test_status())
+        elif path == "/api/probes":
+            self.reply(200, probe_report())
         elif path == "/api/status":
             self.reply(200, status())
         elif path == "/":
@@ -1066,6 +1167,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/retest-apply": result = start_retest_apply(body.get("pools", {}))
             elif path == "/api/rollback": result = rollback_pools()
             elif path == "/api/test-all": result = start_test_all()
+            elif path == "/api/pool-probe": result = start_pool_probe(body.get("pool", ""))
             else: raise ValueError("not found")
             self.reply(200, result)
         except (ValueError, KeyError, OSError, subprocess.SubprocessError) as exc:
