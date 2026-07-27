@@ -30,6 +30,7 @@ CONFIG_PATH = Path("/etc/family-proxy-ui/router.env")
 GATEWAY_SECRET_PATH = Path("/etc/family-proxy-ui/gateway.secret")
 MANAGED_IPS_PATH = Path("/etc/family-proxy-ui/managed-ips")
 DEVICE_PREFS_PATH = Path("/etc/family-proxy-ui/device-preferences.json")
+HOMEKIT_ROUTE_STATE_PATH = Path("/var/lib/family-proxy/homekit-direct-routes.json")
 ALERT_CONFIG_PATH = Path("/etc/family-proxy-ui/mihomo-alert.json")
 PLATFORM_UPDATE_STATUS_PATH = Path("/var/lib/family-proxy/platform-update-status.json")
 ALERT_SOURCES_PATH = Path("/tmp/zfsv3/nvme13/18053615760/data/docker/family-mihomo-sub-import/providers/sources.json")
@@ -72,6 +73,7 @@ HEALTH_LOCK = threading.Lock()
 HEALTH_GATE = {"ready": True, "failures": 0, "successes": 0}
 RULES_LOCK = threading.Lock()
 DEVICE_PREFS_LOCK = threading.Lock()
+HOMEKIT_ROUTE_LOCK = threading.Lock()
 DNS_METRICS_LOCK = threading.Lock()
 DNS_SAMPLES = deque(maxlen=120)
 SYSTEM_STATUS_LOCK = threading.Lock()
@@ -84,6 +86,7 @@ WIREGUARD_EVENT_LIMIT = 200
 WIREGUARD_STATE = {"interfaces": {}, "probe_timestamp": 0.0, "probe": None}
 CAPTURE_DIR = Path("/run/family-proxy-captures")
 CAPTURE_INTERFACE = os.environ.get("FAMILY_CAPTURE_INTERFACE", "kvmbr0")
+HOMEKIT_ROUTE_INTERFACE = os.environ.get("FAMILY_HOMEKIT_ROUTE_INTERFACE", "kvmbr0")
 CAPTURE_MAX_BYTES = 50_000_000
 CAPTURE_TOTAL_BYTES = 200_000_000
 CAPTURE_RETENTION_SECONDS = 24 * 60 * 60
@@ -1166,7 +1169,7 @@ def normalize_mac(value):
 
 
 def load_device_preferences():
-    defaults = {"aliases": {}, "favorites": []}
+    defaults = {"aliases": {}, "favorites": [], "homekit_direct": []}
     if not DEVICE_PREFS_PATH.exists():
         return defaults
     try:
@@ -1175,10 +1178,12 @@ def load_device_preferences():
         raise RouterError("设备名称与常用名单读取失败") from exc
     aliases = data.get("aliases", {})
     favorites = data.get("favorites", [])
-    if not isinstance(aliases, dict) or not isinstance(favorites, list):
+    homekit_direct = data.get("homekit_direct", [])
+    if not isinstance(aliases, dict) or not isinstance(favorites, list) or not isinstance(homekit_direct, list):
         raise RouterError("设备名称与常用名单格式错误")
     clean_aliases = {}
     clean_favorites = set()
+    clean_homekit_direct = set()
     for mac, alias in aliases.items():
         try:
             normalized = normalize_mac(mac)
@@ -1191,7 +1196,16 @@ def load_device_preferences():
             clean_favorites.add(normalize_mac(mac))
         except RouterError:
             continue
-    return {"aliases": clean_aliases, "favorites": sorted(clean_favorites)}
+    for mac in homekit_direct:
+        try:
+            clean_homekit_direct.add(normalize_mac(mac))
+        except RouterError:
+            continue
+    return {
+        "aliases": clean_aliases,
+        "favorites": sorted(clean_favorites),
+        "homekit_direct": sorted(clean_homekit_direct),
+    }
 
 
 def save_device_preferences(data):
@@ -1202,7 +1216,147 @@ def save_device_preferences(data):
     os.replace(temporary, DEVICE_PREFS_PATH)
 
 
-def update_device_preference(mac, alias=None, favorite=None):
+def read_homekit_route_state():
+    default = {"ips": [], "macs": [], "updated_at": 0, "migration_complete": False}
+    try:
+        state = json.loads(HOMEKIT_ROUTE_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+    if not isinstance(state, dict):
+        return default
+    ips = []
+    for value in state.get("ips", []):
+        try:
+            parsed = ipaddress.ip_address(value)
+            if parsed.version == 4 and parsed in LAN:
+                ips.append(str(parsed))
+        except ValueError:
+            continue
+    macs = []
+    for value in state.get("macs", []):
+        try:
+            macs.append(normalize_mac(value))
+        except RouterError:
+            continue
+    return {
+        "ips": sorted(set(ips)),
+        "macs": sorted(set(macs)),
+        "updated_at": int(state.get("updated_at") or 0),
+        "migration_complete": bool(state.get("migration_complete")),
+    }
+
+
+def save_homekit_route_state(state):
+    HOMEKIT_ROUTE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = HOMEKIT_ROUTE_STATE_PATH.with_suffix(".new")
+    temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, HOMEKIT_ROUTE_STATE_PATH)
+
+
+def legacy_homekit_direct_ips(route_interface):
+    """Read only legacy controller-like direct /32 routes during one migration."""
+    result = subprocess.run(["ip", "-4", "-o", "route", "show", "dev", route_interface],
+                            text=True, capture_output=True, timeout=3)
+    if result.returncode:
+        raise RouterError("无法读取现有 HomeKit 直连路由")
+    candidates = set()
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if not fields or "via" in fields or "src" not in fields:
+            continue
+        destination = fields[0]
+        if "/" in destination and not destination.endswith("/32"):
+            continue
+        address = destination.removesuffix("/32")
+        try:
+            if ipaddress.ip_address(address) in LAN and f"src {PROXY_IP}" in line:
+                candidates.add(address)
+        except ValueError:
+            continue
+    return candidates
+
+
+def homekit_direct_route_sync():
+    """Maintain only controller-owned Z4Pro-to-LAN HomeKit /32 routes.
+
+    Selected devices are stored by MAC, then resolved from live DHCP leases.
+    This never changes RouterOS, Mihomo, MosDNS, or a client's default route.
+    """
+    route_interface = load_config().get("FAMILY_HOMEKIT_ROUTE_INTERFACE", HOMEKIT_ROUTE_INTERFACE).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]+", route_interface):
+        raise RouterError("HomeKit 直连接口名称无效")
+    previous = read_homekit_route_state()
+    with DEVICE_PREFS_LOCK:
+        selected = set(load_device_preferences()["homekit_direct"])
+    if not selected and not previous["migration_complete"]:
+        legacy_ips = legacy_homekit_direct_ips(route_interface)
+        if legacy_ips:
+            with RouterOS() as api:
+                leases = api.print("/ip/dhcp-server/lease")
+            migrated = {str(lease.get("mac-address") or "").upper() for lease in leases
+                        if str(lease.get("address") or "") in legacy_ips}
+            migrated = {normalize_mac(mac) for mac in migrated if mac}
+            if migrated:
+                with DEVICE_PREFS_LOCK:
+                    preferences = load_device_preferences()
+                    preferences["homekit_direct"] = sorted(migrated)
+                    save_device_preferences(preferences)
+                selected = migrated
+    if not selected:
+        with HOMEKIT_ROUTE_LOCK:
+            for address in previous["ips"]:
+                subprocess.run(["ip", "route", "del", f"{address}/32", "dev", route_interface],
+                               text=True, capture_output=True, timeout=3)
+            state = {"ips": [], "macs": [], "updated_at": int(time.time()), "migration_complete": True}
+            save_homekit_route_state(state)
+        return {"selected": 0, "active": 0, "missing": [], "addresses": {}, "updated_at": state["updated_at"]}
+    interface_check = subprocess.run(["ip", "link", "show", "dev", route_interface],
+                                     text=True, capture_output=True, timeout=3)
+    if interface_check.returncode:
+        raise RouterError(f"HomeKit 直连接口不可用：{route_interface}")
+    with RouterOS() as api:
+        leases = api.print("/ip/dhcp-server/lease")
+    addresses = {}
+    for lease in leases:
+        mac = str(lease.get("mac-address") or "").upper()
+        address = str(lease.get("address") or "")
+        if mac not in selected:
+            continue
+        try:
+            if ipaddress.ip_address(address) in LAN:
+                addresses[mac] = address
+        except ValueError:
+            continue
+    desired_ips = set(addresses.values())
+    with HOMEKIT_ROUTE_LOCK:
+        for address in sorted(desired_ips, key=lambda value: tuple(map(int, value.split(".")))):
+            result = subprocess.run(
+                ["ip", "route", "replace", f"{address}/32", "dev", route_interface, "src", PROXY_IP],
+                text=True, capture_output=True, timeout=3,
+            )
+            if result.returncode:
+                raise RouterError(f"HomeKit 直连路由写入失败：{address}")
+        for address in sorted(set(previous["ips"]) - desired_ips,
+                              key=lambda value: tuple(map(int, value.split(".")))):
+            subprocess.run(["ip", "route", "del", f"{address}/32", "dev", route_interface],
+                           text=True, capture_output=True, timeout=3)
+        state = {
+            "ips": sorted(desired_ips), "macs": sorted(selected),
+            "updated_at": int(time.time()), "migration_complete": True,
+        }
+        save_homekit_route_state(state)
+    missing = sorted(selected - set(addresses))
+    return {
+        "selected": len(selected),
+        "active": len(desired_ips),
+        "missing": missing,
+        "addresses": addresses,
+        "updated_at": state["updated_at"],
+    }
+
+
+def update_device_preference(mac, alias=None, favorite=None, homekit_direct=None):
     mac = normalize_mac(mac)
     with RouterOS() as api:
         lease = next((item for item in api.print("/ip/dhcp-server/lease")
@@ -1212,6 +1366,7 @@ def update_device_preference(mac, alias=None, favorite=None):
     with DEVICE_PREFS_LOCK:
         data = load_device_preferences()
         favorites = set(data["favorites"])
+        direct_macs = set(data["homekit_direct"])
         if alias is not None:
             if not isinstance(alias, str):
                 raise RouterError("设备名称格式错误")
@@ -1230,10 +1385,35 @@ def update_device_preference(mac, alias=None, favorite=None):
             else:
                 favorites.discard(mac)
         data["favorites"] = sorted(favorites)
+        if homekit_direct is not None:
+            if not isinstance(homekit_direct, bool):
+                raise RouterError("HomeKit 本地直连状态格式错误")
+            if homekit_direct:
+                direct_macs.add(mac)
+            else:
+                direct_macs.discard(mac)
+        data["homekit_direct"] = sorted(direct_macs)
         save_device_preferences(data)
     ip = lease.get("address", "")
-    audit("device_preference", ip, "success", f"mac={mac} favorite={favorite} alias_changed={alias is not None}")
-    return {"message": "设备信息已保存", "mac": mac}
+    try:
+        direct_status = homekit_direct_route_sync() if homekit_direct is not None else None
+    except (OSError, RouterError, subprocess.SubprocessError):
+        with DEVICE_PREFS_LOCK:
+            rollback = load_device_preferences()
+            rollback["homekit_direct"] = [item for item in rollback["homekit_direct"] if item != mac]
+            if homekit_direct is False:
+                rollback["homekit_direct"].append(mac)
+                rollback["homekit_direct"].sort()
+            save_device_preferences(rollback)
+        raise
+    audit("device_preference", ip, "success",
+          f"mac={mac} favorite={favorite} homekit_direct={homekit_direct} alias_changed={alias is not None}")
+    message = "设备信息已保存"
+    if homekit_direct is not None:
+        message = "已启用 HomeKit 本地直连" if homekit_direct else "已移除 HomeKit 本地直连"
+        if direct_status and direct_status["missing"]:
+            message += "；等待 DHCP 租约出现后生效"
+    return {"message": message, "mac": mac, "homekit": direct_status}
 
 
 def routeros_duration_seconds(value):
@@ -1630,6 +1810,8 @@ def list_devices():
     with DEVICE_PREFS_LOCK:
         preferences = load_device_preferences()
     favorite_macs = set(preferences["favorites"])
+    homekit_direct_macs = set(preferences["homekit_direct"])
+    homekit_route_state = read_homekit_route_state()
     managed_macs = set()
     with RouterOS() as api:
         leases = api.print("/ip/dhcp-server/lease")
@@ -1670,6 +1852,8 @@ def list_devices():
                 "static": lease.get("dynamic") != "true",
                 "managed": is_managed,
                 "favorite": is_managed or mac in favorite_macs,
+                "homekit_direct": mac in homekit_direct_macs,
+                "homekit_route_active": ip in set(homekit_route_state["ips"]),
                 "fixed": False,
                 "packets": packets,
                 "connections": active_connections,
@@ -1689,6 +1873,11 @@ def list_devices():
             "last_change": last_audit_event(),
             "backup": latest_backup(load_config()),
             "ipv6_policy": "纳管设备快速拒绝并回退 IPv4",
+            "homekit_direct": {
+                "selected": len(homekit_direct_macs),
+                "active": len(homekit_route_state["ips"]),
+                "updated_at": homekit_route_state["updated_at"],
+            },
         })
     if managed_macs - favorite_macs:
         with DEVICE_PREFS_LOCK:
@@ -2548,6 +2737,21 @@ PAGE = PAGE.replace(
     "setupRuntimeFold('bypassStatus');setupRuntimeFold('z4Status');setupTrafficObservation();load();",
     1,
 )
+PAGE = PAGE.replace(
+    "function deviceActions(d){let rename=`<button class=\"secondary\" onclick=\"openRename('${d.mac}')\">改名</button>`;if(d.managed)return rename+`<button class=\"secondary\" onclick=\"openEgress('${d.ip}')\">链路</button>`+`<button class=\"secondary\" onclick=\"openCapture('${d.ip}')\">诊断</button>`+(d.fixed?'<span class=\"muted\">固定设备</span>':`<button class=\"secondary danger\" onclick=\"removeDevice('${d.ip}')\">恢复直连</button>`);let join=`<button class=\"secondary\" onclick=\"choose('${d.ip}')\">加入旁路</button>`;if(filter==='favorites')return rename+join+`<button class=\"secondary danger\" onclick=\"setFavorite('${d.mac}',false)\">移出常用</button>`;let keep=d.favorite?`<button class=\"secondary danger\" onclick=\"setFavorite('${d.mac}',false)\">取消保留</button>`:`<button class=\"secondary\" onclick=\"setFavorite('${d.mac}',true)\">保留</button>`;return rename+join+keep}",
+    "function deviceActions(d){let rename=`<button class=\"secondary\" onclick=\"openRename('${d.mac}')\">改名</button>`,homekit=d.homekit_direct?`<button class=\"secondary danger\" onclick=\"setHomeKitDirect('${d.mac}',false)\">移除 HomeKit 直连</button>`:(filter==='online'||d.managed||d.favorite?`<button class=\"secondary\" onclick=\"setHomeKitDirect('${d.mac}',true)\">HomeKit 直连</button>`:'');if(d.managed)return rename+homekit+`<button class=\"secondary\" onclick=\"openEgress('${d.ip}')\">链路</button>`+`<button class=\"secondary\" onclick=\"openCapture('${d.ip}')\">诊断</button>`+(d.fixed?'<span class=\"muted\">固定设备</span>':`<button class=\"secondary danger\" onclick=\"removeDevice('${d.ip}')\">恢复直连</button>`);let join=`<button class=\"secondary\" onclick=\"choose('${d.ip}')\">加入旁路</button>`;if(filter==='favorites')return rename+homekit+join+`<button class=\"secondary danger\" onclick=\"setFavorite('${d.mac}',false)\">移出常用</button>`;let keep=d.favorite?`<button class=\"secondary danger\" onclick=\"setFavorite('${d.mac}',false)\">取消保留</button>`:`<button class=\"secondary\" onclick=\"setFavorite('${d.mac}',true)\">保留</button>`;return rename+homekit+join+keep}",
+    1,
+)
+PAGE = PAGE.replace(
+    "async function setFavorite(mac,favorite){",
+    "async function setHomeKitDirect(mac,enabled){if(enabled&&!confirm('仅用于摄像头、Apple TV、iPhone 或 iPad 的 HomeKit 本地视频直连；不会改变该设备的外网旁路。继续吗？'))return;try{let result=await api('/api/device/preference',{method:'POST',body:JSON.stringify({mac,homekit_direct:enabled})});setStatus(result.message,true);await load()}catch(e){setStatus(e.message,false)}}async function setFavorite(mac,favorite){",
+    1,
+)
+PAGE = PAGE.replace(
+    "${d.static?' · 固定地址':''}${d.custom_name?' · 自定义名称':''}",
+    "${d.static?' · 固定地址':''}${d.custom_name?' · 自定义名称':''}${d.homekit_direct?' · HomeKit 本地直连':''}${d.homekit_direct&&!d.homekit_route_active?' · 等待租约':''}",
+    1,
+)
 
 RULES_PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>代理规则</title><style>
 :root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC","Segoe UI",sans-serif;background:#000;color:#f5f5f7;letter-spacing:0}*{box-sizing:border-box}body{margin:0;background:#000;color:#f5f5f7}.topbar{position:sticky;top:0;z-index:10;border-bottom:1px solid rgba(255,255,255,.1);background:rgba(18,18,20,.88);backdrop-filter:saturate(180%) blur(22px);-webkit-backdrop-filter:saturate(180%) blur(22px)}.topbar-inner{max-width:1040px;min-height:58px;margin:auto;padding:0 22px;display:flex;align-items:center;justify-content:space-between;gap:18px}.brand{font-size:17px;font-weight:650;color:#fff;white-space:nowrap}.nav{display:flex;align-items:center;gap:4px;padding:3px;background:#2c2c2e;border-radius:8px}.nav a{padding:7px 11px;border-radius:6px;color:#aeaeb2;text-decoration:none;font-size:13px;white-space:nowrap}.nav a.active{background:#636366;color:#fff}.wrap{max-width:1040px;margin:auto;padding:38px 22px 64px}.intro{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:25px}.intro h1{font-size:30px;line-height:1.15;margin:0;font-weight:700}.intro p{margin:9px 0 0;color:#98989d;font-size:14px}.count{padding:8px 11px;border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;color:#30d158;font-size:13px;white-space:nowrap}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:9px}.toolbar h2{font-size:13px;color:#8e8e93;font-weight:600;margin:0}.actions{display:flex;gap:7px}.group{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.rule-row{display:grid;grid-template-columns:34px minmax(0,1fr) auto;align-items:center;gap:9px;padding:9px 12px;border-top:1px solid #38383a}.rule-row:first-child{border-top:0}.rule-index{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#636366;text-align:right}.rule-input{min-width:0;width:100%;height:38px;border:1px solid transparent;border-radius:7px;background:#2c2c2e;color:#f5f5f7;padding:0 10px;font:13px ui-monospace,SFMono-Regular,Menlo,monospace;outline:none}.rule-input:focus{border-color:#0a84ff;box-shadow:0 0 0 3px rgba(10,132,255,.18)}.rule-input.protected{color:#aeaeb2}.icon-set{display:flex;gap:3px}.icon{width:34px;height:34px;border:0;border-radius:6px;background:transparent;color:#0a84ff;font-size:17px;cursor:pointer}.icon:hover{background:rgba(10,132,255,.12)}.icon.danger{color:#ff453a}.icon:disabled{color:#48484a;cursor:default;background:transparent}.button{height:36px;border:0;border-radius:7px;padding:0 13px;font:600 13px inherit;cursor:pointer}.primary{background:#0a84ff;color:#fff}.secondary{background:#2c2c2e;color:#f5f5f7}.button:disabled{opacity:.5;cursor:default}.footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px}.status{min-height:20px;color:#30d158;font-size:13px}.status.error{color:#ff6961}.empty{padding:28px;text-align:center;color:#8e8e93}.dirty .count{color:#ffd60a}@media(max-width:760px){.topbar-inner{height:auto;padding:10px 14px;align-items:flex-start;flex-direction:column;gap:8px}.nav{width:100%;display:grid;grid-template-columns:repeat(4,1fr)}.nav a{text-align:center;padding:7px 5px;white-space:normal}.wrap{padding:28px 14px 50px}.intro{align-items:flex-start;flex-direction:column}.rule-row{grid-template-columns:28px minmax(0,1fr);padding:9px}.icon-set{grid-column:2;justify-content:flex-end}.footer{align-items:stretch;flex-direction:column}.footer .button{width:100%}.actions{width:100%}.actions .button{flex:1}}
@@ -2848,6 +3052,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(HTTPStatus.OK, update_device_preference(
                     body.get("mac", ""), body.get("alias") if "alias" in body else None,
                     body.get("favorite") if "favorite" in body else None,
+                    body.get("homekit_direct") if "homekit_direct" in body else None,
                 ))
             elif path == "/api/capture/start":
                 self.reply(HTTPStatus.OK, start_capture(
@@ -2885,6 +3090,9 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] == "platform-update-check":
         print(json.dumps(check_platform_updates(), ensure_ascii=False))
+        raise SystemExit(0)
+    if len(sys.argv) == 2 and sys.argv[1] == "homekit-direct-routes":
+        print(json.dumps(homekit_direct_route_sync(), ensure_ascii=False))
         raise SystemExit(0)
     with CAPTURE_LOCK:
         cleanup_captures()

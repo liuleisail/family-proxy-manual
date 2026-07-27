@@ -63,6 +63,7 @@ FAMILY_LAN_PREFIX=$(derive_prefix "$FAMILY_LAN_CIDR") || {
 ask FAMILY_PROXY_IP "旁路主机固定 IPv4"
 ask FAMILY_ROUTER_IP "RouterOS LAN 地址" "${FAMILY_LAN_PREFIX}1"
 ask FAMILY_CAPTURE_INTERFACE "承载 LAN 流量的桥接口" "kvmbr0"
+ask FAMILY_HOMEKIT_ROUTE_INTERFACE "HomeKit 本地直连接口" "$FAMILY_CAPTURE_INTERFACE"
 ask FAMILY_DOCKER_ROOT "SSD 持久化目录" "/var/lib/family-proxy/docker"
 ask ROUTER_HOST "RouterOS API 地址" "$FAMILY_ROUTER_IP"
 ask ROUTER_USER "RouterOS API 用户"
@@ -79,6 +80,7 @@ umask 077
   printf 'FAMILY_ROUTER_IP=%s\n' "$FAMILY_ROUTER_IP"
   printf 'FAMILY_RESERVED_GATEWAY_IP=\n'
   printf 'FAMILY_CAPTURE_INTERFACE=%s\n' "$FAMILY_CAPTURE_INTERFACE"
+  printf 'FAMILY_HOMEKIT_ROUTE_INTERFACE=%s\n' "$FAMILY_HOMEKIT_ROUTE_INTERFACE"
   printf 'FAMILY_DOCKER_ROOT=%s\n' "$FAMILY_DOCKER_ROOT"
   printf 'BACKUP_ROOT=/var/backups/family-proxy\n'
   printf 'ROUTER_HOST=%s\n' "$ROUTER_HOST"

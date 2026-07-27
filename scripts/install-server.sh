@@ -46,7 +46,7 @@ python3 "$REPO_DIR/scripts/prepare-config.py" "$CONFIG"
 stamp=$(date +%Y%m%d-%H%M%S)
 backup=/var/backups/family-proxy/$stamp
 install -d -m 700 "$backup" /opt/family-proxy-ui /var/lib/family-proxy/docker
-for item in /opt/family-proxy-ui /etc/family-proxy-ui /etc/systemd/system/family-proxy-ui.service /etc/systemd/system/family-mihomo-sub-import.service /etc/systemd/system/family-proxy-gateway.service /etc/systemd/system/family-mihomo-tproxy-auto.service /etc/systemd/system/family-platform-update-check.service /etc/systemd/system/family-platform-update-check.timer; do
+for item in /opt/family-proxy-ui /etc/family-proxy-ui /usr/local/sbin/homekit-direct-routes /usr/local/sbin/homekit-direct-routes.sh /etc/systemd/system/homekit-direct-routes.service /etc/systemd/system/homekit-direct-routes.timer /etc/systemd/system/family-proxy-ui.service /etc/systemd/system/family-mihomo-sub-import.service /etc/systemd/system/family-proxy-gateway.service /etc/systemd/system/family-mihomo-tproxy-auto.service /etc/systemd/system/family-platform-update-check.service /etc/systemd/system/family-platform-update-check.timer; do
   [[ -e $item ]] && cp -a "$item" "$backup/" || true
 done
 install -d -m 700 /opt/family-proxy-ui/rendered
@@ -61,6 +61,8 @@ install -m 755 "$REPO_DIR/scripts/refresh-cn-ipv4" /usr/local/sbin/refresh-famil
 install -m 755 "$REPO_DIR/scripts/sync-routeros-cn-ipv4.py" /usr/local/sbin/sync-routeros-cn-ipv4
 install -m 755 "$REPO_DIR/scripts/refresh-mihomo-geodata.py" /usr/local/sbin/refresh-mihomo-geodata
 install -m 755 "$REPO_DIR/scripts/family-mihomo-upgrade" /usr/local/sbin/family-mihomo-upgrade
+install -m 755 "$REPO_DIR/scripts/homekit-direct-routes" /usr/local/sbin/homekit-direct-routes
+install -m 755 "$REPO_DIR/scripts/homekit-direct-routes" /usr/local/sbin/homekit-direct-routes.sh
 install -d -m 700 /etc/family-proxy-ui /var/lib/family-proxy/docker/family-mihomo-sub-import/providers
 if [[ ! -e /etc/family-proxy-ui/managed-ips ]]; then
   install -m 600 /dev/null /etc/family-proxy-ui/managed-ips
@@ -73,6 +75,7 @@ systemctl daemon-reload
 systemctl enable family-proxy-ui family-mihomo-sub-import family-proxy-gateway family-mihomo-tproxy-auto
 systemctl enable --now family-cn-ipv4-refresh.timer
 systemctl enable --now family-platform-update-check.timer
+systemctl enable --now homekit-direct-routes.timer
 if grep -qx 'MIHOMO_GEODATA_AUTO_UPDATE=true' "$CONFIG" && docker inspect family-mihomo-fallback >/dev/null 2>&1; then
   systemctl enable --now family-mihomo-geodata-refresh.timer
 else

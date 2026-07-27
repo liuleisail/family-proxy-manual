@@ -36,7 +36,7 @@ sudo install -m 600 config/router.env.example /etc/family-proxy-ui/router.env
 sudoedit /etc/family-proxy-ui/router.env
 ```
 
-只填写 `router.env` 内的 LAN、旁路主机、RouterOS API 用户/密码及管理页用户名/密码。`FAMILY_CAPTURE_INTERFACE` 应填写承载受管设备流量的 LAN 桥接口，Z4Pro 通常为 `kvmbr0`；其它主机先用 `ip -br link` 核实。首次运行安装器会把 `UI_PASSWORD` 转为 PBKDF2 哈希并从文件中删除。该文件、网关会话密钥和节点/订阅文件均不在 Git 中。
+只填写 `router.env` 内的 LAN、旁路主机、RouterOS API 用户/密码及管理页用户名/密码。`FAMILY_CAPTURE_INTERFACE` 与 `FAMILY_HOMEKIT_ROUTE_INTERFACE` 应填写承载 LAN 流量的桥接口，Z4Pro 通常为 `kvmbr0`；其它主机先用 `ip -br link` 核实。后者仅用于已在设备页明确选择的 HomeKit 本地视频直连设备，不改客户端默认网关或 DNS。首次运行安装器会把 `UI_PASSWORD` 转为 PBKDF2 哈希并从文件中删除。该文件、网关会话密钥和节点/订阅文件均不在 Git 中。
 
 现有 DNS 仪表盘若启用了 Basic Auth，再把 `username:password` 的 Base64 结果填入 `DNS_UPSTREAM_AUTH_B64`：
 

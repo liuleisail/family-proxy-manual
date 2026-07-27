@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# Resolve the selected HomeKit devices from RouterOS DHCP leases, then refresh
+# only Z4Pro's own same-subnet /32 routes.
+set -eu
+exec /usr/bin/python3 /opt/family-proxy-ui/family-proxy-ui.py homekit-direct-routes
