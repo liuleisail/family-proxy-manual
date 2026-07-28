@@ -48,7 +48,7 @@ FIXED_MANAGED_IPS = set()
 RESERVED_IPS = {"__FAMILY_ROUTER_IP__", "__FAMILY_RESERVED_GATEWAY_IP__", PROXY_IP}
 AUDIT_PATH = Path("/var/log/family-proxy-ui-audit.jsonl")
 CSRF_TOKEN_PATH = Path("/etc/family-proxy-ui/csrf-token")
-BUILD_VERSION = "2026.07.29-wireguard-peer-autodiscovery"
+BUILD_VERSION = "2026.07.29-wireguard-peer-filter"
 SHARED_LIST = "family_mihomo_devices"
 SHARED_TABLE = "family_mihomo_shared"
 SHARED_CONN_MARK = "family_mihomo_conn"
@@ -1710,6 +1710,7 @@ def wireguard_status():
                 legacy_alias_key = f"peer:{name}:{peer_name}"
                 peer_alias = wireguard_aliases.get(peer_alias_key, wireguard_aliases.get(legacy_alias_key, ""))
                 peer_state, peer_state_text = mobile_peer_state(age)
+                dynamic_peer = str(peer.get("dynamic", "")).lower() == "true"
                 peer_rows.append({
                     "id": peer_id,
                     "name": peer_name,
@@ -1717,7 +1718,7 @@ def wireguard_status():
                     "default_label": peer_default_label,
                     "alias": peer_alias,
                     "alias_key": peer_alias_key,
-                    "visible_mobile_client": True,
+                    "visible_mobile_client": not (dynamic_peer and re.fullmatch(r"peer\d+", peer_name, re.I)),
                     "allowed_address": peer.get("allowed-address", ""),
                     "endpoint": mask_endpoint(endpoint_value),
                     "last_handshake_seconds": age,
