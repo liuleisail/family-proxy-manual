@@ -30,6 +30,7 @@ CONFIG_PATH = Path("/etc/family-proxy-ui/router.env")
 GATEWAY_SECRET_PATH = Path("/etc/family-proxy-ui/gateway.secret")
 MANAGED_IPS_PATH = Path("/etc/family-proxy-ui/managed-ips")
 DEVICE_PREFS_PATH = Path("/etc/family-proxy-ui/device-preferences.json")
+PAGE_LAYOUT_PREFS_PATH = Path("/etc/family-proxy-ui/page-layout-preferences.json")
 HOMEKIT_ROUTE_STATE_PATH = Path("/var/lib/family-proxy/homekit-direct-routes.json")
 ALERT_CONFIG_PATH = Path("/etc/family-proxy-ui/mihomo-alert.json")
 PLATFORM_UPDATE_STATUS_PATH = Path("/var/lib/family-proxy/platform-update-status.json")
@@ -73,6 +74,7 @@ HEALTH_LOCK = threading.Lock()
 HEALTH_GATE = {"ready": True, "failures": 0, "successes": 0}
 RULES_LOCK = threading.Lock()
 DEVICE_PREFS_LOCK = threading.Lock()
+PAGE_LAYOUT_PREFS_LOCK = threading.Lock()
 HOMEKIT_ROUTE_LOCK = threading.Lock()
 DNS_METRICS_LOCK = threading.Lock()
 DNS_SAMPLES = deque(maxlen=120)
@@ -100,6 +102,13 @@ CAPTURE_SCOPES = {
 CAPTURE_LOCK = threading.Lock()
 CAPTURE_STATE = {"active": None}
 PROTECTED_RULES = {"GEOSITE,CN,DIRECT", "GEOIP,CN,DIRECT,no-resolve"}
+PAGE_LAYOUT_SECTIONS = {
+    "devices": {"traffic", "z4pro", "router", "wireguard"},
+    "dns": {"rankings", "observability", "data_management"},
+    "airport": {"subscription_help", "switch_history"},
+    "rules": {"guide", "preview"},
+    "maintenance": {"guide"},
+}
 
 
 class RouterError(RuntimeError):
@@ -1214,6 +1223,49 @@ def save_device_preferences(data):
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.chmod(temporary, 0o600)
     os.replace(temporary, DEVICE_PREFS_PATH)
+
+
+def load_page_layout_preferences():
+    defaults = {page: [] for page in PAGE_LAYOUT_SECTIONS}
+    try:
+        data = json.loads(PAGE_LAYOUT_PREFS_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return defaults
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RouterError("页面显示设置读取失败") from exc
+    if not isinstance(data, dict):
+        raise RouterError("页面显示设置格式错误")
+    result = {}
+    for page, allowed in PAGE_LAYOUT_SECTIONS.items():
+        values = data.get(page, [])
+        result[page] = sorted({value for value in values if isinstance(value, str) and value in allowed}) if isinstance(values, list) else []
+    return result
+
+
+def save_page_layout_preferences(data):
+    PAGE_LAYOUT_PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = PAGE_LAYOUT_PREFS_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, PAGE_LAYOUT_PREFS_PATH)
+
+
+def update_page_layout_preferences(page, hidden):
+    if page not in PAGE_LAYOUT_SECTIONS:
+        raise RouterError("页面标识无效")
+    if not isinstance(hidden, list) or len(hidden) > len(PAGE_LAYOUT_SECTIONS[page]):
+        raise RouterError("隐藏板块格式无效")
+    values = set()
+    for value in hidden:
+        if not isinstance(value, str) or value not in PAGE_LAYOUT_SECTIONS[page]:
+            raise RouterError("包含不允许隐藏的板块")
+        values.add(value)
+    with PAGE_LAYOUT_PREFS_LOCK:
+        data = load_page_layout_preferences()
+        data[page] = sorted(values)
+        save_page_layout_preferences(data)
+    audit("page_layout", "saved", page + "=" + ",".join(sorted(values)))
+    return {"page": page, "hidden": data[page]}
 
 
 def read_homekit_route_state():
@@ -3049,6 +3101,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/csrf":
             self.reply(HTTPStatus.OK, {"csrf": CSRF_TOKEN})
             return
+        if path == "/api/page-layout":
+            try:
+                self.reply(HTTPStatus.OK, load_page_layout_preferences())
+            except RouterError as exc:
+                self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+            return
         if path == "/api/mihomo":
             try:
                 self.reply(HTTPStatus.OK, mihomo_groups())
@@ -3087,7 +3145,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self.require_auth():
             return
-        if self.headers.get("X-CSRF") != CSRF_TOKEN:
+        gateway_request = hmac.compare_digest(self.headers.get("X-Family-Gateway", ""), GATEWAY_SECRET_PATH.read_text(encoding="utf-8").strip())
+        if self.headers.get("X-CSRF") != CSRF_TOKEN and not gateway_request:
             self.reply(HTTPStatus.FORBIDDEN, {"error": "request rejected"})
             return
         try:
@@ -3106,6 +3165,9 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("favorite") if "favorite" in body else None,
                     body.get("homekit_direct") if "homekit_direct" in body else None,
                 ))
+            elif path == "/api/page-layout":
+                self.reply(HTTPStatus.OK, update_page_layout_preferences(
+                    body.get("page", ""), body.get("hidden", [])))
             elif path == "/api/capture/start":
                 self.reply(HTTPStatus.OK, start_capture(
                     body.get("ip", ""), body.get("duration", 60), body.get("scope", "all")))

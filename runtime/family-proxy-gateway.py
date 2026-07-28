@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import http.client
 import ipaddress
+import json
 import os
 import secrets
 import threading
@@ -23,6 +24,38 @@ SESSION_TTL = 12 * 60 * 60
 HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade"}
 
 LOGIN_PAGE = '''<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>家庭旁路</title><style>:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#000;color:#f5f5f7}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px}.box{width:min(360px,100%);padding:28px;border:1px solid #2c2c2e;border-radius:10px;background:#1c1c1e}h1{font-size:24px;margin:0 0 8px}p{margin:0 0 22px;color:#98989d;font-size:14px}label{display:block;margin:13px 0 6px;font-size:13px}input{width:100%;height:40px;border:1px solid #48484a;border-radius:7px;background:#2c2c2e;color:#fff;padding:0 11px;font:15px inherit;outline:none}input:focus{border-color:#0a84ff;box-shadow:0 0 0 3px rgba(10,132,255,.2)}button{width:100%;height:40px;margin-top:20px;border:0;border-radius:7px;background:#0a84ff;color:#fff;font:600 15px inherit}.error{min-height:18px;margin-top:12px;color:#ff6961;font-size:13px}</style><main class="box"><h1>家庭旁路</h1><p>登录后可管理设备、规则与机场候选池。</p><form method="post" action="/login"><label>用户名</label><input name="username" autocomplete="username" required autofocus><label>密码</label><input name="password" type="password" autocomplete="current-password" required><button>登录</button><div class="error">__ERROR__</div></form></main>'''
+
+
+PAGE_LAYOUT = {
+    "devices": [("traffic", "流量观察", "#trafficObservation"), ("z4pro", "Z4Pro 运行详情", "#z4Status"),
+                ("router", "RB5009 运行详情", "#routerStatus"), ("wireguard", "WireGuard 远程互联", "#wireguardStatus")],
+    "dns": [("rankings", "常用域名与活跃设备", "#rank-domains"), ("observability", "分流结果与较慢查询", "#rank-effective"),
+            ("data_management", "数据管理页", "#page-data")],
+    "airport": [("subscription_help", "订阅来源说明", "#subs > .muted"), ("switch_history", "自动切换历史", "#events")],
+    "rules": [("guide", "规则使用说明", ".hint"), ("preview", "规则命中预览", ".route-preview")],
+    "maintenance": [("guide", "维护说明", ".notice")],
+}
+
+
+def inject_page_layout(html, page):
+    sections = PAGE_LAYOUT.get(page)
+    if not sections or "family-layout-settings" in html:
+        return html
+    encoded = json.dumps(sections, ensure_ascii=False)
+    client = f'''<style>
+.family-layout-hidden{{display:none!important}}.family-layout-settings{{width:32px;height:32px;margin:0 0 0 8px;padding:0;border:0;border-radius:6px;background:#2c2c2e;color:#d1d1d6;font-size:17px;line-height:1;cursor:pointer}}.family-layout-settings:hover{{background:#3a3a3c;color:#fff}}.family-layout-dialog{{width:min(420px,calc(100% - 28px));padding:0;border:1px solid #48484a;border-radius:10px;background:#1c1c1e;color:#f5f5f7;box-shadow:0 24px 80px rgba(0,0,0,.62)}}.family-layout-dialog::backdrop{{background:rgba(0,0,0,.65)}}.family-layout-head{{padding:18px 20px 14px;border-bottom:1px solid #38383a}}.family-layout-head h2{{margin:0;font-size:17px}}.family-layout-head p{{margin:6px 0 0;color:#8e8e93;font-size:12px;line-height:1.5}}.family-layout-list{{padding:8px 20px}}.family-layout-item{{display:flex;align-items:center;gap:10px;padding:12px 0;border-top:1px solid #38383a;color:#f5f5f7;font-size:14px}}.family-layout-item:first-child{{border-top:0}}.family-layout-item input{{width:16px;height:16px;margin:0;accent-color:#0a84ff}}.family-layout-foot{{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 20px;border-top:1px solid #38383a}}.family-layout-status{{min-height:18px;color:#8e8e93;font-size:12px}}.family-layout-actions{{display:flex;gap:8px}}.family-layout-actions button{{height:34px;border:0;border-radius:6px;padding:0 11px;background:#2c2c2e;color:#f5f5f7;font:600 12px -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;cursor:pointer}}.family-layout-actions .primary{{background:#0a84ff;color:#fff}}@media(max-width:720px){{.family-layout-settings{{margin-left:0}}}}
+</style><script>(function(){{
+const page={page!r}, sections={encoded}; let hidden=new Set();
+function targets(key){{let row=sections.find(item=>item[0]===key),node=row&&document.querySelector(row[2]);if(!node)return[];let container=node.closest('details')||node.closest('section')||node;return[container]}}
+function apply(){{sections.forEach(row=>targets(row[0]).forEach(node=>node.classList.toggle('family-layout-hidden',hidden.has(row[0]))));document.querySelectorAll('[data-layout-key]').forEach(box=>box.checked=!hidden.has(box.dataset.layoutKey))}}
+function status(text,bad=false){{let node=document.querySelector('#family-layout-status');if(node){{node.textContent=text;node.style.color=bad?'#ff6961':'#8e8e93'}}}}
+async function request(path,opt={{}}){{let response=await fetch(path,{{...opt,headers:{{'Content-Type':'application/json',...(opt.headers||{{}})}}}});let body=await response.json();if(!response.ok)throw Error(body.error||'请求失败');return body}}
+function open(){{document.querySelector('#family-layout-dialog').showModal()}}function close(){{document.querySelector('#family-layout-dialog').close()}}
+async function save(reset=false){{let next=reset?[]:sections.filter(row=>!document.querySelector('[data-layout-key="'+row[0]+'"]').checked).map(row=>row[0]);try{{status('正在保存…');let data=await request('/api/page-layout',{{method:'POST',body:JSON.stringify({{page,hidden:next}})}});hidden=new Set(data.hidden||[]);apply();status(reset?'已恢复默认显示':'已保存');setTimeout(close,280)}}catch(error){{status(error.message,true)}}}}
+function mount(){{let host=document.querySelector('.topbar-inner')||document.querySelector('header')||document.body;let button=document.createElement('button');button.type='button';button.className='family-layout-settings';button.title='页面显示设置';button.setAttribute('aria-label','页面显示设置');button.textContent='⚙';button.onclick=open;host.append(button);let dialog=document.createElement('dialog');dialog.id='family-layout-dialog';dialog.className='family-layout-dialog';dialog.innerHTML='<div class="family-layout-head"><h2>页面显示</h2><p>只隐藏次要信息，不影响服务、规则或设备接管。</p></div><div class="family-layout-list">'+sections.map(row=>'<label class="family-layout-item"><input type="checkbox" data-layout-key="'+row[0]+'" checked><span>'+row[1]+'</span></label>').join('')+'</div><div class="family-layout-foot"><span id="family-layout-status" class="family-layout-status"></span><div class="family-layout-actions"><button type="button" id="family-layout-reset">恢复默认</button><button type="button" class="primary" id="family-layout-save">保存</button></div></div>';document.body.append(dialog);dialog.addEventListener('click',event=>{{if(event.target===dialog)close()}});document.querySelector('#family-layout-reset').onclick=()=>save(true);document.querySelector('#family-layout-save').onclick=()=>save(false);request('/api/page-layout').then(data=>{{hidden=new Set(data[page]||[]);apply()}}).catch(error=>{{status('设置读取失败：'+error.message,true)}})}}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',mount);else mount();
+}})();</script>'''
+    return html.replace("</body>", client + "</body>")
 
 
 def config():
@@ -164,18 +197,32 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(HTTPStatus.BAD_GATEWAY, "DNS 管理后端认证未配置")
                 return
             content_type = response.getheader("Content-Type", "")
-            if is_dns and "text/html" in content_type:
-                values = config()
-                proxy_ip = values["FAMILY_PROXY_IP"]
+            if "text/html" in content_type:
                 html = response_body.decode("utf-8")
-                html = html.replace(
-                    "function apiUrl(path) { return new URL(path, window.location.origin).toString(); }",
-                    "function apiUrl(path) { const prefix = window.location.pathname.startsWith('/dns/') ? '/dns' : ''; return new URL(prefix + path, window.location.origin).toString(); }",
-                )
-                html = html.replace(f'href="http://{proxy_ip}:18088/"', 'href="/"')
-                html = html.replace(f'href="http://{proxy_ip}:18088/rules"', 'href="/rules"')
-                html = html.replace(f'href="http://{proxy_ip}:18090/"', 'href="/airport/"')
-                html = html.replace('<a class="active" href="/">DNS</a>', '<a class="active" href="/dns/">DNS</a>')
+                if is_dns:
+                    values = config()
+                    proxy_ip = values["FAMILY_PROXY_IP"]
+                    html = html.replace(
+                        "function apiUrl(path) { return new URL(path, window.location.origin).toString(); }",
+                        "function apiUrl(path) { const prefix = window.location.pathname.startsWith('/dns/') ? '/dns' : ''; return new URL(prefix + path, window.location.origin).toString(); }",
+                    )
+                    html = html.replace(f'href="http://{proxy_ip}:18088/"', 'href="/"')
+                    html = html.replace(f'href="http://{proxy_ip}:18088/rules"', 'href="/rules"')
+                    html = html.replace(f'href="http://{proxy_ip}:18090/"', 'href="/airport/"')
+                    html = html.replace('<a class="active" href="/">DNS</a>', '<a class="active" href="/dns/">DNS</a>')
+                page = None
+                if parsed.path == "/":
+                    page = "devices"
+                elif parsed.path == "/rules":
+                    page = "rules"
+                elif parsed.path == "/mihomo-maintenance":
+                    page = "maintenance"
+                elif parsed.path.startswith("/airport/"):
+                    page = "airport"
+                elif parsed.path.startswith("/dns/"):
+                    page = "dns"
+                if page:
+                    html = inject_page_layout(html, page)
                 response_body = html.encode("utf-8")
             self.send_response(response.status, response.reason)
             for key, value in response.getheaders():

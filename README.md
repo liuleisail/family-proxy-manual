@@ -88,6 +88,8 @@ MosDNS-T 的推荐加固配置见 [MOSDNS.md](MOSDNS.md)。其中包含分流前
 | 规则 | 调整业务分流规则并生成可回退配置；用“规则命中预览”解释特定域名会使用的规则与策略 | 预览不修改配置；Geosite、GEOIP 和 IP 网段会明确交由 Mihomo 运行时判断，不伪造结果 |
 | 维护 | 检查 Mihomo、MosDNS、RouterOS 通道与 Z4Pro ZOS 更新状态 | 系统更新只检测和推送，绝不自动升级或重启设备 |
 
+每个页面右上角的“页面显示”齿轮只控制次要状态、说明或观察区块是否呈现；设备接管、DNS 上游、订阅导入、规则编辑和维护操作等核心入口始终保留。该偏好保存在旁路主机，因此手机、iPad 和电脑会使用同一显示方式；点击“恢复默认”即可还原完整页面。
+
 ### HomeKit 本地视频直连
 
 当 Homebridge/HomeKit 服务位于旁路主机，且摄像头画面在 iPhone、iPad 或 Apple TV 上持续转圈时，可在“设备 - 全部在线”中为摄像头、观看设备和 HomeKit Hub 选择“HomeKit 直连”。选择按 **MAC 地址** 保存；`homekit-direct-routes.timer` 每分钟从 RouterOS DHCP 租约解析当前 IP，只维护旁路主机自身到这些设备的同网段 `/32 dev LAN-bridge` 路由。
