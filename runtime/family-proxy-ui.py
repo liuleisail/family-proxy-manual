@@ -103,11 +103,11 @@ CAPTURE_LOCK = threading.Lock()
 CAPTURE_STATE = {"active": None}
 PROTECTED_RULES = {"GEOSITE,CN,DIRECT", "GEOIP,CN,DIRECT,no-resolve"}
 PAGE_LAYOUT_SECTIONS = {
-    "devices": {"traffic", "z4pro", "router", "wireguard"},
-    "dns": {"rankings", "observability", "data_management"},
-    "airport": {"subscription_help", "switch_history"},
-    "rules": {"guide", "preview"},
-    "maintenance": {"guide"},
+    "devices": ("traffic", "z4pro", "router", "wireguard"),
+    "dns": ("rankings", "observability", "data_management"),
+    "airport": ("subscription_help", "switch_history"),
+    "rules": ("guide", "preview"),
+    "maintenance": ("guide",),
 }
 
 
@@ -1226,7 +1226,8 @@ def save_device_preferences(data):
 
 
 def load_page_layout_preferences():
-    defaults = {page: [] for page in PAGE_LAYOUT_SECTIONS}
+    defaults = {page: {"hidden": [], "order": list(allowed)}
+                for page, allowed in PAGE_LAYOUT_SECTIONS.items()}
     try:
         data = json.loads(PAGE_LAYOUT_PREFS_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -1237,8 +1238,22 @@ def load_page_layout_preferences():
         raise RouterError("页面显示设置格式错误")
     result = {}
     for page, allowed in PAGE_LAYOUT_SECTIONS.items():
-        values = data.get(page, [])
-        result[page] = sorted({value for value in values if isinstance(value, str) and value in allowed}) if isinstance(values, list) else []
+        values = data.get(page, {})
+        # Accept the first release's list-only format, then transparently
+        # migrate it to the richer hidden/order structure on the next save.
+        if isinstance(values, list):
+            hidden, order = values, list(allowed)
+        elif isinstance(values, dict):
+            hidden = values.get("hidden", [])
+            order = values.get("order", list(allowed))
+        else:
+            hidden, order = [], list(allowed)
+        cleaned_hidden = sorted({value for value in hidden
+                                 if isinstance(value, str) and value in allowed}) if isinstance(hidden, list) else []
+        cleaned_order = [value for value in order
+                         if isinstance(value, str) and value in allowed] if isinstance(order, list) else []
+        cleaned_order.extend(value for value in allowed if value not in cleaned_order)
+        result[page] = {"hidden": cleaned_hidden, "order": cleaned_order}
     return result
 
 
@@ -1250,7 +1265,7 @@ def save_page_layout_preferences(data):
     os.replace(temporary, PAGE_LAYOUT_PREFS_PATH)
 
 
-def update_page_layout_preferences(page, hidden):
+def update_page_layout_preferences(page, hidden, order=None):
     if page not in PAGE_LAYOUT_SECTIONS:
         raise RouterError("页面标识无效")
     if not isinstance(hidden, list) or len(hidden) > len(PAGE_LAYOUT_SECTIONS[page]):
@@ -1260,12 +1275,18 @@ def update_page_layout_preferences(page, hidden):
         if not isinstance(value, str) or value not in PAGE_LAYOUT_SECTIONS[page]:
             raise RouterError("包含不允许隐藏的板块")
         values.add(value)
+    if order is None:
+        order = list(PAGE_LAYOUT_SECTIONS[page])
+    if not isinstance(order, list) or len(order) != len(PAGE_LAYOUT_SECTIONS[page]):
+        raise RouterError("排序格式无效")
+    if any(not isinstance(value, str) for value in order) or set(order) != set(PAGE_LAYOUT_SECTIONS[page]):
+        raise RouterError("排序包含不允许的板块")
     with PAGE_LAYOUT_PREFS_LOCK:
         data = load_page_layout_preferences()
-        data[page] = sorted(values)
+        data[page] = {"hidden": sorted(values), "order": order}
         save_page_layout_preferences(data)
-    audit("page_layout", "saved", page + "=" + ",".join(sorted(values)))
-    return {"page": page, "hidden": data[page]}
+    audit("page_layout", "saved", page + "=" + ",".join(order) + ";hidden=" + ",".join(sorted(values)))
+    return {"page": page, **data[page]}
 
 
 def read_homekit_route_state():
@@ -3167,7 +3188,7 @@ class Handler(BaseHTTPRequestHandler):
                 ))
             elif path == "/api/page-layout":
                 self.reply(HTTPStatus.OK, update_page_layout_preferences(
-                    body.get("page", ""), body.get("hidden", [])))
+                    body.get("page", ""), body.get("hidden", []), body.get("order")))
             elif path == "/api/capture/start":
                 self.reply(HTTPStatus.OK, start_capture(
                     body.get("ip", ""), body.get("duration", 60), body.get("scope", "all")))
