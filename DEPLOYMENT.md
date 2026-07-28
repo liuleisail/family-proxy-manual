@@ -108,7 +108,7 @@ sudo scripts/install-mosdns-management.sh \
 
 脚本先备份仪表盘、维护服务和 `upstream_overrides.json`，然后只重启维护服务并重建 `ui` 服务，以修复 Docker 单文件 bind mount 更换 inode 后可能出现的 `Stale file handle`。它不重启 MosDNS 核心、不改端口 `53`、不修改现有上游、不写 RouterOS，也不增加 DNS 重定向。
 
-打开统一入口的“DNS - 概览 - 解析上游”后可编辑服务器。保存时使用 MosDNS-T 热重载，并用国内外固定域名校验实际分流；失败自动恢复旧上游。未主动使用 MosDNS 的设备不受这些设置影响。
+打开统一入口的“DNS - 概览 - 解析路径”后，可通过国内或国外卡片右上角的编辑图标编辑服务器。保存时使用 MosDNS-T 热重载，并用国内外固定域名校验实际分流；失败自动恢复旧上游。未主动使用 MosDNS 的设备不受这些设置影响。
 
 ## 4. RouterOS 操作
 
