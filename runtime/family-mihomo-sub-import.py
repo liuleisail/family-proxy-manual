@@ -1085,10 +1085,11 @@ PAGE = PAGE.replace("renderPools()}function options", "catalogLoaded=true;render
 PAGE = PAGE.replace("}load()", "}loadSummary().catch(pageError)")
 PAGE = PAGE.replace("async function imp(s){", "async function addSource(){try{await api('/api/sources',{method:'POST',body:'{}'});await loadSummary()}catch(e){pageError(e)}}async function deleteSource(s){if(!confirm('删除机场会清空该来源的节点；若节点正在被当前候选池使用，操作将被拒绝。确定删除？'))return;try{await api('/api/source-remove',{method:'POST',body:JSON.stringify({slot:s})});await loadSummary()}catch(e){alert(e.message)}}async function imp(s){")
 PAGE = PAGE.replace("all=d.nodes;pools=d.pools;", "all=d.nodes;activePools=d.pools;suggestion=d.suggestions||null;pools=suggestion&&suggestion.generated_at?suggestion.pools:activePools;")
+PAGE = PAGE.replace('<div class="toolbar"><input id="filter" placeholder="筛选节点名称">', '<div class="toolbar" id="poolToolbar"><input id="filter" placeholder="筛选节点名称">')
 PAGE = PAGE.replace('<button class="btn primary" onclick="testAll()">稳定性测速</button><button class="btn" onclick="save()">校验并应用</button>', '<button class="btn primary" onclick="testAll()">全量稳定性测速</button><button class="btn" onclick="confirmApply()">复测并生效</button>')
 PAGE = PAGE.replace(
     '</style></head>',
-    '.toolbar .btn{width:108px;padding:0 8px;white-space:nowrap}@media(max-width:760px){.toolbar .btn{width:100%;padding:0 13px}}</style></head>',
+    '#poolToolbar{padding:0;border:0;background:transparent}.toolbar .btn{width:108px;padding:0 8px;white-space:nowrap}@media(max-width:760px){.toolbar .btn{width:100%;padding:0 13px}}</style></head>',
     1,
 )
 PAGE = PAGE.replace('<div class="section-title"><h2>业务候选池</h2></div>', '<div class="section-title"><h2>业务可达性报告</h2><span class="muted">只验证当前候选池，不改变排序或出口</span></div><div id="probeGrid" class="probe-grid"></div><div class="section-title"><h2>待生效候选池</h2><span class="muted">测速建议不会自动替换当前出口</span></div>')
