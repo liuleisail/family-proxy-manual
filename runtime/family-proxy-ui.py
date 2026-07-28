@@ -48,7 +48,7 @@ FIXED_MANAGED_IPS = set()
 RESERVED_IPS = {"__FAMILY_ROUTER_IP__", "__FAMILY_RESERVED_GATEWAY_IP__", PROXY_IP}
 AUDIT_PATH = Path("/var/log/family-proxy-ui-audit.jsonl")
 CSRF_TOKEN_PATH = Path("/etc/family-proxy-ui/csrf-token")
-BUILD_VERSION = "2026.07.22-wireguard-monitor"
+BUILD_VERSION = "2026.07.29-wireguard-peer-autodiscovery"
 SHARED_LIST = "family_mihomo_devices"
 SHARED_TABLE = "family_mihomo_shared"
 SHARED_CONN_MARK = "family_mihomo_conn"
@@ -1701,17 +1701,23 @@ def wireguard_status():
                 endpoint_port = peer.get("current-endpoint-port") or peer.get("endpoint-port", "")
                 if endpoint_value and endpoint_port:
                     endpoint_value = f"{endpoint_value}:{endpoint_port}"
-                peer_name = peer.get("name") or peer.get("comment") or f"对端 {index}"
+                raw_peer_name = peer.get("name") or peer.get("comment") or ""
+                peer_name = raw_peer_name or f"回家设备 {index}"
+                peer_identity = str(peer.get(".id") or peer.get("public-key") or raw_peer_name or f"index:{index}")
+                peer_id = hashlib.sha256(f"{name}\0{peer_identity}".encode("utf-8")).hexdigest()[:16]
                 peer_default_label = mobile_peer_display_name(peer_name)
-                peer_alias_key = f"peer:{name}:{peer_name}"
+                peer_alias_key = f"peer:{name}:{peer_id}"
+                legacy_alias_key = f"peer:{name}:{peer_name}"
+                peer_alias = wireguard_aliases.get(peer_alias_key, wireguard_aliases.get(legacy_alias_key, ""))
                 peer_state, peer_state_text = mobile_peer_state(age)
                 peer_rows.append({
+                    "id": peer_id,
                     "name": peer_name,
-                    "display_name": wireguard_aliases.get(peer_alias_key, peer_default_label),
+                    "display_name": peer_alias or peer_default_label,
                     "default_label": peer_default_label,
-                    "alias": wireguard_aliases.get(peer_alias_key, ""),
+                    "alias": peer_alias,
                     "alias_key": peer_alias_key,
-                    "visible_mobile_client": bool(peer.get("name")) and not re.fullmatch(r"peer\d+", peer_name, re.I),
+                    "visible_mobile_client": True,
                     "allowed_address": peer.get("allowed-address", ""),
                     "endpoint": mask_endpoint(endpoint_value),
                     "last_handshake_seconds": age,
@@ -2567,6 +2573,21 @@ PAGE = PAGE.replace(
 PAGE = PAGE.replace(
     "if(wireguardSelected){let item=wireguardData.interfaces.find(value=>value.name===wireguardSelected);if(item)wireguardDetail(item)}",
     "if(wireguardSelected){let item=wireguardData.interfaces.find(value=>value.name===wireguardSelected.interface),peer=item?.peers?.find(value=>value.name===wireguardSelected.peer);if(item&&peer)wireguardPeerDetail(item,peer);else if(item)wireguardDetail(item)}",
+    1,
+)
+PAGE = PAGE.replace(
+    "onclick=\"openWireGuardPeer('${esc(item.name)}','${esc(peer.name)}')\"",
+    "onclick=\"openWireGuardPeer('${esc(item.name)}','${esc(peer.id)}')\"",
+    1,
+)
+PAGE = PAGE.replace(
+    "function openWireGuardPeer(interfaceName,peerName){let item=wireguardData.interfaces.find(value=>value.name===interfaceName),peer=item?.peers?.find(value=>value.name===peerName);if(!item||!peer)return;wireguardSelected={interface:interfaceName,peer:peerName};wireguardPeerDetail(item,peer);document.querySelector('#wireguardDialog').showModal()}",
+    "function openWireGuardPeer(interfaceName,peerId){let item=wireguardData.interfaces.find(value=>value.name===interfaceName),peer=item?.peers?.find(value=>value.id===peerId);if(!item||!peer)return;wireguardSelected={interface:interfaceName,peer:peerId};wireguardPeerDetail(item,peer);document.querySelector('#wireguardDialog').showModal()}",
+    1,
+)
+PAGE = PAGE.replace(
+    "let item=wireguardData.interfaces.find(value=>value.name===wireguardSelected.interface),peer=item?.peers?.find(value=>value.name===wireguardSelected.peer);",
+    "let item=wireguardData.interfaces.find(value=>value.name===wireguardSelected.interface),peer=item?.peers?.find(value=>value.id===wireguardSelected.peer);",
     1,
 )
 PAGE = PAGE.replace(
