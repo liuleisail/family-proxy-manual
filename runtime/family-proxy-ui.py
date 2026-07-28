@@ -103,11 +103,14 @@ CAPTURE_LOCK = threading.Lock()
 CAPTURE_STATE = {"active": None}
 PROTECTED_RULES = {"GEOSITE,CN,DIRECT", "GEOIP,CN,DIRECT,no-resolve"}
 PAGE_LAYOUT_SECTIONS = {
-    "devices": ("traffic", "z4pro", "router", "wireguard"),
+    "devices": ("devices", "manual_add", "bypass", "traffic", "z4pro", "router", "wireguard"),
     "dns": ("rankings", "observability", "data_management"),
     "airport": ("subscription_help", "switch_history"),
     "rules": ("guide", "preview"),
     "maintenance": ("guide",),
+}
+PAGE_LAYOUT_LOCKED = {
+    "devices": {"devices", "manual_add"},
 }
 
 
@@ -1248,11 +1251,13 @@ def load_page_layout_preferences():
             order = values.get("order", list(allowed))
         else:
             hidden, order = [], list(allowed)
+        locked = PAGE_LAYOUT_LOCKED.get(page, set())
         cleaned_hidden = sorted({value for value in hidden
-                                 if isinstance(value, str) and value in allowed}) if isinstance(hidden, list) else []
+                                 if isinstance(value, str) and value in allowed and value not in locked}) if isinstance(hidden, list) else []
         cleaned_order = [value for value in order
                          if isinstance(value, str) and value in allowed] if isinstance(order, list) else []
-        cleaned_order.extend(value for value in allowed if value not in cleaned_order)
+        if set(cleaned_order) != set(allowed):
+            cleaned_order = list(allowed)
         result[page] = {"hidden": cleaned_hidden, "order": cleaned_order}
     return result
 
@@ -1271,8 +1276,9 @@ def update_page_layout_preferences(page, hidden, order=None):
     if not isinstance(hidden, list) or len(hidden) > len(PAGE_LAYOUT_SECTIONS[page]):
         raise RouterError("隐藏板块格式无效")
     values = set()
+    locked = PAGE_LAYOUT_LOCKED.get(page, set())
     for value in hidden:
-        if not isinstance(value, str) or value not in PAGE_LAYOUT_SECTIONS[page]:
+        if not isinstance(value, str) or value not in PAGE_LAYOUT_SECTIONS[page] or value in locked:
             raise RouterError("包含不允许隐藏的板块")
         values.add(value)
     if order is None:
@@ -2581,7 +2587,7 @@ PAGE = PAGE.replace(
 PAGE = PAGE.replace('@media(max-width:760px)', '@media(max-width:820px)')
 PAGE = PAGE.replace(
     '</style></head>',
-    '''.manual-add>summary{display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:46px;padding:0 14px;border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;color:#0a84ff;font-size:13px;font-weight:600;cursor:pointer;list-style:none}.manual-add>summary::-webkit-details-marker{display:none}.manual-add>summary:after{content:"›";font-size:21px;line-height:1;color:#636366;transform:rotate(90deg);transition:transform .16s ease}.manual-add[open]>summary{margin-bottom:9px}.manual-add[open]>summary:after{transform:rotate(-90deg)}.summary-hint{color:#8e8e93;font-size:12px;font-weight:400}@media(max-width:420px){.summary-hint{display:none}}</style></head>''',
+    '''.manual-add{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.manual-add .section-title{margin:0;padding:14px 16px;border-bottom:1px solid #38383a}.manual-add .section-title h2{color:#f5f5f7}.summary-hint{color:#8e8e93;font-size:12px;font-weight:400}.manual-add .group{border:0;border-radius:0}.manual-add .help,.manual-add .status{margin-left:16px;margin-right:16px}.diagnostic-section{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.diagnostic-section>summary{display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:46px;padding:0 14px;color:#0a84ff;font-size:13px;font-weight:600;cursor:pointer;list-style:none}.diagnostic-section>summary::-webkit-details-marker{display:none}.diagnostic-section>summary:after{content:"›";font-size:21px;line-height:1;color:#636366;transform:rotate(90deg);transition:transform .16s ease}.diagnostic-section[open]>summary{border-bottom:1px solid #38383a}.diagnostic-section[open]>summary:after{transform:rotate(-90deg)}.diagnostic-content{margin:0}.diagnostic-section .group{border:0;border-radius:0}.diagnostic-section .status{margin-left:16px;margin-right:16px}@media(max-width:420px){.summary-hint{display:none}}</style></head>''',
     1,
 )
 
@@ -2605,21 +2611,10 @@ PAGE = PAGE[:region_start] + ordered_sections + PAGE[region_end:]
 add_start, add_end, add_section = page_section(PAGE, "加入旁路")
 add_section = add_section.replace(
     '<section class="section"><div class="section-title"><h2>加入旁路</h2></div>',
-    '<details class="section manual-add" id="manualAdd"><summary><span>按 IP 手动加入</span><span class="summary-hint">适用于已知地址的设备</span></summary>',
+    '<section class="section manual-add" id="manualAdd"><div class="section-title"><h2>按 IP 手动加入</h2><span class="summary-hint">适用于已知地址的设备</span></div>',
     1,
 )
-add_section = add_section[:-len("</section>")] + "</details>"
 PAGE = PAGE[:add_start] + add_section + PAGE[add_end:]
-PAGE = PAGE.replace(
-    "function choose(ip){document.querySelector('#ip').value=ip;",
-    "function choose(ip){document.querySelector('#manualAdd').open=true;document.querySelector('#ip').value=ip;",
-    1,
-)
-PAGE = PAGE.replace(
-    "function setStatus(message,ok=true){statusEl.textContent=message;statusEl.className='status '+(ok?'':'error')}",
-    "function setStatus(message,ok=true){statusEl.textContent=message;statusEl.className='status '+(ok?'':'error');if(!ok)document.querySelector('#manualAdd').open=true}",
-    1,
-)
 
 
 def collapse_diagnostic_section(page, heading, hint, updated_id):
@@ -2653,31 +2648,6 @@ def collapse_runtime_section(page, heading, section_id, summary_id):
 
 PAGE = collapse_runtime_section(PAGE, "旁路运行状态", "bypassStatus", "bypassUpdated")
 PAGE = collapse_runtime_section(PAGE, "Z4Pro 运行状态", "z4Status", "systemUpdated")
-PAGE = PAGE.replace(
-    '.manual-add>summary{display:flex;',
-    '.diagnostic-section>summary,.manual-add>summary{display:flex;',
-    1,
-)
-PAGE = PAGE.replace(
-    '.manual-add>summary::-webkit-details-marker{display:none}',
-    '.diagnostic-section>summary::-webkit-details-marker,.manual-add>summary::-webkit-details-marker{display:none}',
-    1,
-)
-PAGE = PAGE.replace(
-    '.manual-add>summary:after{content:"›";',
-    '.diagnostic-section>summary:after,.manual-add>summary:after{content:"›";',
-    1,
-)
-PAGE = PAGE.replace(
-    '.manual-add[open]>summary{margin-bottom:9px}',
-    '.diagnostic-section[open]>summary,.manual-add[open]>summary{margin-bottom:9px}',
-    1,
-)
-PAGE = PAGE.replace(
-    '.manual-add[open]>summary:after{transform:rotate(-90deg)}',
-    '.diagnostic-section[open]>summary:after,.manual-add[open]>summary:after{transform:rotate(-90deg)}.diagnostic-content{margin-top:9px}',
-    1,
-)
 PAGE = PAGE.replace(
     '</style></head>',
     '''.runtime-section>summary{color:#f5f5f7}.runtime-section>summary .summary-hint{display:block;min-width:0;margin-left:auto;color:#8e8e93;font-size:12px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.runtime-section>summary .summary-hint.runtime-good{color:#30d158}.runtime-section>summary .summary-hint.runtime-warn{color:#ffd60a}.runtime-section>summary .summary-hint.runtime-bad{color:#ff6961}@media(max-width:600px){.runtime-section>summary .summary-hint{max-width:52%;font-size:11px}}</style></head>''',
