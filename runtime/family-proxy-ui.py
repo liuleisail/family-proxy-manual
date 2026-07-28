@@ -1184,7 +1184,7 @@ def normalize_mac(value):
 
 
 def load_device_preferences():
-    defaults = {"aliases": {}, "favorites": [], "homekit_direct": []}
+    defaults = {"aliases": {}, "favorites": [], "homekit_direct": [], "wireguard_aliases": {}}
     if not DEVICE_PREFS_PATH.exists():
         return defaults
     try:
@@ -1194,9 +1194,12 @@ def load_device_preferences():
     aliases = data.get("aliases", {})
     favorites = data.get("favorites", [])
     homekit_direct = data.get("homekit_direct", [])
-    if not isinstance(aliases, dict) or not isinstance(favorites, list) or not isinstance(homekit_direct, list):
+    wireguard_aliases = data.get("wireguard_aliases", {})
+    if (not isinstance(aliases, dict) or not isinstance(favorites, list)
+            or not isinstance(homekit_direct, list) or not isinstance(wireguard_aliases, dict)):
         raise RouterError("设备名称与常用名单格式错误")
     clean_aliases = {}
+    clean_wireguard_aliases = {}
     clean_favorites = set()
     clean_homekit_direct = set()
     for mac, alias in aliases.items():
@@ -1206,6 +1209,11 @@ def load_device_preferences():
             continue
         if isinstance(alias, str) and alias.strip():
             clean_aliases[normalized] = alias.strip()[:40]
+    for key, alias in wireguard_aliases.items():
+        if (isinstance(key, str) and re.fullmatch(r"(?:interface|peer):[A-Za-z0-9_.:-]+", key)
+                and isinstance(alias, str) and alias.strip()
+                and not any(ord(char) < 32 for char in alias)):
+            clean_wireguard_aliases[key] = alias.strip()[:40]
     for mac in favorites:
         try:
             clean_favorites.add(normalize_mac(mac))
@@ -1220,6 +1228,7 @@ def load_device_preferences():
         "aliases": clean_aliases,
         "favorites": sorted(clean_favorites),
         "homekit_direct": sorted(clean_homekit_direct),
+        "wireguard_aliases": clean_wireguard_aliases,
     }
 
 
@@ -1513,6 +1522,29 @@ def update_device_preference(mac, alias=None, favorite=None, homekit_direct=None
     return {"message": message, "mac": mac, "homekit": direct_status}
 
 
+def update_wireguard_alias(key, alias):
+    if not isinstance(key, str) or not re.fullmatch(r"(?:interface|peer):[A-Za-z0-9_.:-]+", key):
+        raise RouterError("WireGuard 设备标识无效")
+    if not isinstance(alias, str):
+        raise RouterError("WireGuard 设备名称格式错误")
+    alias = alias.strip()
+    if len(alias) > 40 or any(ord(char) < 32 for char in alias):
+        raise RouterError("WireGuard 设备名称需为 1 至 40 个可见字符")
+    with DEVICE_PREFS_LOCK:
+        data = load_device_preferences()
+        if alias:
+            data["wireguard_aliases"][key] = alias
+        else:
+            data["wireguard_aliases"].pop(key, None)
+        save_device_preferences(data)
+    audit("wireguard_alias", key, "success", f"alias_changed={bool(alias)}")
+    return {
+        "message": "WireGuard 设备名称已保存" if alias else "已恢复 WireGuard 默认名称",
+        "key": key,
+        "alias": alias,
+    }
+
+
 def routeros_duration_seconds(value):
     """Convert RouterOS durations such as 1w2d3h4m5s to seconds."""
     units = {"w": 604800, "d": 86400, "h": 3600, "m": 60, "s": 1}
@@ -1627,6 +1659,8 @@ def wireguard_status():
     site_label = config.get("WIREGUARD_SITE_LABEL") or "站点常驻互联"
     site_probe = config.get("WIREGUARD_SITE_PROBE", "")
     site_probe_source = config.get("WIREGUARD_SITE_PROBE_SOURCE", "")
+    with DEVICE_PREFS_LOCK:
+        wireguard_aliases = load_device_preferences()["wireguard_aliases"]
     now = int(time.time())
     with WIREGUARD_STATUS_LOCK:
         with RouterOS() as api:
@@ -1645,7 +1679,9 @@ def wireguard_status():
             if not name:
                 continue
             kind = "mobile" if name == mobile_name else "site" if name == site_name else "other"
-            label = mobile_label if kind == "mobile" else site_label if kind == "site" else name
+            default_label = mobile_label if kind == "mobile" else site_label if kind == "site" else name
+            alias_key = f"interface:{name}"
+            label = wireguard_aliases.get(alias_key, default_label)
             interface_peers = [item for item in peers if item.get("interface") == name]
             peer_rows = []
             active_peers = 0
@@ -1666,10 +1702,15 @@ def wireguard_status():
                 if endpoint_value and endpoint_port:
                     endpoint_value = f"{endpoint_value}:{endpoint_port}"
                 peer_name = peer.get("name") or peer.get("comment") or f"对端 {index}"
+                peer_default_label = mobile_peer_display_name(peer_name)
+                peer_alias_key = f"peer:{name}:{peer_name}"
                 peer_state, peer_state_text = mobile_peer_state(age)
                 peer_rows.append({
                     "name": peer_name,
-                    "display_name": mobile_peer_display_name(peer_name),
+                    "display_name": wireguard_aliases.get(peer_alias_key, peer_default_label),
+                    "default_label": peer_default_label,
+                    "alias": wireguard_aliases.get(peer_alias_key, ""),
+                    "alias_key": peer_alias_key,
                     "visible_mobile_client": bool(peer.get("name")) and not re.fullmatch(r"peer\d+", peer_name, re.I),
                     "allowed_address": peer.get("allowed-address", ""),
                     "endpoint": mask_endpoint(endpoint_value),
@@ -1703,7 +1744,9 @@ def wireguard_status():
                 for rule in nat_rules
             )
             output.append({
-                "name": name, "label": label, "kind": kind, "state": state, "state_text": state_text,
+                "name": name, "label": label, "default_label": default_label,
+                "alias": wireguard_aliases.get(alias_key, ""), "alias_key": alias_key,
+                "kind": kind, "state": state, "state_text": state_text,
                 "running": running, "listen_port": interface.get("listen-port", ""), "mtu": interface.get("mtu", ""),
                 "peer_total": len(peer_rows), "peer_active": active_peers,
                 "last_handshake_seconds": latest, "rx_bytes": rx_bytes, "tx_bytes": tx_bytes,
@@ -2483,17 +2526,22 @@ PAGE = PAGE.replace(
 function trafficBytes(value){let n=Number(value||0),units=['B','KB','MB','GB','TB'],i=0;while(n>=1024&&i<units.length-1){n/=1024;i++}return `${n.toFixed(i?1:0)} ${units[i]}`}
 function handshakeAge(seconds){if(seconds==null)return '从未';let n=Number(seconds);return n<60?`${n} 秒前`:n<3600?`${Math.floor(n/60)} 分钟前`:n<86400?`${Math.floor(n/3600)} 小时前`:`${Math.floor(n/86400)} 天前`}
 function wireguardStateText(item){return item.kind==='site'&&item.probe?.reachable?`${item.state_text} · ${item.probe.latency_ms} ms`:item.state_text}
-function wireguardInterfaceRow(item){return `<div class="wireguard-row"><div class="wg-identity"><span class="wg-dot ${esc(item.state)}"></span><div><b>${esc(item.label)}</b><div class="muted">${esc(item.name)} · UDP ${esc(item.listen_port||'--')}</div></div></div><div class="wg-metric"><span>状态</span><b class="wg-tone ${esc(item.state)}">${esc(wireguardStateText(item))}</b></div><div class="wg-metric"><span>最近握手</span><b>${esc(handshakeAge(item.last_handshake_seconds))}</b></div><div class="wg-metric"><span>对端</span><b>${item.peer_active} / ${item.peer_total} 活跃</b></div><div class="wg-metric"><span>累计流量</span><b>↓ ${trafficBytes(item.rx_bytes)} · ↑ ${trafficBytes(item.tx_bytes)}</b></div><button class="wg-detail" onclick="openWireGuard('${esc(item.name)}')" aria-label="查看 ${esc(item.label)} 详情">详情 <span>›</span></button></div>`}function wireguardMobilePeerRow(item,peer){return `<div class="wireguard-row wg-mobile-peer"><div class="wg-identity"><span class="wg-dot ${esc(peer.state)}"></span><div><b>${esc(peer.display_name||peer.name)}</b><div class="muted">回家设备 · ${esc(peer.name)}</div></div></div><div class="wg-metric"><span>状态</span><b class="wg-tone ${esc(peer.state)}">${esc(peer.state_text)}</b></div><div class="wg-metric"><span>最近握手</span><b>${esc(handshakeAge(peer.last_handshake_seconds))}</b></div><div class="wg-metric"><span>分配地址</span><b>${esc(peer.allowed_address||'--')}</b></div><div class="wg-metric"><span>累计流量</span><b>↓ ${trafficBytes(peer.rx_bytes)} · ↑ ${trafficBytes(peer.tx_bytes)}</b></div><button class="wg-detail" onclick="openWireGuard('${esc(item.name)}')" aria-label="查看 ${esc(peer.display_name||peer.name)} 所在隧道详情">详情 <span>›</span></button></div>`}function renderWireGuard(){let target=document.querySelector('#wireguardStatus'),rows=[];wireguardData.interfaces.forEach(item=>{if(item.kind!=='mobile'){rows.push(wireguardInterfaceRow(item));return}let clients=(item.peers||[]).filter(peer=>peer.visible_mobile_client);if(clients.length)rows.push(...clients.map(peer=>wireguardMobilePeerRow(item,peer)));else rows.push(wireguardInterfaceRow(item))});target.innerHTML=rows.length?rows.join(''):'<div class="empty">未发现 WireGuard 接口</div>'}
+function wireguardEditButton(key,label,defaultLabel,alias){return `<button class="wg-edit" type="button" title="编辑" aria-label="编辑 ${esc(label)}" data-tooltip="编辑" data-wg-key="${esc(key)}" data-wg-label="${esc(label)}" data-wg-default-label="${esc(defaultLabel)}" data-wg-alias="${esc(alias||'')}">✎</button>`}
+function wireguardInterfaceRow(item){return `<div class="wireguard-row"><div class="wg-identity"><span class="wg-dot ${esc(item.state)}"></span><div class="wg-name"><b>${esc(item.label)}</b>${wireguardEditButton(item.alias_key,item.label,item.default_label,item.alias)}<div class="muted">${esc(item.name)} · UDP ${esc(item.listen_port||'--')}</div></div></div><div class="wg-metric"><span>状态</span><b class="wg-tone ${esc(item.state)}">${esc(wireguardStateText(item))}</b></div><div class="wg-metric"><span>最近握手</span><b>${esc(handshakeAge(item.last_handshake_seconds))}</b></div><div class="wg-metric"><span>对端</span><b>${item.peer_active} / ${item.peer_total} 活跃</b></div><div class="wg-metric"><span>累计流量</span><b>↓ ${trafficBytes(item.rx_bytes)} · ↑ ${trafficBytes(item.tx_bytes)}</b></div><button class="wg-detail" onclick="openWireGuard('${esc(item.name)}')" aria-label="查看 ${esc(item.label)} 详情">详情 <span>›</span></button></div>`}function wireguardMobilePeerRow(item,peer){return `<div class="wireguard-row wg-mobile-peer"><div class="wg-identity"><span class="wg-dot ${esc(peer.state)}"></span><div class="wg-name"><b>${esc(peer.display_name||peer.name)}</b>${wireguardEditButton(peer.alias_key,peer.display_name||peer.name,peer.default_label||peer.name,peer.alias)}<div class="muted">回家设备 · ${esc(peer.name)}</div></div></div><div class="wg-metric"><span>状态</span><b class="wg-tone ${esc(peer.state)}">${esc(peer.state_text)}</b></div><div class="wg-metric"><span>最近握手</span><b>${esc(handshakeAge(peer.last_handshake_seconds))}</b></div><div class="wg-metric"><span>分配地址</span><b>${esc(peer.allowed_address||'--')}</b></div><div class="wg-metric"><span>累计流量</span><b>↓ ${trafficBytes(peer.rx_bytes)} · ↑ ${trafficBytes(peer.tx_bytes)}</b></div><button class="wg-detail" onclick="openWireGuard('${esc(item.name)}')" aria-label="查看 ${esc(peer.display_name||peer.name)} 所在隧道详情">详情 <span>›</span></button></div>`}function renderWireGuard(){let target=document.querySelector('#wireguardStatus'),rows=[];wireguardData.interfaces.forEach(item=>{if(item.kind!=='mobile'){rows.push(wireguardInterfaceRow(item));return}let clients=(item.peers||[]).filter(peer=>peer.visible_mobile_client);if(clients.length)rows.push(...clients.map(peer=>wireguardMobilePeerRow(item,peer)));else rows.push(wireguardInterfaceRow(item))});target.innerHTML=rows.length?rows.join(''):'<div class="empty">未发现 WireGuard 接口</div>';target.querySelectorAll('.wg-edit').forEach(button=>button.addEventListener('click',()=>openWireGuardRename(button.dataset.wgKey,button.dataset.wgLabel,button.dataset.wgDefaultLabel,button.dataset.wgAlias)))}
 function wireguardDetail(item){let routes=item.routes.length?item.routes.map(route=>`<div class="wg-detail-row"><span>${esc(route.destination)}</span><b class="${route.active?'good':'bad-text'}">${route.active?'路由生效':'路由未生效'}</b></div>`).join(''):'<div class="empty compact">该接口没有独立远端路由</div>',peers=item.peers.length?item.peers.map(peer=>`<div class="wg-peer"><div><b>${esc(peer.display_name||peer.name)}</b><span>${esc(peer.name)} · ${esc(peer.allowed_address||'未声明地址')}</span></div><div><b class="wg-tone ${esc(peer.state)}">${esc(peer.state_text)} · ${handshakeAge(peer.last_handshake_seconds)}</b><span>${esc(peer.endpoint)} · ↓ ${trafficBytes(peer.rx_bytes)} / ↑ ${trafficBytes(peer.tx_bytes)}</span></div></div>`).join(''):'<div class="empty compact">没有对端</div>',events=wireguardData.events.filter(event=>event.interface===item.name);document.querySelector('#wireguardDialogTitle').textContent=item.label;document.querySelector('#wireguardDialogBody').innerHTML=`<div class="wg-detail-summary"><div><span>当前状态</span><b class="wg-tone ${esc(item.state)}">${esc(wireguardStateText(item))}</b></div><div><span>接口</span><b>${esc(item.name)} · MTU ${esc(item.mtu||'--')}</b></div><div><span>NAT</span><b>${item.kind==='mobile'?(item.nat_ready?'已就绪':'需要检查'):'不适用'}</b></div></div><h3>对端</h3><div class="wg-detail-group">${peers}</div><h3>远端路由</h3><div class="wg-detail-group">${routes}</div><h3>最近状态变化</h3><div class="wg-detail-group">${events.length?events.slice().reverse().map(event=>`<div class="wg-detail-row"><span>${new Date(event.timestamp*1000).toLocaleString('zh-CN',{hour12:false})}</span><b>${esc(event.message)}</b></div>`).join(''):'<div class="empty compact">最近 7 天没有状态变化</div>'}</div>`}
 function openWireGuard(name){let item=wireguardData.interfaces.find(value=>value.name===name);if(!item)return;wireguardSelected=name;wireguardDetail(item);document.querySelector('#wireguardDialog').showModal()}
 function closeWireGuard(){wireguardSelected='';document.querySelector('#wireguardDialog').close()}
+let editingWireGuardKey='';
+function openWireGuardRename(key,label,defaultLabel,alias){editingWireGuardKey=key;let input=document.querySelector('#wireguardRenameInput');input.value=alias||'';input.placeholder=defaultLabel||label;document.querySelector('#wireguardRenameHint').textContent=`当前显示：${label}；留空保存可恢复默认名称。`;document.querySelector('#wireguardRenameDialog').showModal();requestAnimationFrame(()=>input.focus())}
+function closeWireGuardRename(){document.querySelector('#wireguardRenameDialog').close();editingWireGuardKey=''}
+async function saveWireGuardRename(event){event.preventDefault();let alias=document.querySelector('#wireguardRenameInput').value.trim();try{let result=await api('/api/wireguard/preference',{method:'POST',body:JSON.stringify({key:editingWireGuardKey,alias})});closeWireGuardRename();setStatus(result.message,true);await loadWireGuard()}catch(e){setStatus(e.message,false)}}
 async function loadWireGuard(){try{wireguardData=await api('/api/wireguard/status');renderWireGuard();if(wireguardSelected){let item=wireguardData.interfaces.find(value=>value.name===wireguardSelected);if(item)wireguardDetail(item)}document.querySelector('#wireguardUpdated').textContent=new Date(wireguardData.updated_at*1000).toLocaleTimeString('zh-CN',{hour12:false})}catch(e){document.querySelector('#wireguardStatus').innerHTML=`<div class="empty">读取失败：${esc(e.message)}</div>`;document.querySelector('#wireguardUpdated').textContent='读取失败'}}
 function deviceActions(d){''',
     1,
 )
 PAGE = PAGE.replace(
     "load();setInterval(()=>{if(!document.querySelector('#renameDialog').open)load()},30000)",
-    "setupRuntimeFold('bypassStatus');setupRuntimeFold('z4Status');load();loadSystem();loadWireGuard();setInterval(loadSystem,10000);setInterval(loadWireGuard,10000);setInterval(()=>{if(!document.querySelector('#renameDialog').open)load()},30000)",
+    "setupRuntimeFold('bypassStatus');setupRuntimeFold('z4Status');load();loadSystem();loadWireGuard();setInterval(loadSystem,10000);setInterval(()=>{if(!document.querySelector('#wireguardRenameDialog').open)loadWireGuard()},10000);setInterval(()=>{if(!document.querySelector('#renameDialog').open)load()},30000)",
     1,
 )
 PAGE = PAGE.replace(
@@ -2758,7 +2806,7 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     '</style></head>',
-    '''.wireguard-list{overflow:hidden}.wireguard-row{display:grid;grid-template-columns:minmax(185px,1.35fr) repeat(4,minmax(110px,1fr)) auto;align-items:center;gap:15px;padding:15px 16px;border-top:1px solid #38383a}.wireguard-row:first-child{border-top:0}.wg-identity{display:flex;align-items:center;gap:11px;min-width:0}.wg-identity b{font-size:14px}.wg-dot{width:9px;height:9px;border-radius:50%;background:#8e8e93;box-shadow:0 0 0 3px rgba(142,142,147,.14);flex:0 0 auto}.wg-dot.up{background:#30d158}.wg-dot.warn{background:#ffd60a}.wg-dot.down{background:#ff453a}.wg-metric{min-width:0}.wg-metric span,.wg-detail-summary span{display:block;color:#8e8e93;font-size:11px}.wg-metric b,.wg-detail-summary b{display:block;margin-top:5px;font-size:12px;line-height:1.35;overflow-wrap:anywhere}.wg-tone.up,.good{color:#30d158}.wg-tone.warn{color:#ffd60a}.wg-tone.down,.bad-text{color:#ff453a}.wg-tone.idle{color:#aeaeb2}.wg-detail{border:0;background:transparent;color:#0a84ff;padding:8px;font:600 13px inherit;white-space:nowrap;cursor:pointer}.wg-detail span{font-size:18px;margin-left:3px}.wireguard-dialog{width:min(720px,calc(100% - 28px))}.wireguard-dialog h3{margin:20px 0 8px;color:#8e8e93;font-size:12px;font-weight:600}.wg-detail-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;margin-top:17px;border:1px solid #38383a;border-radius:7px;background:#38383a;overflow:hidden}.wg-detail-summary>div{padding:12px;background:#242426}.wg-detail-group{border:1px solid #38383a;border-radius:7px;overflow:hidden}.wg-peer,.wg-detail-row{display:grid;grid-template-columns:1fr 1.4fr;gap:12px;padding:11px 12px;border-top:1px solid #38383a;font-size:12px}.wg-peer:first-child,.wg-detail-row:first-child{border-top:0}.wg-peer>div:last-child{text-align:right}.wg-peer b,.wg-peer span{display:block}.wg-peer span{margin-top:4px;color:#8e8e93;overflow-wrap:anywhere}.wg-detail-row b{text-align:right}.empty.compact{padding:15px}@media(max-width:820px){.wireguard-row{grid-template-columns:minmax(155px,1.3fr) 1fr 1fr auto}.wg-metric:nth-of-type(4),.wg-metric:nth-of-type(5){display:none}}@media(max-width:520px){.wireguard-row{grid-template-columns:1fr auto;gap:10px}.wg-metric{grid-column:1}.wg-metric:nth-of-type(3){display:block}.wg-detail{grid-column:2;grid-row:1/4}.wg-detail-summary{grid-template-columns:1fr}.wg-peer,.wg-detail-row{grid-template-columns:1fr}.wg-peer>div:last-child,.wg-detail-row b{text-align:left}}</style></head>''',
+    '''.wireguard-list{overflow:hidden}.wireguard-row{display:grid;grid-template-columns:minmax(185px,1.35fr) repeat(4,minmax(110px,1fr)) auto;align-items:center;gap:15px;padding:15px 16px;border-top:1px solid #38383a}.wireguard-row:first-child{border-top:0}.wg-identity{display:flex;align-items:center;gap:11px;min-width:0}.wg-name{min-width:0}.wg-identity b{font-size:14px}.wg-edit{position:relative;width:26px;height:26px;margin-left:5px;padding:0;border:0;border-radius:5px;background:transparent;color:#0a84ff;font:600 17px/1 inherit;vertical-align:middle}.wg-edit:hover,.wg-edit:focus-visible{background:rgba(10,132,255,.16);outline:0}.wg-edit::after{content:attr(data-tooltip);position:absolute;z-index:12;left:50%;top:calc(100% + 6px);transform:translateX(-50%);padding:4px 7px;border-radius:4px;background:#3a3a3c;color:#fff;font:12px inherit;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .08s ease}.wg-edit:hover::after,.wg-edit:focus-visible::after{opacity:1}.wg-dot{width:9px;height:9px;border-radius:50%;background:#8e8e93;box-shadow:0 0 0 3px rgba(142,142,147,.14);flex:0 0 auto}.wg-dot.up{background:#30d158}.wg-dot.warn{background:#ffd60a}.wg-dot.down{background:#ff453a}.wg-metric{min-width:0}.wg-metric span,.wg-detail-summary span{display:block;color:#8e8e93;font-size:11px}.wg-metric b,.wg-detail-summary b{display:block;margin-top:5px;font-size:12px;line-height:1.35;overflow-wrap:anywhere}.wg-tone.up,.good{color:#30d158}.wg-tone.warn{color:#ffd60a}.wg-tone.down,.bad-text{color:#ff453a}.wg-tone.idle{color:#aeaeb2}.wg-detail{border:0;background:transparent;color:#0a84ff;padding:8px;font:600 13px inherit;white-space:nowrap;cursor:pointer}.wg-detail span{font-size:18px;margin-left:3px}.wireguard-dialog{width:min(720px,calc(100% - 28px))}.wireguard-dialog h3{margin:20px 0 8px;color:#8e8e93;font-size:12px;font-weight:600}.wg-detail-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;margin-top:17px;border:1px solid #38383a;border-radius:7px;background:#38383a;overflow:hidden}.wg-detail-summary>div{padding:12px;background:#242426}.wg-detail-group{border:1px solid #38383a;border-radius:7px;overflow:hidden}.wg-peer,.wg-detail-row{display:grid;grid-template-columns:1fr 1.4fr;gap:12px;padding:11px 12px;border-top:1px solid #38383a;font-size:12px}.wg-peer:first-child,.wg-detail-row:first-child{border-top:0}.wg-peer>div:last-child{text-align:right}.wg-peer b,.wg-peer span{display:block}.wg-peer span{margin-top:4px;color:#8e8e93;overflow-wrap:anywhere}.wg-detail-row b{text-align:right}.empty.compact{padding:15px}@media(max-width:820px){.wireguard-row{grid-template-columns:minmax(155px,1.3fr) 1fr 1fr auto}.wg-metric:nth-of-type(4),.wg-metric:nth-of-type(5){display:none}}@media(max-width:520px){.wireguard-row{grid-template-columns:1fr auto;gap:10px}.wg-metric{grid-column:1}.wg-metric:nth-of-type(3){display:block}.wg-detail{grid-column:2;grid-row:1/4}.wg-detail-summary{grid-template-columns:1fr}.wg-peer,.wg-detail-row{grid-template-columns:1fr}.wg-peer>div:last-child,.wg-detail-row b{text-align:left}}</style></head>''',
     1,
 )
 PAGE = PAGE.replace(
@@ -2804,6 +2852,16 @@ PAGE = PAGE.replace(
 PAGE = PAGE.replace(
     "!document.querySelector('#captureDialog').open&&!document.querySelector('#wireguardDialog').open)load()",
     "!document.querySelector('#captureDialog').open&&!document.querySelector('#wireguardDialog').open&&!document.querySelector('#egressDialog').open)load()",
+    1,
+)
+PAGE = PAGE.replace(
+    '</main><dialog id="egressDialog"',
+    '''</main><dialog id="wireguardRenameDialog"><form onsubmit="saveWireGuardRename(event)"><div class="dialog-body"><h2>编辑 WireGuard 设备名称</h2><p id="wireguardRenameHint">留空保存可恢复默认名称。</p><input id="wireguardRenameInput" maxlength="40" autocomplete="off" placeholder="输入设备名称"></div><div class="dialog-actions"><button type="button" class="dialog-cancel" onclick="closeWireGuardRename()">取消</button><button type="submit" class="dialog-save">保存</button></div></form></dialog><dialog id="egressDialog"''',
+    1,
+)
+PAGE = PAGE.replace(
+    "document.querySelector('#egressDialog').addEventListener('click',event=>{if(event.target.id==='egressDialog')closeEgress()});",
+    "document.querySelector('#egressDialog').addEventListener('click',event=>{if(event.target.id==='egressDialog')closeEgress()});document.querySelector('#wireguardRenameDialog').addEventListener('click',event=>{if(event.target.id==='wireguardRenameDialog')closeWireGuardRename()});",
     1,
 )
 
@@ -3206,6 +3264,8 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("favorite") if "favorite" in body else None,
                     body.get("homekit_direct") if "homekit_direct" in body else None,
                 ))
+            elif path == "/api/wireguard/preference":
+                self.reply(HTTPStatus.OK, update_wireguard_alias(body.get("key", ""), body.get("alias", "")))
             elif path == "/api/page-layout":
                 self.reply(HTTPStatus.OK, update_page_layout_preferences(
                     body.get("page", ""), body.get("hidden", []), body.get("order"), body.get("expanded")))
