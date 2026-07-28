@@ -224,7 +224,7 @@ class Handler(BaseHTTPRequestHandler):
             response = connection.getresponse()
             response_body = response.read()
             if is_dns and response.status == HTTPStatus.UNAUTHORIZED:
-                self.send_error(HTTPStatus.BAD_GATEWAY, "DNS 管理后端认证未配置")
+                self.send_error(HTTPStatus.BAD_GATEWAY, "DNS management backend authentication is unavailable")
                 return
             content_type = response.getheader("Content-Type", "")
             if "text/html" in content_type:
@@ -263,7 +263,10 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(response_body)
         except OSError:
-            self.send_error(HTTPStatus.BAD_GATEWAY, "管理后端暂不可用")
+            # BaseHTTPRequestHandler puts the reason phrase in HTTP headers,
+            # which must be Latin-1.  Keep it ASCII so a transient upstream
+            # restart always returns a valid 502 rather than breaking the page.
+            self.send_error(HTTPStatus.BAD_GATEWAY, "Management backend temporarily unavailable")
 
     def do_GET(self):
         if not self.allowed():
