@@ -2545,6 +2545,31 @@ PAGE = PAGE.replace(
     1,
 )
 PAGE = PAGE.replace(
+    "onclick=\"openWireGuard('${esc(item.name)}')\" aria-label=\"查看 ${esc(peer.display_name||peer.name)} 所在隧道详情\"",
+    "onclick=\"openWireGuardPeer('${esc(item.name)}','${esc(peer.name)}')\" aria-label=\"查看 ${esc(peer.display_name||peer.name)} 详情\"",
+    1,
+)
+PAGE = PAGE.replace(
+    "let wireguardData={interfaces:[],events:[]},wireguardSelected='';",
+    "let wireguardData={interfaces:[],events:[]},wireguardSelected=null;",
+    1,
+)
+PAGE = PAGE.replace(
+    "function openWireGuard(name){let item=wireguardData.interfaces.find(value=>value.name===name);if(!item)return;wireguardSelected=name;wireguardDetail(item);document.querySelector('#wireguardDialog').showModal()}",
+    "function openWireGuard(name){let item=wireguardData.interfaces.find(value=>value.name===name);if(!item)return;wireguardSelected={interface:name,peer:null};wireguardDetail(item);document.querySelector('#wireguardDialog').showModal()}function wireguardPeerDetail(item,peer){let routes=item.routes.length?item.routes.map(route=>`<div class=\"wg-detail-row\"><span>${esc(route.destination)}</span><b class=\"${route.active?'good':'bad-text'}\">${route.active?'路由生效':'路由未生效'}</b></div>`).join(''):'<div class=\"empty compact\">该接口没有独立远端路由</div>',events=wireguardData.events.filter(event=>event.interface===item.name);document.querySelector('#wireguardDialogTitle').textContent=peer.display_name||peer.name;document.querySelector('#wireguardDialogBody').innerHTML=`<div class=\"wg-detail-summary\"><div><span>当前状态</span><b class=\"wg-tone ${esc(peer.state)}\">${esc(peer.state_text)}</b></div><div><span>分配地址</span><b>${esc(peer.allowed_address||'未声明地址')}</b></div><div><span>所属接口</span><b>${esc(item.label)} · UDP ${esc(item.listen_port||'--')}</b></div></div><h3>本设备连接</h3><div class=\"wg-detail-group\"><div class=\"wg-detail-row\"><span>最近握手</span><b>${esc(handshakeAge(peer.last_handshake_seconds))}</b></div><div class=\"wg-detail-row\"><span>当前端点</span><b>${esc(peer.endpoint||'未建立')}</b></div><div class=\"wg-detail-row\"><span>累计流量</span><b>↓ ${trafficBytes(peer.rx_bytes)} / ↑ ${trafficBytes(peer.tx_bytes)}</b></div></div><h3>所属接口远端路由</h3><div class=\"wg-detail-group\">${routes}</div><h3>最近接口状态变化</h3><div class=\"wg-detail-group\">${events.length?events.slice().reverse().map(event=>`<div class=\"wg-detail-row\"><span>${new Date(event.timestamp*1000).toLocaleString('zh-CN',{hour12:false})}</span><b>${esc(event.message)}</b></div>`).join(''):'<div class=\"empty compact\">最近 7 天没有状态变化</div>'}</div>`}function openWireGuardPeer(interfaceName,peerName){let item=wireguardData.interfaces.find(value=>value.name===interfaceName),peer=item?.peers?.find(value=>value.name===peerName);if(!item||!peer)return;wireguardSelected={interface:interfaceName,peer:peerName};wireguardPeerDetail(item,peer);document.querySelector('#wireguardDialog').showModal()}",
+    1,
+)
+PAGE = PAGE.replace(
+    "function closeWireGuard(){wireguardSelected='';document.querySelector('#wireguardDialog').close()}",
+    "function closeWireGuard(){wireguardSelected=null;document.querySelector('#wireguardDialog').close()}",
+    1,
+)
+PAGE = PAGE.replace(
+    "if(wireguardSelected){let item=wireguardData.interfaces.find(value=>value.name===wireguardSelected);if(item)wireguardDetail(item)}",
+    "if(wireguardSelected){let item=wireguardData.interfaces.find(value=>value.name===wireguardSelected.interface),peer=item?.peers?.find(value=>value.name===wireguardSelected.peer);if(item&&peer)wireguardPeerDetail(item,peer);else if(item)wireguardDetail(item)}",
+    1,
+)
+PAGE = PAGE.replace(
     '.overall.bad{color:#ff453a}',
     '.overall.bad{color:#ff453a}.overall.warn{color:#ffd60a}',
     1,
