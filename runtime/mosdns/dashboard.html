@@ -127,7 +127,7 @@
 
       <section id="page-data" class="page">
         <h2 class="page-title">数据管理</h2>
-        <p class="page-subtitle">查看分流数据、上游状态与软件版本。规则数据和 MosDNS 软件分别维护，软件更新具备备份、验证与自动回滚。</p>
+        <p class="page-subtitle">查看分流数据、上游状态与过滤规则。MosDNS 软件更新统一在家庭旁路的“维护”页面进行。</p>
         <div class="data-layout">
           <div>
             <div class="data-block"><div class="section-head"><h2>规则数据</h2><span id="capture-state" class="hint">--</span></div><div id="rule-data" class="data-table"><div class="empty">载入中</div></div></div>
@@ -175,22 +175,6 @@
                 </div>
               </div>
             </div>
-            <div class="data-block">
-              <div class="section-head"><h2>软件更新</h2><span id="software-update-state" class="pill direct">读取中</span></div>
-              <div class="update-card">
-                <div class="update-summary">
-                  <div class="update-item"><span class="update-label">当前内核</span><span id="software-version" class="update-value mono">--</span></div>
-                  <div class="update-item"><span class="update-label">整合镜像源</span><span id="software-image" class="update-value mono">--</span></div>
-                  <div class="update-item"><span class="update-label">自动更新</span><span id="software-auto" class="update-value">--</span></div>
-                </div>
-                <div id="software-update-detail" class="update-detail">正在读取更新状态。</div>
-                <div class="update-actions">
-                  <button id="software-check" class="btn">检查更新</button>
-                  <button id="software-apply" class="btn primary" disabled>立即更新</button>
-                  <button id="software-auto-toggle" class="btn">--</button>
-                </div>
-              </div>
-            </div>
           </div>
           <aside class="maintenance">
             <div class="section-head"><h2>维护操作</h2></div>
@@ -205,7 +189,7 @@
     </main>
   </div>
   <script>
-    const state = { page: 'overview', logs: [], filter: 'all', capture: null, softwareUpdate: null, ruleUpdate: null, adblock: null, upstreams: null, dnsVerify: null };
+    const state = { page: 'overview', logs: [], filter: 'all', capture: null, ruleUpdate: null, adblock: null, upstreams: null, dnsVerify: null };
     const $ = (s) => document.querySelector(s);
     const $$ = (s) => [...document.querySelectorAll(s)];
     const icons = { ok: 'ok', bad: 'bad' };
@@ -564,80 +548,6 @@
       try { await maintenanceApi('/adblock/allowlist', {method:'POST', body:JSON.stringify({value})}); toggleAdblockEditor(false); toast('正在重新生成规则并验证放行名单'); await pollAdblock(); await loadData(); }
       catch (error) { toast(`放行名单保存失败：${error.message}`, true); await loadAdblock(true); }
     }
-    function renderSoftwareUpdate(data) {
-      state.softwareUpdate = data;
-      const busy = Boolean(data.busy) || ['checking','updating','rolling_back'].includes(data.phase);
-      const available = Boolean(data.update_available);
-      const phase = data.phase || 'idle';
-      const labels = {idle:'尚未检查',checking:'检查中',available:'有可用更新',up_to_date:'已是最新',updating:'更新中',updated:'更新完成',rolling_back:'正在回滚',rolled_back:'已自动回滚',error:'需要检查',busy:'任务运行中'};
-      const tone = ['error','rolled_back'].includes(phase) ? 'error' : available ? 'slow' : busy ? 'proxy' : 'direct';
-      const badge = $('#software-update-state');
-      badge.textContent = labels[phase] || phase;
-      badge.className = `pill ${tone}`;
-      $('#software-version').textContent = data.current_version || '--';
-      $('#software-version').title = data.current_version || '';
-      $('#software-image').textContent = data.latest_image ? shortDigest(data.latest_image) : '等待检查';
-      $('#software-image').title = data.latest_image || '';
-      const auto = Boolean(data.config?.auto_enabled);
-      const hours = Number(data.config?.interval_hours || 168);
-      $('#software-auto').textContent = auto ? `已开启 · 每 ${Math.round(hours / 24)} 天` : '已关闭';
-      $('#software-update-detail').textContent = `${data.message || '尚未检查软件更新'} · ${updateTime(data.completed_at || data.checked_at || data.updated_at)}`;
-      $('#software-check').disabled = busy;
-      $('#software-apply').disabled = busy || !available;
-      $('#software-auto-toggle').disabled = busy;
-      $('#software-auto-toggle').textContent = auto ? '关闭自动更新' : '开启自动更新';
-      if (phase === 'updated' && data.completed_at) {
-        const notice = `updated:${data.completed_at}`;
-        if (localStorage.getItem('familyMosdnsUpdateNotice') !== notice) {
-          localStorage.setItem('familyMosdnsUpdateNotice', notice);
-          toast('MosDNS 已自动更新并通过健康检查');
-        }
-      }
-      if (phase === 'rolled_back' && data.completed_at) {
-        const notice = `rolled_back:${data.completed_at}`;
-        if (localStorage.getItem('familyMosdnsUpdateNotice') !== notice) {
-          localStorage.setItem('familyMosdnsUpdateNotice', notice);
-          toast('MosDNS 新版本验证失败，已自动恢复旧版本', true);
-        }
-      }
-    }
-    async function loadSoftwareUpdate(silent = false) {
-      try { const data = await maintenanceApi('/status'); renderSoftwareUpdate(data); return data; }
-      catch (error) {
-        $('#software-update-state').textContent = '入口不可用';
-        $('#software-update-state').className = 'pill error';
-        $('#software-update-detail').textContent = '请从家庭旁路统一管理入口打开 DNS 页面。';
-        if (!silent) toast(`更新状态读取失败：${error.message}`, true);
-        return null;
-      }
-    }
-    async function pollSoftwareUpdate() {
-      for (let attempt = 0; attempt < 180; attempt += 1) {
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        const data = await loadSoftwareUpdate(true);
-        if (!data || (!data.busy && !['checking','updating','rolling_back'].includes(data.phase))) return data;
-      }
-      toast('更新任务仍在后台运行，可稍后重新打开页面查看', true);
-      return null;
-    }
-    async function checkSoftwareUpdate() {
-      try { await maintenanceApi('/check', {method:'POST', body:'{}'}); toast('已开始检查整合镜像'); await pollSoftwareUpdate(); }
-      catch (error) { toast(`检查失败：${error.message}`, true); await loadSoftwareUpdate(true); }
-    }
-    async function applySoftwareUpdate() {
-      if (!confirm('更新会短暂重启 MosDNS 容器。配置将先备份，验证失败会自动回滚，是否继续？')) return;
-      try { await maintenanceApi('/update', {method:'POST', body:'{}'}); toast('更新已开始，页面会持续显示进度'); await pollSoftwareUpdate(); }
-      catch (error) { toast(`更新启动失败：${error.message}`, true); await loadSoftwareUpdate(true); }
-    }
-    async function toggleSoftwareAutoUpdate() {
-      const enabled = !Boolean(state.softwareUpdate?.config?.auto_enabled);
-      try {
-        const result = await maintenanceApi('/auto', {method:'POST', body:JSON.stringify({enabled})});
-        toast(result.message || (enabled ? '自动更新已开启' : '自动更新已关闭'));
-        await loadSoftwareUpdate(true);
-      } catch (error) { toast(`设置失败：${error.message}`, true); }
-    }
-
     function renderDnsVerify(data) {
       state.dnsVerify = data;
       const busy = Boolean(data.busy) || data.phase === 'checking';
@@ -706,7 +616,7 @@
       $$('.page').forEach(x => x.classList.toggle('active', x.id === `page-${page}`));
       history.replaceState(null, '', `#${page}`);
       if (page === 'logs' && !state.logs.length) loadLogs();
-      if (page === 'data') { loadData(); loadSoftwareUpdate(true); loadRuleUpdate(true); loadAdblock(true); loadDnsVerify(true); }
+      if (page === 'data') { loadData(); loadRuleUpdate(true); loadAdblock(true); loadDnsVerify(true); }
     }
     $$('.tab').forEach(x => x.addEventListener('click', () => showPage(x.dataset.page)));
     $$('.segment').forEach(x => x.addEventListener('click', () => { $$('.segment').forEach(y => y.classList.remove('active')); x.classList.add('active'); state.filter = x.dataset.filter; renderLogs(); }));
@@ -719,9 +629,6 @@
     $('#flush-cache').addEventListener('click', flushCaches);
     $('#toggle-capture').addEventListener('click', toggleCapture);
     $('#clear-logs').addEventListener('click', clearLogs);
-    $('#software-check').addEventListener('click', checkSoftwareUpdate);
-    $('#software-apply').addEventListener('click', applySoftwareUpdate);
-    $('#software-auto-toggle').addEventListener('click', toggleSoftwareAutoUpdate);
     $('#rule-update-now').addEventListener('click', updateRulesNow);
     $('#rule-auto-toggle').addEventListener('click', toggleRuleAutoUpdate);
     $$('.filter-mode button').forEach(button => button.addEventListener('click', () => setAdblockMode(button.dataset.mode)));
@@ -736,12 +643,11 @@
     const initial = ['overview','logs','data'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'overview';
     showPage(initial);
     Promise.all([loadHealth(), loadOverview()]).catch(() => {});
-    loadSoftwareUpdate(true);
     loadRuleUpdate(true);
     loadAdblock(true);
     loadDnsVerify(true);
     setInterval(() => { if (state.page === 'overview' && !document.hidden) Promise.all([loadHealth(), loadOverview()]); }, 30000);
-    setInterval(() => { if (state.page === 'data' && !document.hidden) { loadSoftwareUpdate(true); loadRuleUpdate(true); loadAdblock(true); loadDnsVerify(true); } }, 30000);
+    setInterval(() => { if (state.page === 'data' && !document.hidden) { loadRuleUpdate(true); loadAdblock(true); loadDnsVerify(true); } }, 30000);
   </script>
 </body>
 </html>
