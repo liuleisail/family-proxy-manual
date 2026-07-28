@@ -112,6 +112,9 @@ PAGE_LAYOUT_SECTIONS = {
 PAGE_LAYOUT_LOCKED = {
     "devices": {"devices", "manual_add"},
 }
+PAGE_LAYOUT_FOLDABLE = {
+    "devices": {"bypass", "traffic", "z4pro", "router", "wireguard"},
+}
 
 
 class RouterError(RuntimeError):
@@ -1229,7 +1232,7 @@ def save_device_preferences(data):
 
 
 def load_page_layout_preferences():
-    defaults = {page: {"hidden": [], "order": list(allowed)}
+    defaults = {page: {"hidden": [], "order": list(allowed), "expanded": []}
                 for page, allowed in PAGE_LAYOUT_SECTIONS.items()}
     try:
         data = json.loads(PAGE_LAYOUT_PREFS_PATH.read_text(encoding="utf-8"))
@@ -1245,12 +1248,13 @@ def load_page_layout_preferences():
         # Accept the first release's list-only format, then transparently
         # migrate it to the richer hidden/order structure on the next save.
         if isinstance(values, list):
-            hidden, order = values, list(allowed)
+            hidden, order, expanded = values, list(allowed), []
         elif isinstance(values, dict):
             hidden = values.get("hidden", [])
             order = values.get("order", list(allowed))
+            expanded = values.get("expanded", [])
         else:
-            hidden, order = [], list(allowed)
+            hidden, order, expanded = [], list(allowed), []
         locked = PAGE_LAYOUT_LOCKED.get(page, set())
         cleaned_hidden = sorted({value for value in hidden
                                  if isinstance(value, str) and value in allowed and value not in locked}) if isinstance(hidden, list) else []
@@ -1258,7 +1262,11 @@ def load_page_layout_preferences():
                          if isinstance(value, str) and value in allowed] if isinstance(order, list) else []
         if set(cleaned_order) != set(allowed):
             cleaned_order = list(allowed)
-        result[page] = {"hidden": cleaned_hidden, "order": cleaned_order}
+        foldable = PAGE_LAYOUT_FOLDABLE.get(page, set())
+        cleaned_expanded = sorted({value for value in expanded
+                                   if isinstance(value, str) and value in foldable
+                                   and value not in cleaned_hidden}) if isinstance(expanded, list) else []
+        result[page] = {"hidden": cleaned_hidden, "order": cleaned_order, "expanded": cleaned_expanded}
     return result
 
 
@@ -1270,7 +1278,7 @@ def save_page_layout_preferences(data):
     os.replace(temporary, PAGE_LAYOUT_PREFS_PATH)
 
 
-def update_page_layout_preferences(page, hidden, order=None):
+def update_page_layout_preferences(page, hidden, order=None, expanded=None):
     if page not in PAGE_LAYOUT_SECTIONS:
         raise RouterError("页面标识无效")
     if not isinstance(hidden, list) or len(hidden) > len(PAGE_LAYOUT_SECTIONS[page]):
@@ -1287,11 +1295,21 @@ def update_page_layout_preferences(page, hidden, order=None):
         raise RouterError("排序格式无效")
     if any(not isinstance(value, str) for value in order) or set(order) != set(PAGE_LAYOUT_SECTIONS[page]):
         raise RouterError("排序包含不允许的板块")
+    if expanded is None:
+        expanded = []
+    if not isinstance(expanded, list):
+        raise RouterError("展开状态格式无效")
+    foldable = PAGE_LAYOUT_FOLDABLE.get(page, set())
+    expanded_values = set()
+    for value in expanded:
+        if not isinstance(value, str) or value not in foldable or value in values:
+            raise RouterError("展开状态包含不允许的板块")
+        expanded_values.add(value)
     with PAGE_LAYOUT_PREFS_LOCK:
         data = load_page_layout_preferences()
-        data[page] = {"hidden": sorted(values), "order": order}
+        data[page] = {"hidden": sorted(values), "order": order, "expanded": sorted(expanded_values)}
         save_page_layout_preferences(data)
-    audit("page_layout", "saved", page + "=" + ",".join(order) + ";hidden=" + ",".join(sorted(values)))
+    audit("page_layout", "saved", page + "=" + ",".join(order) + ";hidden=" + ",".join(sorted(values)) + ";expanded=" + ",".join(sorted(expanded_values)))
     return {"page": page, **data[page]}
 
 
@@ -2495,7 +2513,7 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     "badge.className='overall '+(ready?'':'bad');badge.innerHTML=`<span class=\"dot\"></span><span>${ready?'旁路运行正常':'旁路需要检查'}</span>`;",
-    "badge.className='overall '+(!ready?'bad':warn?'warn':'');badge.innerHTML=`<span class=\"dot\"></span><span>${!ready?'旁路需要检查':warn?'运行正常 · 配置需核对':'旁路运行正常'}</span>`;let bypassSummary=document.querySelector('#bypassUpdated');if(bypassSummary){let foreignError=Number(summary.dns_performance?.groups?.foreign?.error_rate||0),critical=!ready||drift.length>0;bypassSummary.textContent=critical?'核心服务需要检查':foreignError>=1?`核心服务正常 · DNS ${foreignError.toFixed(1)}% 提醒`:'RB5009、Mihomo、自动回退正常';bypassSummary.className='summary-hint '+(critical?'runtime-bad':foreignError>=1?'runtime-warn':'runtime-good');autoOpenFold('bypassStatus',critical)}",
+    "badge.className='overall '+(!ready?'bad':warn?'warn':'');badge.innerHTML=`<span class=\"dot\"></span><span>${!ready?'旁路需要检查':warn?'运行正常 · 配置需核对':'旁路运行正常'}</span>`;let bypassSummary=document.querySelector('#bypassUpdated');if(bypassSummary){let critical=!ready||drift.length>0;bypassSummary.textContent=critical?'核心服务需要检查':'RB5009、Mihomo、自动回退正常';bypassSummary.className='summary-hint '+(critical?'runtime-bad':'runtime-good');autoOpenFold('bypassStatus',critical)}",
     1,
 )
 PAGE = PAGE.replace(
@@ -2519,6 +2537,28 @@ PAGE = PAGE.replace(
     1,
 )
 PAGE = PAGE.replace(
+    "function dashDns(name,item){",
+    "function dashDns(name,item,notice=''){",
+    1,
+)
+PAGE = PAGE.replace(
+    "source=item?.name||'当前上游',tone=error>=10?'bad':error>=1?'warn':'';return `<article class=\"dash-dns ${tone}\"><div class=\"dash-dns-head\"><b>${esc(name)}</b>",
+    "source=item?.name||'当前上游',tone=error>=10?'bad':error>=1?'warn':'',warning=notice?`<span class=\"dash-warning\" title=\"${esc(notice)}\" aria-label=\"${esc(notice)}\">!</span>`:'';return `<article class=\"dash-dns ${tone}\"><div class=\"dash-dns-head\"><b>${esc(name)}${warning}</b>",
+    1,
+)
+PAGE = PAGE.replace(
+    "foreignError=Number(foreign?.error_rate||0),notice=foreignError>=1?`<div class=\"dash-alert ${foreignError>=10?'bad':'warn'}\"><i></i>国外 DNS 累计尝试异常 ${foreignError.toFixed(2)}% · 双上游竞速不等于设备解析失败</div>`:'',routerOk",
+    "foreignError=Number(foreign?.error_rate||0),foreignNotice=foreignError>=1?`国外 DNS 累计尝试异常 ${foreignError.toFixed(2)}% · 双上游竞速不等于设备解析失败`:'',routerOk",
+    1,
+)
+PAGE = PAGE.replace("return `${notice}<section class=\"dash-panel dash-core\">", "return `<section class=\"dash-panel dash-core\">", 1)
+PAGE = PAGE.replace("${dashDns('国外 DNS',foreign)}</div>", "${dashDns('国外 DNS',foreign,foreignNotice)}</div>", 1)
+PAGE = PAGE.replace(
+    "</style></head>",
+    ".dash-warning{display:inline-grid;place-items:center;width:15px;height:15px;margin-left:6px;border-radius:50%;background:#ffd60a;color:#2c2416;font-size:11px;font-weight:800;vertical-align:1px;cursor:help}.dash-dns.bad .dash-warning{background:#ff6961;color:#2c1d1d}</style></head>",
+    1,
+)
+PAGE = PAGE.replace(
     "DNS ${foreignError.toFixed(1)}% 提醒",
     "DNS ${foreignError.toFixed(1)}% 尝试异常（累计）",
     1,
@@ -2526,6 +2566,11 @@ PAGE = PAGE.replace(
 PAGE = PAGE.replace(
     "国外 DNS 需关注 · 错误率 ${foreignError.toFixed(2)}%",
     "国外 DNS 累计尝试异常 ${foreignError.toFixed(2)}% · 双上游竞速不等于设备解析失败",
+    1,
+)
+PAGE = PAGE.replace(
+    "foreignError=Number(foreign?.error_rate||0),notice=foreignError>=1?`<div class=\"dash-alert ${foreignError>=10?'bad':'warn'}\"><i></i>国外 DNS 累计尝试异常 ${foreignError.toFixed(2)}% · 双上游竞速不等于设备解析失败</div>`:'',routerOk",
+    "foreignError=Number(foreign?.error_rate||0),foreignNotice=foreignError>=1?`国外 DNS 累计尝试异常 ${foreignError.toFixed(2)}% · 双上游竞速不等于设备解析失败`:'',routerOk",
     1,
 )
 PAGE = PAGE.replace(
@@ -2611,10 +2656,15 @@ PAGE = PAGE[:region_start] + ordered_sections + PAGE[region_end:]
 add_start, add_end, add_section = page_section(PAGE, "加入旁路")
 add_section = add_section.replace(
     '<section class="section"><div class="section-title"><h2>加入旁路</h2></div>',
-    '<section class="section manual-add" id="manualAdd"><div class="section-title"><h2>按 IP 手动加入</h2><span class="summary-hint">适用于已知地址的设备</span></div>',
+    '<section class="section manual-add" id="manualAdd"><div class="section-title"><h2>按 IP 手动加入</h2></div>',
     1,
 )
 PAGE = PAGE[:add_start] + add_section + PAGE[add_end:]
+PAGE = PAGE.replace(
+    '系统会检查健康状态与规则冲突。也可以先在“全部在线”中找到设备，再加入旁路。',
+    '系统会检查健康状态与规则冲突。也可以先在“全部在线”中找到设备，再加入旁路，适用于已知地址的设备。',
+    1,
+)
 
 
 def collapse_diagnostic_section(page, heading, hint, updated_id):
@@ -3158,7 +3208,7 @@ class Handler(BaseHTTPRequestHandler):
                 ))
             elif path == "/api/page-layout":
                 self.reply(HTTPStatus.OK, update_page_layout_preferences(
-                    body.get("page", ""), body.get("hidden", []), body.get("order")))
+                    body.get("page", ""), body.get("hidden", []), body.get("order"), body.get("expanded")))
             elif path == "/api/capture/start":
                 self.reply(HTTPStatus.OK, start_capture(
                     body.get("ip", ""), body.get("duration", 60), body.get("scope", "all")))
