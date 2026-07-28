@@ -2543,7 +2543,7 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     "source=item?.name||'当前上游',tone=error>=10?'bad':error>=1?'warn':'';return `<article class=\"dash-dns ${tone}\"><div class=\"dash-dns-head\"><b>${esc(name)}</b>",
-    "source=item?.name||'当前上游',tone=error>=10?'bad':error>=1?'warn':'',warning=notice?`<span class=\"dash-warning\" title=\"${esc(notice)}\" aria-label=\"${esc(notice)}\">!</span>`:'';return `<article class=\"dash-dns ${tone}\"><div class=\"dash-dns-head\"><b>${esc(name)}${warning}</b>",
+    "source=item?.name||'当前上游',tone=error>=10?'bad':error>=1?'warn':'',warning=notice?`<span class=\"dash-warning\" tabindex=\"0\" data-tooltip=\"${esc(notice)}\" aria-label=\"${esc(notice)}\">!</span>`:'';return `<article class=\"dash-dns ${tone}\"><div class=\"dash-dns-head\"><b>${esc(name)}${warning}</b>",
     1,
 )
 PAGE = PAGE.replace(
@@ -2555,7 +2555,7 @@ PAGE = PAGE.replace("return `${notice}<section class=\"dash-panel dash-core\">",
 PAGE = PAGE.replace("${dashDns('国外 DNS',foreign)}</div>", "${dashDns('国外 DNS',foreign,foreignNotice)}</div>", 1)
 PAGE = PAGE.replace(
     "</style></head>",
-    ".dash-warning{display:inline-grid;place-items:center;width:15px;height:15px;margin-left:6px;border-radius:50%;background:#ffd60a;color:#2c2416;font-size:11px;font-weight:800;vertical-align:1px;cursor:help}.dash-dns.bad .dash-warning{background:#ff6961;color:#2c1d1d}</style></head>",
+    ".dash-warning{position:relative;display:inline-grid;place-items:center;width:15px;height:15px;margin-left:6px;border-radius:50%;background:#ffd60a;color:#2c2416;font-size:11px;font-weight:800;vertical-align:1px;cursor:help}.dash-warning:after{position:absolute;z-index:12;bottom:calc(100% + 8px);left:50%;width:max-content;max-width:min(300px,70vw);padding:7px 9px;border:1px solid #73521c;border-radius:6px;background:#2c2416;color:#ffd08a;box-shadow:0 8px 20px rgba(0,0,0,.35);content:attr(data-tooltip);font-size:12px;font-weight:500;line-height:1.45;opacity:0;pointer-events:none;transform:translate(-50%,4px);transition:opacity .08s ease,transform .08s ease;white-space:normal}.dash-warning:hover:after,.dash-warning:focus-visible:after{opacity:1;transform:translate(-50%,0)}.dash-dns.bad .dash-warning{background:#ff6961;color:#2c1d1d}</style></head>",
     1,
 )
 PAGE = PAGE.replace(
@@ -2632,7 +2632,7 @@ PAGE = PAGE.replace(
 PAGE = PAGE.replace('@media(max-width:760px)', '@media(max-width:820px)')
 PAGE = PAGE.replace(
     '</style></head>',
-    '''.manual-add{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.manual-add .section-title{margin:0;padding:14px 16px;border-bottom:1px solid #38383a}.manual-add .section-title h2{color:#f5f5f7}.summary-hint{color:#8e8e93;font-size:12px;font-weight:400}.manual-add .group{border:0;border-radius:0}.manual-add .help,.manual-add .status{margin-left:16px;margin-right:16px}.diagnostic-section{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.diagnostic-section>summary{display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:46px;padding:0 14px;color:#0a84ff;font-size:13px;font-weight:600;cursor:pointer;list-style:none}.diagnostic-section>summary::-webkit-details-marker{display:none}.diagnostic-section>summary:after{content:"›";font-size:21px;line-height:1;color:#636366;transform:rotate(90deg);transition:transform .16s ease}.diagnostic-section[open]>summary{border-bottom:1px solid #38383a}.diagnostic-section[open]>summary:after{transform:rotate(-90deg)}.diagnostic-content{margin:0}.diagnostic-section .group{border:0;border-radius:0}.diagnostic-section .status{margin-left:16px;margin-right:16px}@media(max-width:420px){.summary-hint{display:none}}</style></head>''',
+    '''.manual-add{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.manual-add .add-row{padding-top:14px}.summary-hint{color:#8e8e93;font-size:12px;font-weight:400}.manual-add .group{border:0;border-radius:0}.manual-add .help,.manual-add .status{margin-left:16px;margin-right:16px}.diagnostic-section{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.diagnostic-section>summary{display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:46px;padding:0 14px;color:#0a84ff;font-size:13px;font-weight:600;cursor:pointer;list-style:none}.diagnostic-section>summary::-webkit-details-marker{display:none}.diagnostic-section>summary:after{content:"›";font-size:21px;line-height:1;color:#636366;transform:rotate(90deg);transition:transform .16s ease}.diagnostic-section[open]>summary{border-bottom:1px solid #38383a}.diagnostic-section[open]>summary:after{transform:rotate(-90deg)}.diagnostic-content{margin:0}.diagnostic-section .group{border:0;border-radius:0}.diagnostic-section .status{margin-left:16px;margin-right:16px}@media(max-width:420px){.summary-hint{display:none}}</style></head>''',
     1,
 )
 
@@ -2656,7 +2656,7 @@ PAGE = PAGE[:region_start] + ordered_sections + PAGE[region_end:]
 add_start, add_end, add_section = page_section(PAGE, "加入旁路")
 add_section = add_section.replace(
     '<section class="section"><div class="section-title"><h2>加入旁路</h2></div>',
-    '<section class="section manual-add" id="manualAdd"><div class="section-title"><h2>按 IP 手动加入</h2></div>',
+    '<section class="section manual-add" id="manualAdd">',
     1,
 )
 PAGE = PAGE[:add_start] + add_section + PAGE[add_end:]
