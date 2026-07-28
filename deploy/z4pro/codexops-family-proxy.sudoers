@@ -1,0 +1,2 @@
+# Restricted deployment entry point for the family-proxy UI controller.
+codexops ALL=(root) NOPASSWD: /usr/local/sbin/deploy-family-proxy-ui
