@@ -1118,6 +1118,75 @@ def start_test_all():
     return {"started": True, **test_status()}
 
 
+def start_replace_and_clear_slot(slot):
+    """Safely replace a source's active nodes before clearing its provider."""
+    if slot not in source_map():
+        raise ValueError("无效机场槽位")
+    if not TEST_JOB_LOCK.acquire(blocking=False):
+        raise ValueError("已有测速或自动替换正在进行")
+    remaining = [item["name"] for item in nodes() if item["source"] != slot]
+    if not remaining:
+        TEST_JOB_LOCK.release()
+        raise ValueError("没有其他机场节点可用于自动替换")
+    now = datetime.now().astimezone().isoformat()
+    with TEST_STATE_LOCK:
+        TEST_STATE.update({"running": True, "total": len(remaining), "completed": 0,
+                           "started_at": now, "finished_at": None, "error": None,
+                           "action": "replace-clear", "phase": "nodes",
+                           "proposal_ready": False, "applied": False})
+
+    def update_progress(completed, total):
+        with TEST_STATE_LOCK:
+            TEST_STATE.update({"completed": completed, "total": total})
+
+    def run():
+        path = provider_path(slot)
+        previous_provider = path.read_bytes() if path.exists() else b"proxies: []\n"
+        previous_candidates = CANDIDATES.read_bytes() if CANDIDATES.exists() else b"{}"
+        previous_config = MIHOMO_CONFIG.read_bytes()
+        previous_suggestions = SUGGESTIONS.read_bytes() if SUGGESTIONS.exists() else None
+        try:
+            proposal = build_suggestions(test_nodes(remaining, update_progress))
+            if not proposal["ready"]:
+                raise ValueError("无法安全替换：" + str(proposal["reason"]))
+            path.write_text("proxies: []\n")
+            os.chmod(path, 0o600)
+            replacement = validate_pools(proposal["pools"])
+            generate_config(replacement)
+            PREVIOUS.write_bytes(previous_candidates)
+            atomic_json(CANDIDATES, replacement)
+            atomic_json(SUGGESTIONS, {**proposal, "pools": replacement,
+                                      "applied_at": datetime.now().astimezone().isoformat()})
+            (PROVIDERS / f"{slot}.json").unlink(missing_ok=True)
+            with TEST_STATE_LOCK:
+                TEST_STATE.update({"running": False, "completed": TEST_STATE["total"],
+                                   "finished_at": datetime.now().astimezone().isoformat(),
+                                   "proposal_ready": True, "applied": True})
+        except Exception as exc:
+            path.write_bytes(previous_provider)
+            os.chmod(path, 0o600)
+            CANDIDATES.write_bytes(previous_candidates)
+            if previous_suggestions is None:
+                SUGGESTIONS.unlink(missing_ok=True)
+            else:
+                SUGGESTIONS.write_bytes(previous_suggestions)
+            if MIHOMO_CONFIG.read_bytes() != previous_config:
+                MIHOMO_CONFIG.write_bytes(previous_config)
+                os.chmod(MIHOMO_CONFIG, 0o640)
+                try:
+                    restart_mihomo()
+                except Exception:
+                    pass
+            with TEST_STATE_LOCK:
+                TEST_STATE.update({"running": False, "error": str(exc),
+                                   "finished_at": datetime.now().astimezone().isoformat()})
+        finally:
+            TEST_JOB_LOCK.release()
+
+    threading.Thread(target=run, name=f"mihomo-replace-clear-{slot}", daemon=True).start()
+    return {"started": True, **test_status()}
+
+
 def start_retest_apply(value):
     if not suggestions()["ready"]:
         raise ValueError("请先完成全量稳定性测速并生成完整建议")
@@ -1406,6 +1475,8 @@ PAGE = PAGE.replace(
     "配置校验和重启验证均通过，候选节点已按测速结果排序",
     1,
 )
+_auto_replace_clear_js = r'''const familyShowTestStatus=showTestStatus;function showTestStatus(d){let status=document.querySelector('#testStatus');if(d.action==='replace-clear'){clearTimeout(testPoll);if(d.running){status.textContent='正在复测其余机场节点并自动替换候选池：'+d.completed+'/'+d.total+'；可继续浏览页面';status.className='status';testPoll=setTimeout(refreshTestStatus,1000);return}if(d.error){status.textContent='自动替换未执行：'+d.error;status.className='status bad';return}if(d.finished_at){status.textContent=d.applied?'已复测、替换候选池并清空该机场节点；配置校验和运行验证均通过':'自动替换未完成';status.className=d.applied?'status':'status bad';catalogLoaded=false;loadPools();return}}familyShowTestStatus(d)}async function dropSlot(s){if(!confirm('将自动复测其余机场节点、替换全部受影响业务池，验证成功后才清空此机场。确定继续？'))return;try{showTestStatus(await api('/api/replace-clear',{method:'POST',body:JSON.stringify({slot:s})}))}catch(e){let status=document.querySelector('#testStatus');status.textContent=e.message;status.className='status bad'}}'''
+PAGE = PAGE.replace('</script></body></html>', _auto_replace_clear_js + '</script></body></html>', 1)
 
 _probe_marker = "function options(pool){"
 _probe_js = r'''function stampProbe(value){if(!value)return '尚无记录';let d=new Date(value);return isNaN(d.getTime())?value:d.toLocaleString()}function renderProbeReport(data){probeData=data||{};clearTimeout(probePoll);let grid=document.querySelector('#probeGrid');if(!grid)return;let running=probeData.running||{};grid.innerHTML=poolNames.map(function(pool){let item=(probeData.pools||{})[pool]||{},busy=Boolean(running.running&&running.pool===pool),latest=item.tested_at?'最近专项复测：'+stampProbe(item.tested_at):'尚无专项复测',result=item.stable_count?'连续三次通过 '+item.stable_count+'/'+item.candidate_count+' 个候选 · 中位 '+item.median_delay+' ms · 最大抖动 '+item.max_jitter+' ms':(item.completed_count?'本次没有连续三次成功的节点':'等待业务专项复测'),error=running.error&&running.pool===pool?'<div class="status bad">复测失败：'+esc(running.error)+'</div>':'';return '<article class="card probe-card"><div class="card-head"><h3>'+esc(pool)+'</h3><span class="count">'+(item.candidate_count||0)+'/5</span></div><div class="probe-target">'+esc(item.protocol||'HTTPS')+' · '+esc(item.target||'')+'</div><div class="probe-meta">发起位置：'+esc(item.location||'Z4Pro 经 Mihomo')+'<br>'+esc(latest)+'</div><div class="probe-result">'+esc(result)+'</div>'+error+'<div class="probe-actions"><button class="btn" '+(busy?'disabled':'')+' onclick="probePool(\''+pool+'\')">'+(busy?'正在复测 '+running.completed+'/'+running.total:'复测此业务池')+'</button></div></article>'}).join('');if(running.running)probePoll=setTimeout(loadProbeReport,1000)}async function loadProbeReport(){try{renderProbeReport(await api('/api/probes'))}catch(e){let grid=document.querySelector('#probeGrid');if(grid)grid.innerHTML='<div class="status bad">业务探针报告读取失败：'+esc(e.message)+'</div>'}}async function probePool(pool){try{let active=activePools[pool]||[];renderProbeReport({pools:probeData.pools||{},running:{running:true,pool:pool,total:active.length,completed:0}});renderProbeReport({pools:probeData.pools||{},running:await api('/api/pool-probe',{method:'POST',body:JSON.stringify({pool:pool})})})}catch(e){let grid=document.querySelector('#probeGrid');if(grid)grid.insertAdjacentHTML('afterbegin','<div class="status bad">无法开始专项复测：'+esc(e.message)+'</div>')}}'''
@@ -1507,6 +1578,7 @@ class Handler(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
             if path == "/api/import": result = import_slot(body["slot"], body.get("url", ""))
             elif path == "/api/remove": result = clear_slot(body["slot"])
+            elif path == "/api/replace-clear": result = start_replace_and_clear_slot(body["slot"])
             elif path == "/api/sources": result = add_source()
             elif path == "/api/source-remove": result = delete_source(body["slot"])
             elif path == "/api/pools": result = save_pools(body.get("pools", {}))
