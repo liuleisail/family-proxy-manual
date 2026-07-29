@@ -190,20 +190,31 @@ def merge_managed_rule_sets(config):
         config["rule-providers"] = providers
     else:
         config.pop("rule-providers", None)
-    rules = [str(rule) for rule in config.get("rules") or []
-             if not str(rule).startswith("RULE-SET,family-")]
+    rules = [str(rule) for rule in config.get("rules") or []]
     def rendered(items):
         return [f"RULE-SET,family-{item['key']}-{source['key']},{item['policy']}" +
                 (",no-resolve" if source["behavior"] == "ipcidr" else "")
                 for item in items for source in item["sources"]]
     high = [item for item in rule_sets if item["priority"] == "high"]
     normal = [item for item in rule_sets if item["priority"] == "normal"]
+    desired = rendered(rule_sets)
+    desired_set = set(desired)
+    retained, seen = [], set()
+    for rule in rules:
+        if not rule.startswith("RULE-SET,family-"):
+            retained.append(rule)
+        elif rule in desired_set and rule not in seen:
+            retained.append(rule)
+            seen.add(rule)
+    rules = retained
+    missing_high = [rule for rule in rendered(high) if rule not in seen]
+    missing_normal = [rule for rule in rendered(normal) if rule not in seen]
     high_at = next((index for index, rule in enumerate(rules)
                     if rule.startswith("GEOSITE,") and rule != "GEOSITE,CN,DIRECT"),
                    next((index for index, rule in enumerate(rules) if rule == "GEOSITE,CN,DIRECT"), len(rules)))
-    rules[high_at:high_at] = rendered(high)
+    rules[high_at:high_at] = missing_high
     normal_at = next((index for index, rule in enumerate(rules) if rule == "GEOSITE,CN,DIRECT"), len(rules))
-    rules[normal_at:normal_at] = rendered(normal)
+    rules[normal_at:normal_at] = missing_normal
     config["rules"] = rules
 
 

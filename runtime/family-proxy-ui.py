@@ -893,20 +893,31 @@ def merge_rule_sets(document, rule_sets):
         document["rule-providers"] = providers
     else:
         document.pop("rule-providers", None)
-    rules = [str(rule) for rule in document.get("rules", [])
-             if not str(rule).startswith("RULE-SET," + RULE_SET_KEY_PREFIX)]
+    rules = [str(rule) for rule in document.get("rules", [])]
     high = [rule_set for rule_set in rule_sets if rule_set["priority"] == "high"]
     normal = [rule_set for rule_set in rule_sets if rule_set["priority"] == "normal"]
     def build(items):
         return [f"RULE-SET,{RULE_SET_KEY_PREFIX}{item['key']}-{source['key']},{item['policy']}" +
                 (",no-resolve" if source["behavior"] == "ipcidr" else "")
                 for item in items for source in item["sources"]]
+    desired = build(rule_sets)
+    desired_set = set(desired)
+    retained, seen = [], set()
+    for rule in rules:
+        if not rule.startswith("RULE-SET," + RULE_SET_KEY_PREFIX):
+            retained.append(rule)
+        elif rule in desired_set and rule not in seen:
+            retained.append(rule)
+            seen.add(rule)
+    rules = retained
+    missing_high = [rule for rule in build(high) if rule not in seen]
+    missing_normal = [rule for rule in build(normal) if rule not in seen]
     high_index = next((index for index, rule in enumerate(rules)
                        if rule.startswith("GEOSITE,") and rule != "GEOSITE,CN,DIRECT"),
                       next((index for index, rule in enumerate(rules) if rule == "GEOSITE,CN,DIRECT"), len(rules)))
-    rules[high_index:high_index] = build(high)
+    rules[high_index:high_index] = missing_high
     normal_index = next((index for index, rule in enumerate(rules) if rule == "GEOSITE,CN,DIRECT"), len(rules))
-    rules[normal_index:normal_index] = build(normal)
+    rules[normal_index:normal_index] = missing_normal
     document["rules"] = rules
     return rules
 
