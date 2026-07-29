@@ -115,6 +115,7 @@ TEST_STATE = {
     "finished_at": None,
     "error": None,
     "action": None,
+    "phase": None,
     "proposal_ready": False,
     "applied": False,
 }
@@ -1083,7 +1084,7 @@ def start_test_all():
     with TEST_STATE_LOCK:
         TEST_STATE.update({"running": True, "total": len(names), "completed": 0,
                            "started_at": now, "finished_at": None, "error": None,
-                           "action": "full-test", "proposal_ready": False, "applied": False})
+                           "action": "full-test", "phase": "nodes", "proposal_ready": False, "applied": False})
 
     def update_progress(completed, total):
         with TEST_STATE_LOCK:
@@ -1095,11 +1096,11 @@ def start_test_all():
             github = github_candidates(proposal["pools"])
             if github:
                 with TEST_STATE_LOCK:
-                    TEST_STATE["total"] = len(names) + len(github)
+                    TEST_STATE.update({"phase": "github", "total": len(github), "completed": 0})
 
                 def update_github_progress(completed, _total):
                     with TEST_STATE_LOCK:
-                        TEST_STATE["completed"] = len(names) + completed
+                        TEST_STATE["completed"] = completed
 
                 github_results = test_pool_candidates({"GitHub-Auto": github}, update_github_progress)
                 persist_pool_probe_results(github_results)
@@ -1126,12 +1127,12 @@ def start_retest_apply(value):
     if not TEST_JOB_LOCK.acquire(blocking=False):
         return {"started": False, **test_status()}
     github = github_candidates(selected)
-    total = sum(len(entries) for entries in selected.values()) + len(github)
+    total = sum(len(entries) for entries in selected.values())
     now = datetime.now().astimezone().isoformat()
     with TEST_STATE_LOCK:
         TEST_STATE.update({"running": True, "total": total, "completed": 0,
                            "started_at": now, "finished_at": None, "error": None,
-                           "action": "retest-apply", "proposal_ready": True, "applied": False})
+                           "action": "retest-apply", "phase": "nodes", "proposal_ready": True, "applied": False})
 
     def update_progress(completed, total):
         with TEST_STATE_LOCK:
@@ -1141,8 +1142,11 @@ def start_retest_apply(value):
         try:
             results = test_pool_candidates(selected, update_progress)
             if github:
+                with TEST_STATE_LOCK:
+                    TEST_STATE.update({"phase": "github", "total": len(github), "completed": 0})
+
                 def update_github_progress(completed, _total):
-                    update_progress(sum(len(entries) for entries in selected.values()) + completed, total)
+                    update_progress(completed, len(github))
                 github_results = test_pool_candidates({"GitHub-Auto": github}, update_github_progress)
                 persist_pool_probe_results(github_results)
             atomic_json(CONFIRM_TESTS, {"tested_at": datetime.now().astimezone().isoformat(),
@@ -1382,9 +1386,18 @@ PAGE = PAGE.replace(
 PAGE = PAGE.replace('<div class="section-title"><h2>业务候选池</h2></div>', '<div class="section-title"><h2>业务可达性报告</h2><span class="muted">只验证当前候选池，不改变排序或出口</span></div><div id="probeGrid" class="probe-grid"></div><div class="section-title"><h2>待生效候选池</h2><span class="muted">测速建议不会自动替换当前出口</span></div>')
 _old_speed_test = "async function testAll(){let status=document.querySelector('#testStatus');try{status.textContent='正在对每个节点连续测试三次，本次操作完成后即停止…';status.className='status';let d=await api('/api/test-all',{method:'POST',body:'{}'});delays=Object.fromEntries(d.results.map(function(x){return [x.name,x]}));status.textContent='测速完成：'+d.results.filter(function(x){return x.ok}).length+'/'+d.results.length+' 稳定可用';renderPools()}catch(e){status.textContent=e.message;status.className='status bad'}}"
 _new_speed_test = "function showTestStatus(d){let status=document.querySelector('#testStatus');clearTimeout(testPoll);if(d.running){status.textContent=(d.action==='retest-apply'?'候选池复测中：':'全量测速（含 GitHub 专项）中：')+d.completed+'/'+d.total+' 个节点已完成；可继续浏览页面';status.className='status';testPoll=setTimeout(refreshTestStatus,1000);return}if(d.error){status.textContent=(d.action==='retest-apply'?'复测未生效：':'测速未完成：')+d.error;status.className='status bad';return}if(d.finished_at&&d.action==='retest-apply'){status.textContent=d.applied?'复测、GitHub 专项、配置校验和运行验证均通过，候选池已生效':'复测完成，但未生效';status.className=d.applied?'status':'status bad';catalogLoaded=false;loadPools();return}if(d.finished_at&&d.action==='full-test'){status.textContent=d.suggestions&&d.suggestions.ready?'全量测速和 GitHub 专项已完成，已生成待生效建议；确认后点击“复测并生效”':'测速完成，但有业务池没有连续三次成功的节点';status.className=d.suggestions&&d.suggestions.ready?'status':'status bad';catalogLoaded=false;loadPools();return}if(d.suggestions&&d.suggestions.ready){status.textContent='已生成待生效建议；当前出口保持不变，点击“复测并生效”后才会更新';status.className='status';return}if(d.last_tested_at){status.textContent='上次稳定性测速：'+d.last_tested_at}}async function refreshTestStatus(){try{showTestStatus(await api('/api/test-status'))}catch(e){let status=document.querySelector('#testStatus');status.textContent='测速状态读取失败：'+e.message;status.className='status bad'}}async function testAll(){try{showTestStatus(await api('/api/test-all',{method:'POST',body:'{}'}))}catch(e){let status=document.querySelector('#testStatus');status.textContent=e.message;status.className='status bad'}}async function confirmApply(){let status=document.querySelector('#testStatus');try{showTestStatus(await api('/api/retest-apply',{method:'POST',body:JSON.stringify({pools:pools})}))}catch(e){status.textContent=e.message;status.className='status bad'}}"
+_new_speed_test = _new_speed_test.replace(
+    "status.textContent=(d.action==='retest-apply'?'候选池复测中：':'全量测速（含 GitHub 专项）中：')+d.completed+'/'+d.total",
+    "status.textContent=(d.phase==='github'?'GitHub 专项测速中：':(d.action==='retest-apply'?'候选池复测中：':'全量测速中：'))+d.completed+'/'+d.total",
+)
 if _old_speed_test not in PAGE:
     raise RuntimeError("speed test template marker missing")
 PAGE = PAGE.replace(_old_speed_test, _new_speed_test, 1)
+PAGE = PAGE.replace(
+    "</style>",
+    "#testStatus{min-height:36px;line-height:18px;font-variant-numeric:tabular-nums}</style>",
+    1,
+)
 
 _probe_marker = "function options(pool){"
 _probe_js = r'''function stampProbe(value){if(!value)return '尚无记录';let d=new Date(value);return isNaN(d.getTime())?value:d.toLocaleString()}function renderProbeReport(data){probeData=data||{};clearTimeout(probePoll);let grid=document.querySelector('#probeGrid');if(!grid)return;let running=probeData.running||{};grid.innerHTML=poolNames.map(function(pool){let item=(probeData.pools||{})[pool]||{},busy=Boolean(running.running&&running.pool===pool),latest=item.tested_at?'最近专项复测：'+stampProbe(item.tested_at):'尚无专项复测',result=item.stable_count?'连续三次通过 '+item.stable_count+'/'+item.candidate_count+' 个候选 · 中位 '+item.median_delay+' ms · 最大抖动 '+item.max_jitter+' ms':(item.completed_count?'本次没有连续三次成功的节点':'等待业务专项复测'),error=running.error&&running.pool===pool?'<div class="status bad">复测失败：'+esc(running.error)+'</div>':'';return '<article class="card probe-card"><div class="card-head"><h3>'+esc(pool)+'</h3><span class="count">'+(item.candidate_count||0)+'/5</span></div><div class="probe-target">'+esc(item.protocol||'HTTPS')+' · '+esc(item.target||'')+'</div><div class="probe-meta">发起位置：'+esc(item.location||'Z4Pro 经 Mihomo')+'<br>'+esc(latest)+'</div><div class="probe-result">'+esc(result)+'</div>'+error+'<div class="probe-actions"><button class="btn" '+(busy?'disabled':'')+' onclick="probePool(\''+pool+'\')">'+(busy?'正在复测 '+running.completed+'/'+running.total:'复测此业务池')+'</button></div></article>'}).join('');if(running.running)probePoll=setTimeout(loadProbeReport,1000)}async function loadProbeReport(){try{renderProbeReport(await api('/api/probes'))}catch(e){let grid=document.querySelector('#probeGrid');if(grid)grid.innerHTML='<div class="status bad">业务探针报告读取失败：'+esc(e.message)+'</div>'}}async function probePool(pool){try{let active=activePools[pool]||[];renderProbeReport({pools:probeData.pools||{},running:{running:true,pool:pool,total:active.length,completed:0}});renderProbeReport({pools:probeData.pools||{},running:await api('/api/pool-probe',{method:'POST',body:JSON.stringify({pool:pool})})})}catch(e){let grid=document.querySelector('#probeGrid');if(grid)grid.insertAdjacentHTML('afterbegin','<div class="status bad">无法开始专项复测：'+esc(e.message)+'</div>')}}'''
