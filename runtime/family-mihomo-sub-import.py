@@ -1394,6 +1394,11 @@ if _old_speed_test not in PAGE:
     raise RuntimeError("speed test template marker missing")
 PAGE = PAGE.replace(_old_speed_test, _new_speed_test, 1)
 PAGE = PAGE.replace(
+    "async function api(path,opt={}){let r=await fetch(new URL(\"/airport\"+path,location.origin),{...opt,headers:{'Content-Type':'application/json','X-CSRF':csrf}}),d=await r.json();if(!r.ok)throw Error(d.error||'请求失败');return d}",
+    "async function api(path,opt={}){let r=await fetch(new URL(\"/airport\"+path,location.origin),{...opt,headers:{'Content-Type':'application/json','X-CSRF':csrf}}),d=await r.json();if(!r.ok){if(r.status===403&&d.error==='request rejected'){location.reload();return new Promise(function(){})}throw Error(d.error||'请求失败')}return d}",
+    1,
+)
+PAGE = PAGE.replace(
     "</style>",
     "#testStatus{min-height:36px;line-height:18px;font-variant-numeric:tabular-nums}</style>",
     1,
@@ -1484,6 +1489,7 @@ class Handler(BaseHTTPRequestHandler):
             body = PAGE.replace("__CSRF__", CSRF).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
         else:
