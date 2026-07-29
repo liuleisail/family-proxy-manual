@@ -319,6 +319,25 @@ def fallback(name, selected, url, interval, expected_status=None):
     return group
 
 
+def latency_aware_url_test(name, selected, url, interval, tolerance):
+    if not selected:
+        raise ValueError(f"{name} 没有候选节点，拒绝生成可能直连泄漏的配置")
+    return {
+        "name": name,
+        "type": "url-test",
+        "proxies": selected,
+        "url": url,
+        "interval": interval,
+        # Keep the small candidate pool warm. The tolerance prevents a switch
+        # for ordinary jitter while still moving away from a persistently slow
+        # Telegram path.
+        "lazy": False,
+        "timeout": 5000,
+        "tolerance": tolerance,
+        "max-failed-times": 2,
+    }
+
+
 def wait_mihomo(timeout=20):
     deadline = time.monotonic() + timeout
     last_error = None
@@ -439,7 +458,7 @@ def generate_config(selected=None):
         fallback("JP-AI", jp, "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
         fallback("SG-AI", sg, "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
         fallback("US-AI", us, "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
-        fallback("TG-Auto", tg, "https://core.telegram.org", 300),
+        latency_aware_url_test("TG-Auto", tg, "https://core.telegram.org", 120, 150),
         fallback("TG-Notify", notify, "https://api.telegram.org", 300),
         fallback("Proxy-Auto", proxy, "https://www.gstatic.com/generate_204", 300, "204"),
         fallback("GitHub-Auto", github, "https://github.com/", 300, "200"),
