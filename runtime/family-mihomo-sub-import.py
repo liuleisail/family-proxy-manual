@@ -51,6 +51,8 @@ HK_NODE = re.compile(r"(?:香港|hong[ -]?kong|(?<![a-z])hkg?(?![a-z]))", re.I)
 SUGGESTION_SCHEMA = 3
 CANDIDATES = PROVIDERS / "candidates.json"
 PREVIOUS = PROVIDERS / "candidates.previous.json"
+POOL_SETTINGS = PROVIDERS / "pool-settings.json"
+PREVIOUS_POOL_SETTINGS = PROVIDERS / "pool-settings.previous.json"
 LAST_TESTS = PROVIDERS / "last-tests.json"
 CONFIRM_TESTS = PROVIDERS / "last-confirm-tests.json"
 POOL_PROBES = PROVIDERS / "pool-probes.json"
@@ -83,7 +85,22 @@ POOL_TEST_URLS = {
     "TG": "https://core.telegram.org",
     "Proxy": "https://www.gstatic.com/generate_204",
 }
+POOL_MODES = {
+    "select": "手动选择",
+    "fallback": "故障切换",
+    "url-test": "自动测速",
+}
+POOL_RUNTIME = {
+    "HK-视频": {"group": "HK-视频", "url": "https://www.youtube.com/generate_204", "interval": 300, "expected_status": "204", "default": "fallback"},
+    "JP-AI": {"group": "JP-AI", "url": "https://chatgpt.com/cdn-cgi/trace", "interval": 180, "expected_status": "200", "default": "fallback"},
+    "SG-AI": {"group": "SG-AI", "url": "https://chatgpt.com/cdn-cgi/trace", "interval": 180, "expected_status": "200", "default": "fallback"},
+    "US-AI": {"group": "US-AI", "url": "https://chatgpt.com/cdn-cgi/trace", "interval": 180, "expected_status": "200", "default": "fallback"},
+    "其他-AI": {"group": "其他-AI", "url": "https://chatgpt.com/cdn-cgi/trace", "interval": 180, "expected_status": "200", "default": "fallback"},
+    "TG": {"group": "TG-Auto", "url": "https://core.telegram.org", "interval": 120, "tolerance": 150, "default": "url-test"},
+    "Proxy": {"group": "Proxy-Auto", "url": "https://www.gstatic.com/generate_204", "interval": 300, "expected_status": "204", "default": "fallback"},
+}
 TEST_JOB_LOCK = threading.Lock()
+POOL_SETTINGS_LOCK = threading.Lock()
 TEST_STATE_LOCK = threading.Lock()
 POOL_PROBE_LOCK = threading.Lock()
 POOL_PROBE_STATE_LOCK = threading.Lock()
@@ -212,6 +229,23 @@ def pools():
     return {name: list(data.get(name, []))[:5] for name in POOLS}
 
 
+def pool_settings():
+    try:
+        data = json.loads(POOL_SETTINGS.read_text())
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    return validate_pool_settings(data)
+
+
+def validate_pool_settings(value):
+    value = value if isinstance(value, dict) else {}
+    cleaned = {}
+    for pool, spec in POOL_RUNTIME.items():
+        mode = str((value.get(pool) or {}).get("type") or spec["default"])
+        cleaned[pool] = {"type": mode if mode in POOL_MODES else spec["default"]}
+    return cleaned
+
+
 def suggestions():
     data = read_json(SUGGESTIONS, {})
     if data.get("schema") != SUGGESTION_SCHEMA:
@@ -338,6 +372,20 @@ def latency_aware_url_test(name, selected, url, interval, tolerance):
     }
 
 
+def candidate_pool_group(pool, selected, settings):
+    if not selected:
+        raise ValueError(f"{pool} 没有候选节点，拒绝生成可能直连泄漏的配置")
+    spec = POOL_RUNTIME[pool]
+    mode = settings[pool]["type"]
+    if mode == "select":
+        return {"name": spec["group"], "type": "select", "proxies": selected}
+    if mode == "url-test":
+        return latency_aware_url_test(
+            spec["group"], selected, spec["url"], spec["interval"], spec.get("tolerance", 50)
+        )
+    return fallback(spec["group"], selected, spec["url"], spec["interval"], spec.get("expected_status"))
+
+
 def wait_mihomo(timeout=20):
     deadline = time.monotonic() + timeout
     last_error = None
@@ -372,9 +420,10 @@ def save_config_version(content, label):
     return path
 
 
-def generate_config(selected=None):
+def generate_config(selected=None, settings=None):
     selected = selected or pools()
     selected = {name: list(selected.get(name, [])) for name in POOLS}
+    settings = validate_pool_settings(settings if settings is not None else pool_settings())
     config = yaml.safe_load(MIHOMO_CONFIG.read_text())
     flattened = []
     sources_by_slot = source_map()
@@ -454,13 +503,13 @@ def generate_config(selected=None):
     groups = [
         {"name": "Apple", "type": "select", "proxies": ["DIRECT", "Proxy-Auto"] + proxy},
         {"name": "MicroSoft", "type": "select", "proxies": ["DIRECT", "Proxy-Auto"] + proxy},
-        fallback("HK-视频", hk, "https://www.youtube.com/generate_204", 300, "204"),
-        fallback("JP-AI", jp, "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
-        fallback("SG-AI", sg, "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
-        fallback("US-AI", us, "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
-        latency_aware_url_test("TG-Auto", tg, "https://core.telegram.org", 120, 150),
+        candidate_pool_group("HK-视频", hk, settings),
+        candidate_pool_group("JP-AI", jp, settings),
+        candidate_pool_group("SG-AI", sg, settings),
+        candidate_pool_group("US-AI", us, settings),
+        candidate_pool_group("TG", tg, settings),
         fallback("TG-Notify", notify, "https://api.telegram.org", 300),
-        fallback("Proxy-Auto", proxy, "https://www.gstatic.com/generate_204", 300, "204"),
+        candidate_pool_group("Proxy", proxy, settings),
         fallback("GitHub-Auto", github, "https://github.com/", 300, "200"),
         fallback("DNS-Resolve", proxy, "https://dns.google/dns-query", 300),
         fallback("AI-Auto", ai_groups, "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
@@ -474,7 +523,7 @@ def generate_config(selected=None):
         {"name": "Others", "type": "select", "proxies": ["Proxy-Auto"] + proxy},
     ]
     if other_ai:
-        groups.insert(6, fallback("其他-AI", other_ai, "https://chatgpt.com/cdn-cgi/trace", 180, "200"))
+        groups.insert(6, candidate_pool_group("其他-AI", other_ai, settings))
     config["proxy-groups"] = groups
     previous = MIHOMO_CONFIG.read_bytes()
     temporary = MIHOMO_CONFIG.with_suffix(".candidate")
@@ -640,14 +689,18 @@ def validate_pools(value):
     return cleaned
 
 
-def save_pools(value):
+def save_pools(value, settings=None):
     cleaned = validate_pools(value)
+    cleaned_settings = validate_pool_settings(settings if settings is not None else pool_settings())
     previous = CANDIDATES.read_bytes() if CANDIDATES.exists() else b"{}"
+    previous_settings = POOL_SETTINGS.read_bytes() if POOL_SETTINGS.exists() else b"{}"
     previous_config = MIHOMO_CONFIG.read_bytes()
-    generate_config(cleaned)
+    generate_config(cleaned, cleaned_settings)
     try:
         PREVIOUS.write_bytes(previous)
+        PREVIOUS_POOL_SETTINGS.write_bytes(previous_settings)
         atomic_json(CANDIDATES, cleaned)
+        atomic_json(POOL_SETTINGS, cleaned_settings)
     except OSError:
         MIHOMO_CONFIG.write_bytes(previous_config)
         os.chmod(MIHOMO_CONFIG, 0o640)
@@ -656,15 +709,41 @@ def save_pools(value):
     return cleaned
 
 
+def save_pool_settings(value):
+    if not POOL_SETTINGS_LOCK.acquire(blocking=False):
+        raise ValueError("候选池设置正在保存，请等待当前测速完成")
+    try:
+        previous_settings = pool_settings()
+        settings = validate_pool_settings(value)
+        selected = pools()
+        newly_automatic = [pool for pool in POOLS if settings[pool]["type"] == "url-test"
+                            and previous_settings[pool]["type"] != "url-test"]
+        results = test_pool_candidates({pool: selected[pool] for pool in newly_automatic}) if newly_automatic else []
+        for pool in newly_automatic:
+            selected[pool] = rank_url_test_pool(pool, selected[pool], results)
+        applied = save_pools(selected, settings)
+        if results:
+            persist_pool_probe_results(results)
+        return {"pools": applied, "settings": pool_settings(), "reordered": newly_automatic}
+    finally:
+        POOL_SETTINGS_LOCK.release()
+
+
 def rollback_pools():
     if not PREVIOUS.exists():
         raise ValueError("没有可回退的上一版候选池")
     current = CANDIDATES.read_bytes() if CANDIDATES.exists() else b"{}"
+    current_settings = POOL_SETTINGS.read_bytes() if POOL_SETTINGS.exists() else b"{}"
     restored_bytes = PREVIOUS.read_bytes()
     restored = validate_pools(json.loads(restored_bytes))
-    generate_config(restored)
+    restored_settings = validate_pool_settings(
+        json.loads(PREVIOUS_POOL_SETTINGS.read_text()) if PREVIOUS_POOL_SETTINGS.exists() else {}
+    )
+    generate_config(restored, restored_settings)
     CANDIDATES.write_bytes(restored_bytes)
     PREVIOUS.write_bytes(current)
+    atomic_json(POOL_SETTINGS, restored_settings)
+    PREVIOUS_POOL_SETTINGS.write_bytes(current_settings)
     return restored
 
 
@@ -727,6 +806,38 @@ def test_pool_candidates(selected, progress=None):
             if progress:
                 progress(completed, len(tasks))
     return results
+
+
+def rank_url_test_pool(pool, selected, results):
+    by_name = {item["name"]: item for item in results if item.get("pool") == pool}
+    stable = [name for name in selected if (by_name.get(name) or {}).get("success") == 3
+              and (by_name.get(name) or {}).get("delay") is not None]
+    if not stable:
+        raise ValueError(f"{pool} 没有连续三次成功的节点，拒绝启用自动测速")
+
+    def score(name):
+        item = by_name.get(name) or {}
+        return (
+            item.get("success") != 3 or item.get("delay") is None,
+            item.get("delay") or 999999,
+            item.get("jitter") if item.get("jitter") is not None else 999999,
+            source_rank(name),
+            name,
+        )
+
+    return sorted(selected, key=score)
+
+
+def persist_pool_probe_results(results):
+    stored = read_json(POOL_PROBES, {})
+    entries = stored.get("pools", {}) if isinstance(stored.get("pools"), dict) else {}
+    tested_at = datetime.now().astimezone().isoformat()
+    for pool in {item.get("pool") for item in results if item.get("pool") in POOLS}:
+        entries[pool] = {
+            "tested_at": tested_at,
+            "results": [item for item in results if item.get("pool") == pool],
+        }
+    atomic_json(POOL_PROBES, {"pools": entries})
 
 
 def probe_status():
@@ -1000,7 +1111,7 @@ def monitor_once():
         }
         if old and selected and old != selected:
             events.append({"time": now, "group": group, "from": old, "to": selected,
-                           "reason": "健康检查触发 fallback"})
+                           "reason": "候选池健康检查触发自动切换"})
         if group in ALERT_GROUPS and all_proxies:
             config = alert_config()
             for slot in config["source_slots"]:
@@ -1124,6 +1235,32 @@ if _probe_marker not in PAGE:
     raise RuntimeError("probe template marker missing")
 PAGE = PAGE.replace(_probe_marker, _probe_js + _probe_marker, 1)
 
+PAGE = PAGE.replace(
+    "</main><script>",
+    '''<dialog id="poolEditor" class="pool-editor"><form method="dialog"><div class="editor-head"><h2 id="poolEditorTitle">编辑候选池</h2><button class="icon-btn" value="cancel" aria-label="关闭" title="关闭">&times;</button></div><p class="muted">切换为自动测速时，会按该业务连续三次测速的稳定性、延迟和抖动重排节点，再校验并重启 Mihomo。</p><label class="editor-label" for="poolMode">测速方式</label><select id="poolMode"><option value="select">手动选择</option><option value="url-test">自动测速（url-test）</option><option value="fallback">故障切换（fallback）</option></select><div id="poolEditorStatus" class="status" role="status" aria-live="polite"></div><div class="editor-actions"><button class="btn" value="cancel">取消</button><button id="poolEditorSave" class="btn primary" type="button" onclick="savePoolMode()">保存并应用</button></div></form></dialog></main><script>''',
+    1,
+)
+PAGE = PAGE.replace(
+    "</style>",
+    ".pool-card .card-head{gap:8px}.pool-title{display:flex;align-items:center;gap:7px;min-width:0}.pool-title h2{overflow-wrap:anywhere}.mode-pill{display:inline-block;padding:3px 6px;border-radius:5px;background:#2c2c2e;color:#aeaeb2;font-size:11px;white-space:nowrap}.pool-editor{width:min(420px,calc(100vw - 28px));border:1px solid #48484a;border-radius:10px;background:#1c1c1e;color:#f5f5f7;padding:0;box-shadow:0 18px 50px rgba(0,0,0,.55)}.pool-editor::backdrop{background:rgba(0,0,0,.58)}.pool-editor form{padding:18px}.editor-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.editor-head h2{margin:0;font-size:17px}.editor-label{display:block;margin:18px 0 7px;font-size:13px;color:#aeaeb2}.pool-editor select{width:100%;height:38px;border:1px solid #48484a;border-radius:7px;background:#2c2c2e;color:#fff;padding:0 11px;font:14px inherit}.pool-editor .status{min-height:18px;margin-top:12px}.pool-editor button:disabled,.pool-editor select:disabled{cursor:wait;opacity:.55}.editor-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}</style>",
+    1,
+)
+_render_start = PAGE.find("function renderPools(){")
+_render_end = PAGE.find("function add(p){", _render_start)
+if _render_start < 0 or _render_end < 0:
+    raise RuntimeError("candidate pool template marker missing")
+_pool_editor_js = r'''function poolModeLabel(mode){return ({select:'手动选择',fallback:'故障切换','url-test':'自动测速'})[mode]||'故障切换'}let editingPool=null,poolSaveInProgress=false;function setPoolEditorBusy(busy,message){let editor=document.querySelector('#poolEditor'),status=document.querySelector('#poolEditorStatus'),save=document.querySelector('#poolEditorSave');status.textContent=message||'';status.className='status'+(busy?'':'');save.disabled=busy;save.textContent=busy?'正在应用…':'保存并应用';editor.querySelectorAll('button[value="cancel"],select').forEach(function(control){control.disabled=busy})}function openPoolEditor(pool){if(poolSaveInProgress)return;editingPool=pool;document.querySelector('#poolEditorTitle').textContent='编辑 '+pool;document.querySelector('#poolMode').value=(poolSettings[pool]||{}).type||'fallback';setPoolEditorBusy(false,'');document.querySelector('#poolEditor').showModal()}async function savePoolMode(){if(!editingPool||poolSaveInProgress)return;let status=document.querySelector('#testStatus'),mode=document.querySelector('#poolMode').value,pool=editingPool,count=(pools[pool]||[]).length;poolSaveInProgress=true;setPoolEditorBusy(true,mode==='url-test'?'正在对 '+count+' 个候选连续测速 3 次，请勿重复点击…':'正在校验并应用设置，请勿重复点击…');try{status.textContent='正在校验、测速并应用 '+pool+' 的测速方式…';status.className='status';let next=Object.assign({},poolSettings);next[pool]={type:mode};let result=await api('/api/pool-settings',{method:'POST',body:JSON.stringify({settings:next})});poolSettings=result.settings;activePools=result.pools;pools=result.pools;document.querySelector('#poolEditor').close();status.textContent=pool+' 已切换为'+poolModeLabel(mode)+(result.reordered&&result.reordered.length?'；已按连续三次测速的稳定性、延迟和抖动重新排序':'')+'，配置校验和运行验证均通过';editingPool=null;renderPools();await loadStatus()}catch(e){status.textContent=e.message;status.className='status bad';setPoolEditorBusy(false,e.message)}finally{poolSaveInProgress=false;if(!document.querySelector('#poolEditor').open)setPoolEditorBusy(false,'')}}'''
+_render_pools_js = r'''function renderPools(){document.querySelector('#poolGrid').innerHTML=poolNames.map(function(pool){let rows=pools[pool].map(function(name,i){return '<div class="node"><div class="node-name">'+esc(name)+(metric(name)?'<span class="delay">'+metric(name)+'</span>':'')+'</div><div class="node-tools"><button class="icon-btn" aria-label="上移" title="上移" onclick="move(\''+pool+'\','+i+',-1)">&#8593;</button><button class="icon-btn" aria-label="下移" title="下移" onclick="move(\''+pool+'\','+i+',1)">&#8595;</button><button class="icon-btn remove" aria-label="移除" title="移除" onclick="removeNode(\''+pool+'\','+i+')">&times;</button></div></div>'}).join('');let mode=(poolSettings[pool]||{}).type||'fallback';return '<article class="card pool-card"><div class="card-head"><div class="pool-title"><h2>'+esc(pool)+'</h2><span class="mode-pill">'+esc(poolModeLabel(mode))+'</span></div><div><span class="count">'+pools[pool].length+'/5</span><button class="icon-btn" aria-label="编辑" title="编辑" onclick="openPoolEditor(\''+pool+'\')">&#9998;</button></div></div><div class="add-node"><select id="sel-'+pool+'">'+options(pool)+'</select><button class="btn" onclick="add(\''+pool+'\')">加入</button></div>'+rows+'</article>'}).join('')}'''
+PAGE = PAGE[:_render_start] + _pool_editor_js + _render_pools_js + PAGE[_render_end:]
+PAGE = PAGE.replace("let all=[],pools={},activePools={},suggestion=null,delays={}", "let all=[],pools={},activePools={},poolSettings={},suggestion=null,delays={}")
+PAGE = PAGE.replace("pools=d.pools;if(d.tests", "pools=d.pools;poolSettings=d.settings||poolSettings;if(d.tests")
+PAGE = PAGE.replace("all=d.nodes;activePools=d.pools;suggestion=", "all=d.nodes;activePools=d.pools;poolSettings=d.settings||{};suggestion=")
+PAGE = PAGE.replace(
+    "async function rollback(){try{pools=await api('/api/rollback',{method:'POST',body:'{}'});document.querySelector('#testStatus').textContent='已验证并恢复上一版候选池';renderPools()}catch(e){alert(e.message)}}",
+    "async function rollback(){try{await api('/api/rollback',{method:'POST',body:'{}'});document.querySelector('#testStatus').textContent='已验证并恢复上一版候选池';catalogLoaded=false;await loadPools()}catch(e){alert(e.message)}}",
+    1,
+)
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
@@ -1158,10 +1295,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             tests = read_json(LAST_TESTS, {})
             self.reply(200, {"slots": [slot_state(s) for s in source_slots()], "pools": pools(),
-                             "tests": {"tested_at": tests.get("tested_at")}, "suggestions": suggestions()})
+                             "settings": pool_settings(), "tests": {"tested_at": tests.get("tested_at")},
+                             "suggestions": suggestions()})
         elif path == "/api/nodes":
             self.reply(200, {"slots": [slot_state(s) for s in source_slots()], "nodes": nodes(), "pools": pools(),
-                             "tests": read_json(LAST_TESTS, {}), "suggestions": suggestions()})
+                             "settings": pool_settings(), "tests": read_json(LAST_TESTS, {}),
+                             "suggestions": suggestions()})
         elif path == "/api/test-status":
             self.reply(200, test_status())
         elif path == "/api/probes":
@@ -1189,6 +1328,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/sources": result = add_source()
             elif path == "/api/source-remove": result = delete_source(body["slot"])
             elif path == "/api/pools": result = save_pools(body.get("pools", {}))
+            elif path == "/api/pool-settings": result = save_pool_settings(body.get("settings", {}))
             elif path == "/api/retest-apply": result = start_retest_apply(body.get("pools", {}))
             elif path == "/api/rollback": result = rollback_pools()
             elif path == "/api/test-all": result = start_test_all()
@@ -1203,6 +1343,8 @@ def migrate():
     PROVIDERS.mkdir(parents=True, exist_ok=True)
     if not SOURCES.exists():
         atomic_json(SOURCES, DEFAULT_SOURCES)
+    if not POOL_SETTINGS.exists():
+        atomic_json(POOL_SETTINGS, pool_settings())
     for slot in source_slots():
         path = provider_path(slot)
         if path.exists():
@@ -1219,8 +1361,10 @@ def migrate():
 if __name__ == "__main__":
     if "--apply-current" in sys.argv:
         selected = validate_pools(pools())
-        generate_config(selected)
+        settings = pool_settings()
+        generate_config(selected, settings)
         atomic_json(CANDIDATES, selected)
+        atomic_json(POOL_SETTINGS, settings)
         print("current candidate pools validated and applied")
     elif "--migrate" in sys.argv:
         migrate()
