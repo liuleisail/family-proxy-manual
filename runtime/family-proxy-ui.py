@@ -34,6 +34,7 @@ PAGE_LAYOUT_PREFS_PATH = Path("/etc/family-proxy-ui/page-layout-preferences.json
 HOMEKIT_ROUTE_STATE_PATH = Path("/var/lib/family-proxy/homekit-direct-routes.json")
 ALERT_CONFIG_PATH = Path("/etc/family-proxy-ui/mihomo-alert.json")
 RULE_SETS_PATH = Path("/etc/family-proxy-ui/rule-sets.json")
+RULE_CARD_LABELS_PATH = Path("/etc/family-proxy-ui/rule-card-labels.json")
 PLATFORM_UPDATE_STATUS_PATH = Path("/var/lib/family-proxy/platform-update-status.json")
 ALERT_SOURCES_PATH = Path("/tmp/zfsv3/nvme13/18053615760/data/docker/family-mihomo-sub-import/providers/sources.json")
 TPROXY_SYNC = "/usr/local/sbin/family-mihomo-tproxy-auto"
@@ -766,6 +767,37 @@ def rule_sets_version(rule_sets):
     return hashlib.sha256(value).hexdigest()[:16]
 
 
+def rule_card_labels_version(labels):
+    value = json.dumps(labels, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(value).hexdigest()[:16]
+
+
+def load_rule_card_labels():
+    try:
+        value = json.loads(RULE_CARD_LABELS_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RouterError("规则卡片名称无法读取") from exc
+    return normalize_rule_card_labels(value)
+
+
+def normalize_rule_card_labels(value, rules=None):
+    if not isinstance(value, dict) or len(value) > 100:
+        raise RouterError("规则卡片名称格式错误")
+    valid_rules = set(rules or ())
+    normalized = {}
+    for raw, label in value.items():
+        raw = str(raw).strip()
+        label = str(label).strip()
+        if not raw or not label or len(label) > 40:
+            raise RouterError("规则卡片名称不能为空且不能超过 40 个字符")
+        if rules is not None and raw not in valid_rules:
+            continue
+        normalized[raw] = label
+    return normalized
+
+
 def load_rule_sets():
     try:
         value = json.loads(RULE_SETS_PATH.read_text(encoding="utf-8"))
@@ -901,6 +933,7 @@ def rules_payload():
         if isinstance(group, dict) and isinstance(group.get("name"), str)
     )
     rule_sets = load_rule_sets()
+    rule_card_labels = load_rule_card_labels()
     return {
         "rules": rules,
         "version": rules_version(rules),
@@ -908,6 +941,8 @@ def rules_payload():
         "protected": sorted(PROTECTED_RULES),
         "rule_sets": rule_sets,
         "rule_sets_version": rule_sets_version(rule_sets),
+        "rule_card_labels": rule_card_labels,
+        "rule_card_labels_version": rule_card_labels_version(rule_card_labels),
     }
 
 
@@ -952,7 +987,8 @@ def mihomo_apply_payload(payload):
         raise RouterError("Mihomo 规则校验接口不可用") from exc
 
 
-def save_mihomo_rules(value, expected_version, rule_sets_value=None, expected_rule_sets_version=None):
+def save_mihomo_rules(value, expected_version, rule_sets_value=None, expected_rule_sets_version=None,
+                      rule_card_labels_value=None, expected_rule_card_labels_version=None):
     rules = normalize_rules(value)
     with RULES_LOCK:
         original_text, document, current_rules = load_mihomo_config()
@@ -961,17 +997,24 @@ def save_mihomo_rules(value, expected_version, rule_sets_value=None, expected_ru
         current_rule_sets = load_rule_sets()
         if expected_rule_sets_version not in (None, "", rule_sets_version(current_rule_sets)):
             raise RouterError("规则集已被其他操作更新，请刷新后重试")
+        current_rule_card_labels = load_rule_card_labels()
+        if expected_rule_card_labels_version not in (None, "", rule_card_labels_version(current_rule_card_labels)):
+            raise RouterError("规则卡片名称已被其他操作更新，请刷新后重试")
         policies = {"DIRECT", "REJECT", "REJECT-DROP", "PASS"}
         policies.update(group.get("name") for group in document.get("proxy-groups", [])
                         if isinstance(group, dict) and isinstance(group.get("name"), str))
         rule_sets = current_rule_sets if rule_sets_value is None else normalize_rule_sets(rule_sets_value, policies)
+        rule_card_labels = (current_rule_card_labels if rule_card_labels_value is None
+                            else normalize_rule_card_labels(rule_card_labels_value, rules))
         document["rules"] = rules
         merged_rules = merge_rule_sets(document, rule_sets)
-        if rules == current_rules and rule_sets == current_rule_sets and merged_rules == current_rules:
+        if (rules == current_rules and rule_sets == current_rule_sets
+                and rule_card_labels == current_rule_card_labels and merged_rules == current_rules):
             return {**rules_payload(), "message": "规则没有变化"}
         candidate = yaml.safe_dump(document, allow_unicode=True, sort_keys=False)
         mihomo_apply_payload(candidate)
         previous_rule_sets = RULE_SETS_PATH.read_bytes() if RULE_SETS_PATH.exists() else None
+        previous_rule_card_labels = RULE_CARD_LABELS_PATH.read_bytes() if RULE_CARD_LABELS_PATH.exists() else None
         try:
             RULE_BACKUP_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
             stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -982,6 +1025,7 @@ def save_mihomo_rules(value, expected_version, rule_sets_value=None, expected_ru
             temporary.write_text(candidate, encoding="utf-8")
             os.chmod(temporary, 0o640)
             atomic_json(RULE_SETS_PATH, rule_sets)
+            atomic_json(RULE_CARD_LABELS_PATH, rule_card_labels)
             os.replace(temporary, MIHOMO_CONFIG_PATH)
             for old_backup in sorted(RULE_BACKUP_DIR.glob("config-before-rules-*.yaml"))[:-20]:
                 old_backup.unlink()
@@ -991,6 +1035,11 @@ def save_mihomo_rules(value, expected_version, rule_sets_value=None, expected_ru
             else:
                 RULE_SETS_PATH.write_bytes(previous_rule_sets)
                 os.chmod(RULE_SETS_PATH, 0o600)
+            if previous_rule_card_labels is None:
+                RULE_CARD_LABELS_PATH.unlink(missing_ok=True)
+            else:
+                RULE_CARD_LABELS_PATH.write_bytes(previous_rule_card_labels)
+                os.chmod(RULE_CARD_LABELS_PATH, 0o600)
             try:
                 mihomo_apply_payload(original_text)
             except RouterError:
@@ -1004,6 +1053,11 @@ def save_mihomo_rules(value, expected_version, rule_sets_value=None, expected_ru
             else:
                 RULE_SETS_PATH.write_bytes(previous_rule_sets)
                 os.chmod(RULE_SETS_PATH, 0o600)
+            if previous_rule_card_labels is None:
+                RULE_CARD_LABELS_PATH.unlink(missing_ok=True)
+            else:
+                RULE_CARD_LABELS_PATH.write_bytes(previous_rule_card_labels)
+                os.chmod(RULE_CARD_LABELS_PATH, 0o600)
             mihomo_apply_payload(original_text)
             raise RouterError("规则已撤回：应用后健康检查未通过")
         audit("rules", "mihomo", "ok", f"{len(current_rules)} -> {len(rules)}")
@@ -3492,6 +3546,8 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("rules"), body.get("version", ""),
                     body.get("rule_sets") if "rule_sets" in body else None,
                     body.get("rule_sets_version"),
+                    body.get("rule_card_labels") if "rule_card_labels" in body else None,
+                    body.get("rule_card_labels_version"),
                 ))
             else:
                 self.reply(HTTPStatus.NOT_FOUND, {"error": "not found"})
