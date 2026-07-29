@@ -85,7 +85,9 @@ POOL_TEST_URLS = {
     "其他-AI": "https://chatgpt.com/cdn-cgi/trace",
     "TG": "https://core.telegram.org",
     "Proxy": "https://www.gstatic.com/generate_204",
+    "GitHub-Auto": "https://github.com/",
 }
+DERIVED_EXITS = ("GitHub-Auto",)
 POOL_MODES = {
     "select": "手动选择",
     "fallback": "故障切换",
@@ -563,16 +565,21 @@ def generate_config(selected=None, settings=None):
                       if str(rule).startswith("GEOSITE,telegram,")), len(rules))
     rules.insert(insert_at, telegram_api_rule)
     # GitHub uses long-lived HTTPS connections and large release/LFS transfers.
-    # Keep its domains ahead of the broader Microsoft category, but route them
-    # through the visible Proxy candidate pool so the rule page and pool page
-    # describe the same node collection.
+    # Keep its domains ahead of the broader Microsoft category. GitHub-Auto is
+    # a read-only derived exit shown on the candidate-pool page, so its nodes
+    # and GitHub-specific probe results remain visible to the operator.
     github_rules = (
-        "DOMAIN-SUFFIX,github.com,Proxy-Auto",
-        "DOMAIN-SUFFIX,githubusercontent.com,Proxy-Auto",
-        "DOMAIN-SUFFIX,githubassets.com,Proxy-Auto",
-        "DOMAIN-SUFFIX,githubapp.com,Proxy-Auto",
+        "DOMAIN-SUFFIX,github.com,GitHub-Auto",
+        "DOMAIN-SUFFIX,githubusercontent.com,GitHub-Auto",
+        "DOMAIN-SUFFIX,githubassets.com,GitHub-Auto",
+        "DOMAIN-SUFFIX,githubapp.com,GitHub-Auto",
     )
-    legacy_github_rules = tuple(rule.replace(",Proxy-Auto", ",GitHub") for rule in github_rules)
+    legacy_github_rules = tuple(
+        variant for rule in github_rules for variant in (
+            rule.replace(",GitHub-Auto", ",Proxy-Auto"),
+            rule.replace(",GitHub-Auto", ",GitHub"),
+        )
+    )
     # `GEOSITE,microsoft` includes GitHub. Remove only our default and legacy
     # exact rules, then reinsert the current defaults before that broader rule.
     rules = [rule for rule in rules if str(rule) not in (*github_rules, *legacy_github_rules)]
@@ -583,7 +590,7 @@ def generate_config(selected=None, settings=None):
     hk, jp, sg, us, other_ai, tg, proxy = (selected[name] for name in POOLS)
     ai_groups = ["JP-AI", "SG-AI", "US-AI"] + (["其他-AI"] if other_ai else [])
     ai_nodes = jp + sg + us + other_ai
-    github = (jp[:2] + sg[:1] + proxy[:1] + us[:1])
+    github = github_candidates(selected)
     # Bot API needs a real HTTPS request, not merely a controller delay probe.
     # Prefer the separately verified backup Hysteria2 candidates. They are only
     # used by alerts and do not influence normal Telegram client routing.
@@ -903,6 +910,40 @@ def test_pool_candidates(selected, progress=None):
     return results
 
 
+def github_candidates(selected):
+    """Build the small GitHub-specific exit from visible business pools."""
+    names = (selected.get("JP-AI", [])[:2] + selected.get("SG-AI", [])[:1]
+             + selected.get("Proxy", [])[:1] + selected.get("US-AI", [])[:1])
+    names = list(dict.fromkeys(names))
+    records = read_json(POOL_PROBES, {}).get("pools", {})
+    rows = (records.get("GitHub-Auto") or {}).get("results", [])
+    by_name = {row.get("name"): row for row in rows if isinstance(row, dict)}
+    if not by_name:
+        return names
+
+    def score(name):
+        row = by_name.get(name) or {}
+        return (
+            row.get("success") != 3 or row.get("delay") is None,
+            row.get("delay") if row.get("delay") is not None else 999999,
+            row.get("jitter") if row.get("jitter") is not None else 999999,
+            names.index(name),
+        )
+
+    return sorted(names, key=score)
+
+
+def derived_exits(selected=None):
+    selected = selected or pools()
+    return {
+        "GitHub-Auto": {
+            "label": "GitHub 专用自动出口",
+            "nodes": github_candidates(selected),
+            "description": "由 JP-AI 前 2、SG-AI 前 1、Proxy 前 1、US-AI 前 1 自动组成；全量测速会额外访问 GitHub 并优先排列稳定节点。",
+        }
+    }
+
+
 def rank_url_test_pool(pool, selected, results):
     by_name = {item["name"]: item for item in results if item.get("pool") == pool}
     stable = [name for name in selected if (by_name.get(name) or {}).get("success") == 3
@@ -927,7 +968,7 @@ def persist_pool_probe_results(results):
     stored = read_json(POOL_PROBES, {})
     entries = stored.get("pools", {}) if isinstance(stored.get("pools"), dict) else {}
     tested_at = datetime.now().astimezone().isoformat()
-    for pool in {item.get("pool") for item in results if item.get("pool") in POOLS}:
+    for pool in {item.get("pool") for item in results if item.get("pool") in (*POOLS, *DERIVED_EXITS)}:
         entries[pool] = {
             "tested_at": tested_at,
             "results": [item for item in results if item.get("pool") == pool],
@@ -967,13 +1008,20 @@ def probe_report():
         if not isinstance(record, dict):
             record = confirmed
         result[pool] = summarize_probe(pool, selected, record)
+    for exit_name in DERIVED_EXITS:
+        selected = github_candidates(active)
+        record = manual.get(exit_name)
+        if not isinstance(record, dict):
+            record = confirmed
+        result[exit_name] = summarize_probe(exit_name, selected, record)
     return {"pools": result, "running": probe_status()}
 
 
 def start_pool_probe(pool):
-    if pool not in POOLS:
+    if pool not in (*POOLS, *DERIVED_EXITS):
         raise ValueError("无效业务池")
-    selected = pools().get(pool, [])
+    active = pools()
+    selected = github_candidates(active) if pool == "GitHub-Auto" else active.get(pool, [])
     if not selected:
         raise ValueError("该业务池没有已生效候选节点")
     # A full test and a service probe use the same local Mihomo API and exit path.
@@ -996,10 +1044,7 @@ def start_pool_probe(pool):
     def run():
         try:
             results = test_pool_candidates({pool: selected}, update_progress)
-            stored = read_json(POOL_PROBES, {})
-            entries = stored.get("pools", {}) if isinstance(stored.get("pools"), dict) else {}
-            entries[pool] = {"tested_at": datetime.now().astimezone().isoformat(), "results": results}
-            atomic_json(POOL_PROBES, {"pools": entries})
+            persist_pool_probe_results(results)
             with POOL_PROBE_STATE_LOCK:
                 POOL_PROBE_STATE.update({"running": False, "completed": len(selected),
                                          "finished_at": datetime.now().astimezone().isoformat()})
@@ -1047,6 +1092,17 @@ def start_test_all():
     def run():
         try:
             proposal = build_suggestions(test_all(update_progress))
+            github = github_candidates(proposal["pools"])
+            if github:
+                with TEST_STATE_LOCK:
+                    TEST_STATE["total"] = len(names) + len(github)
+
+                def update_github_progress(completed, _total):
+                    with TEST_STATE_LOCK:
+                        TEST_STATE["completed"] = len(names) + completed
+
+                github_results = test_pool_candidates({"GitHub-Auto": github}, update_github_progress)
+                persist_pool_probe_results(github_results)
             atomic_json(SUGGESTIONS, proposal)
             with TEST_STATE_LOCK:
                 TEST_STATE.update({"running": False, "completed": TEST_STATE["total"],
@@ -1069,7 +1125,8 @@ def start_retest_apply(value):
     selected = validate_pools(value)
     if not TEST_JOB_LOCK.acquire(blocking=False):
         return {"started": False, **test_status()}
-    total = sum(len(entries) for entries in selected.values())
+    github = github_candidates(selected)
+    total = sum(len(entries) for entries in selected.values()) + len(github)
     now = datetime.now().astimezone().isoformat()
     with TEST_STATE_LOCK:
         TEST_STATE.update({"running": True, "total": total, "completed": 0,
@@ -1083,6 +1140,11 @@ def start_retest_apply(value):
     def run():
         try:
             results = test_pool_candidates(selected, update_progress)
+            if github:
+                def update_github_progress(completed, _total):
+                    update_progress(sum(len(entries) for entries in selected.values()) + completed, total)
+                github_results = test_pool_candidates({"GitHub-Auto": github}, update_github_progress)
+                persist_pool_probe_results(github_results)
             atomic_json(CONFIRM_TESTS, {"tested_at": datetime.now().astimezone().isoformat(),
                                         "results": results})
             indexed = node_index()
@@ -1319,7 +1381,7 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace('<div class="section-title"><h2>业务候选池</h2></div>', '<div class="section-title"><h2>业务可达性报告</h2><span class="muted">只验证当前候选池，不改变排序或出口</span></div><div id="probeGrid" class="probe-grid"></div><div class="section-title"><h2>待生效候选池</h2><span class="muted">测速建议不会自动替换当前出口</span></div>')
 _old_speed_test = "async function testAll(){let status=document.querySelector('#testStatus');try{status.textContent='正在对每个节点连续测试三次，本次操作完成后即停止…';status.className='status';let d=await api('/api/test-all',{method:'POST',body:'{}'});delays=Object.fromEntries(d.results.map(function(x){return [x.name,x]}));status.textContent='测速完成：'+d.results.filter(function(x){return x.ok}).length+'/'+d.results.length+' 稳定可用';renderPools()}catch(e){status.textContent=e.message;status.className='status bad'}}"
-_new_speed_test = "function showTestStatus(d){let status=document.querySelector('#testStatus');clearTimeout(testPoll);if(d.running){status.textContent=(d.action==='retest-apply'?'候选池复测中：':'全量测速中：')+d.completed+'/'+d.total+' 个节点已完成；可继续浏览页面';status.className='status';testPoll=setTimeout(refreshTestStatus,1000);return}if(d.error){status.textContent=(d.action==='retest-apply'?'复测未生效：':'测速未完成：')+d.error;status.className='status bad';return}if(d.finished_at&&d.action==='retest-apply'){status.textContent=d.applied?'复测、配置校验和运行验证均通过，候选池已生效':'复测完成，但未生效';status.className=d.applied?'status':'status bad';catalogLoaded=false;loadPools();return}if(d.finished_at&&d.action==='full-test'){status.textContent=d.suggestions&&d.suggestions.ready?'全量测速完成，已生成待生效建议；确认后点击“复测并生效”':'测速完成，但有业务池没有连续三次成功的节点';status.className=d.suggestions&&d.suggestions.ready?'status':'status bad';catalogLoaded=false;loadPools();return}if(d.suggestions&&d.suggestions.ready){status.textContent='已生成待生效建议；当前出口保持不变，点击“复测并生效”后才会更新';status.className='status';return}if(d.last_tested_at){status.textContent='上次稳定性测速：'+d.last_tested_at}}async function refreshTestStatus(){try{showTestStatus(await api('/api/test-status'))}catch(e){let status=document.querySelector('#testStatus');status.textContent='测速状态读取失败：'+e.message;status.className='status bad'}}async function testAll(){try{showTestStatus(await api('/api/test-all',{method:'POST',body:'{}'}))}catch(e){let status=document.querySelector('#testStatus');status.textContent=e.message;status.className='status bad'}}async function confirmApply(){let status=document.querySelector('#testStatus');try{showTestStatus(await api('/api/retest-apply',{method:'POST',body:JSON.stringify({pools:pools})}))}catch(e){status.textContent=e.message;status.className='status bad'}}"
+_new_speed_test = "function showTestStatus(d){let status=document.querySelector('#testStatus');clearTimeout(testPoll);if(d.running){status.textContent=(d.action==='retest-apply'?'候选池复测中：':'全量测速（含 GitHub 专项）中：')+d.completed+'/'+d.total+' 个节点已完成；可继续浏览页面';status.className='status';testPoll=setTimeout(refreshTestStatus,1000);return}if(d.error){status.textContent=(d.action==='retest-apply'?'复测未生效：':'测速未完成：')+d.error;status.className='status bad';return}if(d.finished_at&&d.action==='retest-apply'){status.textContent=d.applied?'复测、GitHub 专项、配置校验和运行验证均通过，候选池已生效':'复测完成，但未生效';status.className=d.applied?'status':'status bad';catalogLoaded=false;loadPools();return}if(d.finished_at&&d.action==='full-test'){status.textContent=d.suggestions&&d.suggestions.ready?'全量测速和 GitHub 专项已完成，已生成待生效建议；确认后点击“复测并生效”':'测速完成，但有业务池没有连续三次成功的节点';status.className=d.suggestions&&d.suggestions.ready?'status':'status bad';catalogLoaded=false;loadPools();return}if(d.suggestions&&d.suggestions.ready){status.textContent='已生成待生效建议；当前出口保持不变，点击“复测并生效”后才会更新';status.className='status';return}if(d.last_tested_at){status.textContent='上次稳定性测速：'+d.last_tested_at}}async function refreshTestStatus(){try{showTestStatus(await api('/api/test-status'))}catch(e){let status=document.querySelector('#testStatus');status.textContent='测速状态读取失败：'+e.message;status.className='status bad'}}async function testAll(){try{showTestStatus(await api('/api/test-all',{method:'POST',body:'{}'}))}catch(e){let status=document.querySelector('#testStatus');status.textContent=e.message;status.className='status bad'}}async function confirmApply(){let status=document.querySelector('#testStatus');try{showTestStatus(await api('/api/retest-apply',{method:'POST',body:JSON.stringify({pools:pools})}))}catch(e){status.textContent=e.message;status.className='status bad'}}"
 if _old_speed_test not in PAGE:
     raise RuntimeError("speed test template marker missing")
 PAGE = PAGE.replace(_old_speed_test, _new_speed_test, 1)
@@ -1345,11 +1407,14 @@ _render_end = PAGE.find("function add(p){", _render_start)
 if _render_start < 0 or _render_end < 0:
     raise RuntimeError("candidate pool template marker missing")
 _pool_editor_js = r'''function poolModeLabel(mode){return ({select:'手动选择',fallback:'故障切换','url-test':'自动测速'})[mode]||'故障切换'}let editingPool=null,poolSaveInProgress=false;function setPoolEditorBusy(busy,message){let editor=document.querySelector('#poolEditor'),status=document.querySelector('#poolEditorStatus'),save=document.querySelector('#poolEditorSave');status.textContent=message||'';status.className='status'+(busy?'':'');save.disabled=busy;save.textContent=busy?'正在应用…':'保存并应用';editor.querySelectorAll('button[value="cancel"],select').forEach(function(control){control.disabled=busy})}function openPoolEditor(pool){if(poolSaveInProgress)return;editingPool=pool;document.querySelector('#poolEditorTitle').textContent='编辑 '+pool;document.querySelector('#poolMode').value=(poolSettings[pool]||{}).type||'fallback';setPoolEditorBusy(false,'');document.querySelector('#poolEditor').showModal()}async function savePoolMode(){if(!editingPool||poolSaveInProgress)return;let status=document.querySelector('#testStatus'),mode=document.querySelector('#poolMode').value,pool=editingPool,count=(pools[pool]||[]).length;poolSaveInProgress=true;setPoolEditorBusy(true,mode==='url-test'?'正在对 '+count+' 个候选连续测速 3 次，请勿重复点击…':'正在校验并应用设置，请勿重复点击…');try{status.textContent='正在校验、测速并应用 '+pool+' 的测速方式…';status.className='status';let next=Object.assign({},poolSettings);next[pool]={type:mode};let result=await api('/api/pool-settings',{method:'POST',body:JSON.stringify({settings:next})});poolSettings=result.settings;activePools=result.pools;pools=result.pools;document.querySelector('#poolEditor').close();status.textContent=pool+' 已切换为'+poolModeLabel(mode)+(result.reordered&&result.reordered.length?'；已按连续三次测速的稳定性、延迟和抖动重新排序':'')+'，配置校验和运行验证均通过';editingPool=null;renderPools();await loadStatus()}catch(e){status.textContent=e.message;status.className='status bad';setPoolEditorBusy(false,e.message)}finally{poolSaveInProgress=false;if(!document.querySelector('#poolEditor').open)setPoolEditorBusy(false,'')}}'''
-_render_pools_js = r'''function renderPools(){document.querySelector('#poolGrid').innerHTML=poolNames.map(function(pool){let rows=pools[pool].map(function(name,i){return '<div class="node"><div class="node-name">'+esc(name)+(metric(name)?'<span class="delay">'+metric(name)+'</span>':'')+'</div><div class="node-tools"><button class="icon-btn" aria-label="上移" title="上移" onclick="move(\''+pool+'\','+i+',-1)">&#8593;</button><button class="icon-btn" aria-label="下移" title="下移" onclick="move(\''+pool+'\','+i+',1)">&#8595;</button><button class="icon-btn remove" aria-label="移除" title="移除" onclick="removeNode(\''+pool+'\','+i+')">&times;</button></div></div>'}).join('');let mode=(poolSettings[pool]||{}).type||'fallback';return '<article class="card pool-card"><div class="card-head"><div class="pool-title"><h2>'+esc(pool)+'</h2><span class="mode-pill">'+esc(poolModeLabel(mode))+'</span></div><div><span class="count">'+pools[pool].length+'/5</span><button class="icon-btn" aria-label="编辑" title="编辑" onclick="openPoolEditor(\''+pool+'\')">&#9998;</button></div></div><div class="add-node"><select id="sel-'+pool+'">'+options(pool)+'</select><button class="btn" onclick="add(\''+pool+'\')">加入</button></div>'+rows+'</article>'}).join('')}'''
+_render_pools_js = r'''function derivedExitCard(name,exit){let rows=(exit.nodes||[]).map(function(node){return '<div class="node"><div class="node-name">'+esc(node)+(metric(node)?'<span class="delay">'+metric(node)+'</span>':'')+'</div></div>'}).join('');return '<article class="card pool-card"><div class="card-head"><div class="pool-title"><h2>'+esc(exit.label||name)+'</h2><span class="mode-pill">派生只读</span></div><span class="count">'+(exit.nodes||[]).length+'/5</span></div><div class="muted" style="padding:0 14px 12px">'+esc(exit.description||'由业务候选池自动组成；不能单独编辑。')+'</div>'+rows+'</article>'}function renderPools(){let cards=poolNames.map(function(pool){let rows=pools[pool].map(function(name,i){return '<div class="node"><div class="node-name">'+esc(name)+(metric(name)?'<span class="delay">'+metric(name)+'</span>':'')+'</div><div class="node-tools"><button class="icon-btn" aria-label="上移" title="上移" onclick="move(\''+pool+'\','+i+',-1)">&#8593;</button><button class="icon-btn" aria-label="下移" title="下移" onclick="move(\''+pool+'\','+i+',1)">&#8595;</button><button class="icon-btn remove" aria-label="移除" title="移除" onclick="removeNode(\''+pool+'\','+i+')">&times;</button></div></div>'}).join('');let mode=(poolSettings[pool]||{}).type||'fallback';return '<article class="card pool-card"><div class="card-head"><div class="pool-title"><h2>'+esc(pool)+'</h2><span class="mode-pill">'+esc(poolModeLabel(mode))+'</span></div><div><span class="count">'+pools[pool].length+'/5</span><button class="icon-btn" aria-label="编辑" title="编辑" onclick="openPoolEditor(\''+pool+'\')">&#9998;</button></div></div><div class="add-node"><select id="sel-'+pool+'">'+options(pool)+'</select><button class="btn" onclick="add(\''+pool+'\')">加入</button></div>'+rows+'</article>'});Object.keys(derivedExits).forEach(function(name){cards.push(derivedExitCard(name,derivedExits[name]))});document.querySelector('#poolGrid').innerHTML=cards.join('')}'''
 PAGE = PAGE[:_render_start] + _pool_editor_js + _render_pools_js + PAGE[_render_end:]
-PAGE = PAGE.replace("let all=[],pools={},activePools={},suggestion=null,delays={}", "let all=[],pools={},activePools={},poolSettings={},suggestion=null,delays={}")
+PAGE = PAGE.replace("grid.innerHTML=poolNames.map(function(pool){", "grid.innerHTML=poolNames.concat(['GitHub-Auto']).map(function(pool){")
+PAGE = PAGE.replace("<h3>'+esc(pool)+'</h3>", "<h3>'+esc(pool==='GitHub-Auto'?'GitHub 专用自动出口':pool)+'</h3>")
+PAGE = PAGE.replace("let active=activePools[pool]||[];renderProbeReport", "let active=pool==='GitHub-Auto'?((derivedExits[pool]||{}).nodes||[]):(activePools[pool]||[]);renderProbeReport")
+PAGE = PAGE.replace("let all=[],pools={},activePools={},suggestion=null,delays={}", "let all=[],pools={},activePools={},derivedExits={},poolSettings={},suggestion=null,delays={}")
 PAGE = PAGE.replace("pools=d.pools;if(d.tests", "pools=d.pools;poolSettings=d.settings||poolSettings;if(d.tests")
-PAGE = PAGE.replace("all=d.nodes;activePools=d.pools;suggestion=", "all=d.nodes;activePools=d.pools;poolSettings=d.settings||{};suggestion=")
+PAGE = PAGE.replace("all=d.nodes;activePools=d.pools;suggestion=", "all=d.nodes;activePools=d.pools;derivedExits=d.derived_exits||{};poolSettings=d.settings||{};suggestion=")
 PAGE = PAGE.replace(
     "async function rollback(){try{pools=await api('/api/rollback',{method:'POST',body:'{}'});document.querySelector('#testStatus').textContent='已验证并恢复上一版候选池';renderPools()}catch(e){alert(e.message)}}",
     "async function rollback(){try{await api('/api/rollback',{method:'POST',body:'{}'});document.querySelector('#testStatus').textContent='已验证并恢复上一版候选池';catalogLoaded=false;await loadPools()}catch(e){alert(e.message)}}",
@@ -1390,11 +1455,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             tests = read_json(LAST_TESTS, {})
             self.reply(200, {"slots": [slot_state(s) for s in source_slots()], "pools": pools(),
-                             "settings": pool_settings(), "tests": {"tested_at": tests.get("tested_at")},
+                             "settings": pool_settings(), "derived_exits": derived_exits(), "tests": {"tested_at": tests.get("tested_at")},
                              "suggestions": suggestions()})
         elif path == "/api/nodes":
             self.reply(200, {"slots": [slot_state(s) for s in source_slots()], "nodes": nodes(), "pools": pools(),
-                             "settings": pool_settings(), "tests": read_json(LAST_TESTS, {}),
+                             "settings": pool_settings(), "derived_exits": derived_exits(), "tests": read_json(LAST_TESTS, {}),
                              "suggestions": suggestions()})
         elif path == "/api/test-status":
             self.reply(200, test_status())
