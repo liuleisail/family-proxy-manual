@@ -1387,7 +1387,7 @@ if _old_speed_test not in PAGE:
 PAGE = PAGE.replace(_old_speed_test, _new_speed_test, 1)
 PAGE = PAGE.replace(
     "async function api(path,opt={}){let r=await fetch(new URL(\"/airport\"+path,location.origin),{...opt,headers:{'Content-Type':'application/json','X-CSRF':csrf}}),d=await r.json();if(!r.ok)throw Error(d.error||'请求失败');return d}",
-    "async function api(path,opt={}){let r=await fetch('/airport'+path,{...opt,headers:{'Content-Type':'application/json','X-CSRF':csrf}}),d=await r.json();if(!r.ok){if(r.status===403&&d.error==='request rejected'){location.reload();return new Promise(function(){})}throw Error(d.error||'请求失败')}return d}",
+    "async function api(path,opt={}){let r;try{r=await fetch(location.protocol+'//'+location.host+'/airport'+path,{...opt,headers:{'Content-Type':'application/json','X-CSRF':csrf}})}catch(error){throw Error('浏览器未能提交请求；请刷新页面后重试')}let d=await r.json();if(!r.ok){if(r.status===403&&d.error==='request rejected'){location.reload();return new Promise(function(){})}throw Error(d.error||'请求失败')}return d}",
     1,
 )
 PAGE = PAGE.replace(
