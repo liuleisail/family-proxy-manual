@@ -62,6 +62,7 @@ RUNTIME_STATE = PROVIDERS / "runtime-state.json"
 RUNTIME_EVENTS = PROVIDERS / "runtime-events.json"
 ALERT_STATE = PROVIDERS / "alert-state.json"
 ALERT_CONFIG = Path("/etc/family-proxy-ui/mihomo-alert.json")
+FAILSAFE_STATE = PROVIDERS / "direct-fallback-state.json"
 RULE_SETS = Path("/etc/family-proxy-ui/rule-sets.json")
 VERSIONS = BASE / "family-mihomo-fallback/config-versions"
 MAX_BYTES = 12 * 1024 * 1024
@@ -75,6 +76,18 @@ OPENER = build_opener(ProxyHandler({}))
 MONITORED_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto", "GitHub-Auto")
 ALERT_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto", "GitHub-Auto")
 ALERT_FAILURE_THRESHOLD = 2
+FAILSAFE_FAILURE_THRESHOLD = 2
+FAILSAFE_RECOVERY_THRESHOLD = 2
+# These select groups are internal safety switches. Business policy groups use
+# them by default, while a manual node selection in a business group remains
+# untouched by the monitor.
+FAILSAFE_EXITS = {
+    "HK-视频-出口": {"primary": "HK-视频", "watched": ("HK-视频",)},
+    "AI-出口": {"primary": "AI-Auto", "watched": ("JP-AI", "SG-AI", "US-AI", "其他-AI")},
+    "TG-出口": {"primary": "TG-Auto", "watched": ("TG-Auto",)},
+    "Proxy-出口": {"primary": "Proxy-Auto", "watched": ("Proxy-Auto",)},
+    "GitHub-出口": {"primary": "GitHub-Auto", "watched": ("GitHub-Auto",)},
+}
 # Full-library screening stays inexpensive. Before a candidate pool is applied,
 # each selected node is tested three times against the actual service it serves.
 POOL_TEST_URLS = {
@@ -425,12 +438,14 @@ def seed_pools():
 
 
 def fallback(name, selected, url, interval, expected_status=None):
-    if not selected:
-        raise ValueError(f"{name} 没有候选节点，拒绝生成可能直连泄漏的配置")
     group = {
         "name": name,
         "type": "fallback",
         "proxies": selected,
+        # A subscription can legitimately be empty after it expires or is
+        # removed. Keep domestic access usable instead of rejecting the entire
+        # generated configuration in that state.
+        "empty-fallback": "DIRECT",
         "url": url,
         "interval": interval,
         # Candidate pools are intentionally small. Keep their health state warm
@@ -445,12 +460,11 @@ def fallback(name, selected, url, interval, expected_status=None):
 
 
 def latency_aware_url_test(name, selected, url, interval, tolerance):
-    if not selected:
-        raise ValueError(f"{name} 没有候选节点，拒绝生成可能直连泄漏的配置")
     return {
         "name": name,
         "type": "url-test",
         "proxies": selected,
+        "empty-fallback": "DIRECT",
         "url": url,
         "interval": interval,
         # Keep the small candidate pool warm. The tolerance prevents a switch
@@ -464,12 +478,11 @@ def latency_aware_url_test(name, selected, url, interval, tolerance):
 
 
 def candidate_pool_group(pool, selected, settings):
-    if not selected:
-        raise ValueError(f"{pool} 没有候选节点，拒绝生成可能直连泄漏的配置")
     spec = POOL_RUNTIME[pool]
     mode = settings[pool]["type"]
     if mode == "select":
-        return {"name": spec["group"], "type": "select", "proxies": selected}
+        return {"name": spec["group"], "type": "select", "proxies": selected,
+                "empty-fallback": "DIRECT"}
     if mode == "url-test":
         return latency_aware_url_test(
             spec["group"], selected, spec["url"], spec["interval"], spec.get("tolerance", 50)
@@ -562,19 +575,20 @@ def generate_config(selected=None, settings=None):
                       if str(rule).startswith("GEOSITE,telegram,")), len(rules))
     rules.insert(insert_at, telegram_api_rule)
     # GitHub uses long-lived HTTPS connections and large release/LFS transfers.
-    # Keep its domains ahead of the broader Microsoft category. GitHub-Auto is
-    # a read-only derived exit shown on the candidate-pool page, so its nodes
-    # and GitHub-specific probe results remain visible to the operator.
+    # Keep its domains ahead of the broader Microsoft category. The internal
+    # safety wrapper only switches to DIRECT after its candidate pool has been
+    # continuously observed as unavailable.
     github_rules = (
-        "DOMAIN-SUFFIX,github.com,GitHub-Auto",
-        "DOMAIN-SUFFIX,githubusercontent.com,GitHub-Auto",
-        "DOMAIN-SUFFIX,githubassets.com,GitHub-Auto",
-        "DOMAIN-SUFFIX,githubapp.com,GitHub-Auto",
+        "DOMAIN-SUFFIX,github.com,GitHub-出口",
+        "DOMAIN-SUFFIX,githubusercontent.com,GitHub-出口",
+        "DOMAIN-SUFFIX,githubassets.com,GitHub-出口",
+        "DOMAIN-SUFFIX,githubapp.com,GitHub-出口",
     )
     legacy_github_rules = tuple(
         variant for rule in github_rules for variant in (
-            rule.replace(",GitHub-Auto", ",Proxy-Auto"),
-            rule.replace(",GitHub-Auto", ",GitHub"),
+            rule.replace(",GitHub-出口", ",Proxy-Auto"),
+            rule.replace(",GitHub-出口", ",GitHub"),
+            rule.replace(",GitHub-出口", ",GitHub-Auto"),
         )
     )
     # `GEOSITE,microsoft` includes GitHub. Remove only our default and legacy
@@ -585,7 +599,9 @@ def generate_config(selected=None, settings=None):
     rules[insert_at:insert_at] = github_rules
     config["rules"] = rules
     hk, jp, sg, us, other_ai, tg, proxy = (selected[name] for name in POOLS)
-    ai_groups = ["JP-AI", "SG-AI", "US-AI"] + (["其他-AI"] if other_ai else [])
+    ai_groups = [group for pool, group in (("JP-AI", "JP-AI"), ("SG-AI", "SG-AI"),
+                                             ("US-AI", "US-AI"), ("其他-AI", "其他-AI"))
+                 if selected[pool]]
     ai_nodes = jp + sg + us + other_ai
     github = github_candidates(selected)
     # Bot API needs a real HTTPS request, not merely a controller delay probe.
@@ -597,8 +613,6 @@ def generate_config(selected=None, settings=None):
     ))[:5]
     if not notify:
         notify = us[:2] + jp[:1] + sg[:1]
-    if not github:
-        raise ValueError("GitHub 策略组缺少可用候选节点")
     groups = [
         {"name": "Apple", "type": "select", "proxies": ["DIRECT", "Proxy-Auto"] + proxy},
         {"name": "MicroSoft", "type": "select", "proxies": ["DIRECT", "Proxy-Auto"] + proxy},
@@ -612,14 +626,24 @@ def generate_config(selected=None, settings=None):
         fallback("GitHub-Auto", github, "https://github.com/", 300, "200"),
         fallback("DNS-Resolve", proxy, "https://dns.google/dns-query", 300),
         fallback("AI-Auto", ai_groups, "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
-        {"name": "AI", "type": "select", "proxies": ["AI-Auto"] + ai_groups + ai_nodes},
-        {"name": "Gemini", "type": "select", "proxies": ["AI-Auto", "SG-AI", "JP-AI", "US-AI"] + (["其他-AI"] if other_ai else []) + sg + jp + us + other_ai},
-        {"name": "Telegram", "type": "select", "proxies": ["TG-Auto"] + tg},
-        {"name": "TikTok", "type": "select", "proxies": ["Proxy-Auto"] + proxy},
-        {"name": "Youtube", "type": "select", "proxies": ["HK-视频"] + hk},
-        {"name": "Google", "type": "select", "proxies": ["Proxy-Auto"] + proxy},
-        {"name": "GitHub", "type": "select", "proxies": ["GitHub-Auto"] + github},
-        {"name": "Others", "type": "select", "proxies": ["Proxy-Auto"] + proxy},
+        {"name": "HK-视频-出口", "type": "select", "proxies": ["HK-视频", "DIRECT"],
+         "default-selected": "HK-视频"},
+        {"name": "AI-出口", "type": "select", "proxies": ["AI-Auto", "DIRECT"],
+         "default-selected": "AI-Auto"},
+        {"name": "TG-出口", "type": "select", "proxies": ["TG-Auto", "DIRECT"],
+         "default-selected": "TG-Auto"},
+        {"name": "Proxy-出口", "type": "select", "proxies": ["Proxy-Auto", "DIRECT"],
+         "default-selected": "Proxy-Auto"},
+        {"name": "GitHub-出口", "type": "select", "proxies": ["GitHub-Auto", "DIRECT"],
+         "default-selected": "GitHub-Auto"},
+        {"name": "AI", "type": "select", "proxies": ["AI-出口", "AI-Auto"] + ai_groups + ai_nodes},
+        {"name": "Gemini", "type": "select", "proxies": ["AI-出口", "AI-Auto", "SG-AI", "JP-AI", "US-AI"] + (["其他-AI"] if other_ai else []) + sg + jp + us + other_ai},
+        {"name": "Telegram", "type": "select", "proxies": ["TG-出口", "TG-Auto"] + tg},
+        {"name": "TikTok", "type": "select", "proxies": ["Proxy-出口", "Proxy-Auto"] + proxy},
+        {"name": "Youtube", "type": "select", "proxies": ["HK-视频-出口", "HK-视频"] + hk},
+        {"name": "Google", "type": "select", "proxies": ["Proxy-出口", "Proxy-Auto"] + proxy},
+        {"name": "GitHub", "type": "select", "proxies": ["GitHub-出口", "GitHub-Auto"] + github},
+        {"name": "Others", "type": "select", "proxies": ["Proxy-出口", "Proxy-Auto"] + proxy},
     ]
     if other_ai:
         groups.insert(6, candidate_pool_group("其他-AI", other_ai, settings))
@@ -1314,6 +1338,66 @@ def pool_is_all_down(proxies, group, prefix):
     return bool(leaves) and all(item.get("alive") is False for item in leaves)
 
 
+def group_health_state(proxies, group):
+    """Return up, down, or empty without probing DIRECT through an external URL."""
+    data = proxies.get(group, {})
+    names = [name for name in data.get("all", []) if name != "DIRECT"]
+    if not names:
+        return "empty"
+    leaves = [proxies.get(name, {}) for name in names]
+    if leaves and all(item.get("alive") is False for item in leaves):
+        return "down"
+    return "up"
+
+
+def set_failsafe_exit(exit_name, target):
+    data = proxy_api("/proxies/" + quote(exit_name, safe=""))
+    if target not in data.get("all", []):
+        raise ValueError(f"{exit_name} 缺少 {target} 出口")
+    if data.get("now") != target:
+        proxy_api("/proxies/" + quote(exit_name, safe=""), method="PUT", data={"name": target})
+
+
+def update_failsafes(proxies, events, now):
+    state = read_json(FAILSAFE_STATE, {})
+    for exit_name, spec in FAILSAFE_EXITS.items():
+        watched = {group: group_health_state(proxies, group) for group in spec["watched"]}
+        unavailable = bool(watched) and all(value in ("down", "empty") for value in watched.values())
+        previous = state.get(exit_name, {})
+        down_checks = int(previous.get("down_checks", 0)) + 1 if unavailable else 0
+        up_checks = 0 if unavailable else int(previous.get("up_checks", 0)) + 1
+        desired = "DIRECT" if down_checks >= FAILSAFE_FAILURE_THRESHOLD else spec["primary"]
+        if previous.get("active") == "DIRECT" and up_checks < FAILSAFE_RECOVERY_THRESHOLD:
+            desired = "DIRECT"
+        transition = "active" in previous and previous.get("active") != desired
+        error = None
+        try:
+            set_failsafe_exit(exit_name, desired)
+        except Exception as exc:
+            error = type(exc).__name__
+            desired = previous.get("active", spec["primary"])
+            transition = False
+        if transition:
+            events.append({
+                "time": now,
+                "group": exit_name,
+                "from": previous.get("active", spec["primary"]),
+                "to": desired,
+                "reason": "候选池连续全失效，临时直连" if desired == "DIRECT" else "候选池连续恢复，自动回到代理",
+            })
+        state[exit_name] = {
+            "active": desired,
+            "primary": spec["primary"],
+            "watched": watched,
+            "down_checks": down_checks,
+            "up_checks": up_checks,
+            "checked_at": now,
+            "last_error": error,
+        }
+    atomic_json(FAILSAFE_STATE, state)
+    return state
+
+
 def monitor_once():
     previous = read_json(RUNTIME_STATE, {})
     events = read_json(RUNTIME_EVENTS, [])
@@ -1364,6 +1448,8 @@ def monitor_once():
                         send_telegram_alert(f"家庭旁路恢复\n{title} 已恢复可用节点\n时间：{now}")
                     state = {"down_checks": 0, "alerted": False, "checked_at": now, "last_error": None}
                 alert_state[key] = state
+    if all_proxies:
+        update_failsafes(all_proxies, events, now)
     atomic_json(RUNTIME_STATE, current)
     atomic_json(RUNTIME_EVENTS, events[-100:])
     atomic_json(ALERT_STATE, alert_state)
@@ -1382,7 +1468,7 @@ def status():
     result = {}
     events = read_json(RUNTIME_EVENTS, [])
     runtime = read_json(RUNTIME_STATE, {})
-    for group in ("AI", "AI-Auto", "JP-AI", "SG-AI", "US-AI", "其他-AI", "Youtube", "HK-视频", "Telegram", "TG-Auto", "Google", "GitHub", "GitHub-Auto", "Others", "Proxy-Auto"):
+    for group in ("AI", "AI-Auto", "AI-出口", "JP-AI", "SG-AI", "US-AI", "其他-AI", "Youtube", "HK-视频", "HK-视频-出口", "Telegram", "TG-Auto", "TG-出口", "Google", "GitHub", "GitHub-Auto", "GitHub-出口", "Others", "Proxy-Auto", "Proxy-出口"):
         try:
             data = proxy_api("/proxies/" + quote(group, safe=""))
             leaf = resolve_leaf(group)
@@ -1399,7 +1485,8 @@ def status():
             result[group] = {"now": None, "leaf": None, "source": "不可用", "type": "unavailable",
                              "history": [], "last_change": None, "since": None,
                              "udp_declared": False, "quic_verified": False}
-    return {"groups": result, "events": events[-20:], "versions": [path.name for path in sorted(VERSIONS.glob("*.yaml"), reverse=True)[:5]]}
+    return {"groups": result, "events": events[-20:], "failsafes": read_json(FAILSAFE_STATE, {}),
+            "versions": [path.name for path in sorted(VERSIONS.glob("*.yaml"), reverse=True)[:5]]}
 
 
 PAGE = r'''<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><link rel=icon href="data:,"><title>机场与候选池</title><style>:root{color-scheme:dark}*{box-sizing:border-box}body{max-width:1100px;margin:28px auto;padding:0 18px;background:#13171a;color:#edf2f3;font:15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}a{color:#92ddb0}.top{display:flex;justify-content:space-between;gap:12px;align-items:center}.tabs{display:flex;gap:8px;margin:22px 0;flex-wrap:wrap}.tabs button,.btn{border:1px solid #435159;background:#20272b;color:#e8edef;padding:9px 12px;border-radius:5px}.tabs .on,.primary{background:#62c77c!important;color:#082112!important;border-color:#62c77c!important;font-weight:650}.panel{display:none}.panel.on{display:block}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.card{padding:16px;border:1px solid #364147;background:#1c2226;border-radius:7px}.muted{color:#aab5ba;line-height:1.5}input,select{width:100%;padding:9px;background:#0f1417;color:#fff;border:1px solid #47555c;border-radius:5px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row>*{flex:1}.node{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid #303a3f}.node button{width:32px;height:30px;border:1px solid #46545a;background:#252e33;color:#fff;border-radius:4px}.status{padding:10px 0;color:#9fe1b8}.bad{color:#ffada3}.pill{display:inline-block;padding:3px 7px;margin:3px;border-radius:4px;background:#29343a}.delay{font-variant-numeric:tabular-nums;color:#8dd9ac}.event{padding:9px 0;border-bottom:1px solid #303a3f;font-size:13px}h1{font-size:26px}h2{font-size:18px;letter-spacing:0}@media(max-width:640px){body{margin-top:20px}.row{align-items:stretch;flex-direction:column}}</style><div class=top><a href="/">← 家庭旁路设备管理</a><a href="http://__FAMILY_PROXY_IP__:18089/">MetaCubeXD</a></div><h1>机场与候选池</h1><div class=tabs><button class=on onclick="tab('subs',this)">订阅来源</button><button onclick="tab('pools',this)">候选池</button><button onclick="tab('runtime',this)">自动切换状态</button></div><section id=subs class="panel on"><p class=muted>订阅由 NAS 直连拉取，不经过代理、Fake-IP 或第三方转换。链接不保存；导入和应用失败时保留现有可用配置。</p><div id=slots class=grid></div></section><section id=pools class=panel><div class=row><input id=filter placeholder="筛选节点名称"><button class="btn primary" onclick=testAll()>三次稳定性测速</button><button class=btn onclick=save()>校验并应用</button><button class=btn onclick=rollback()>回退上一版</button></div><div id=testStatus class=status></div><div id=poolGrid class=grid></div></section><section id=runtime class=panel><button class=btn onclick=loadStatus()>刷新状态</button><div id=runtimeGrid class=grid></div><h2>最近自动切换</h2><div id=events class=card></div></section><script>
@@ -1512,6 +1599,16 @@ PAGE = PAGE.replace(
     "async function rollback(){try{await api('/api/rollback',{method:'POST',body:'{}'});document.querySelector('#testStatus').textContent='已验证并恢复上一版候选池';catalogLoaded=false;await loadPools()}catch(e){alert(e.message)}}",
     1,
 )
+PAGE = PAGE.replace(
+    '<div class="section-title"><h2>当前出口</h2></div><div id="runtimeGrid" class="grid"></div>',
+    '<div id="directFallbackStatus" class="status"></div><div class="section-title"><h2>当前出口</h2></div><div id="runtimeGrid" class="grid"></div>',
+    1,
+)
+_status_marker = "async function loadStatus(){let d=await api('/api/status');"
+_status_replacement = r'''function renderDirectFallbacks(entries){let target=document.querySelector('#directFallbackStatus');if(!target)return;let active=Object.entries(entries||{}).filter(function(entry){return entry[1]&&entry[1].active==='DIRECT'});if(!active.length){target.textContent='所有自动出口均处于代理模式';target.className='status';return}target.textContent='代理候选池连续全失效，当前临时直连：'+active.map(function(entry){return entry[0]}).join('、');target.className='status bad'}async function loadStatus(){let d=await api('/api/status');renderDirectFallbacks(d.failsafes);'''
+if _status_marker not in PAGE:
+    raise RuntimeError("runtime status load marker missing")
+PAGE = PAGE.replace(_status_marker, _status_replacement, 1)
 
 
 class Handler(BaseHTTPRequestHandler):
