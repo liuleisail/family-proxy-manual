@@ -278,7 +278,12 @@ def provider_path(slot):
 
 
 def clean_provider(data):
-    document = yaml.safe_load(data) or {}
+    if data.lstrip().lower().startswith((b"<!doctype html", b"<html", b"<head", b"<body")):
+        raise ValueError("订阅地址返回网页而非原生 Clash/Mihomo YAML；请在机场后台复制 Clash/Mihomo 原生订阅链接")
+    try:
+        document = yaml.safe_load(data) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError("订阅内容不是可解析的 Clash/Mihomo YAML") from exc
     proxies = document.get("proxies")
     if not isinstance(proxies, list):
         raise ValueError("仅接受机场原生 Clash/Mihomo YAML")
@@ -1514,7 +1519,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/pool-probe": result = start_pool_probe(body.get("pool", ""))
             else: raise ValueError("not found")
             self.reply(200, result)
-        except (ValueError, KeyError, OSError, subprocess.SubprocessError) as exc:
+        except (ValueError, KeyError, OSError, yaml.YAMLError, subprocess.SubprocessError) as exc:
             self.reply(400, {"error": str(exc)})
 
 
