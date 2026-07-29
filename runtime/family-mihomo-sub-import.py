@@ -699,7 +699,10 @@ def import_slot(slot, url):
     if parsed.scheme != "https" or not parsed.hostname:
         raise ValueError("仅接受 HTTPS 订阅链接")
     try:
-        with OPENER.open(Request(url, headers={"User-Agent": "Mihomo-Direct-Subscription"}), timeout=75) as response:
+        # Some subscription panels only return the actual Mihomo configuration
+        # to recognized client profiles. ClashX Meta is compatible with Mihomo
+        # and receives the complete YAML from those providers.
+        with OPENER.open(Request(url, headers={"User-Agent": "ClashX Meta"}), timeout=75) as response:
             raw = response.read(MAX_BYTES + 1)
     except Exception as exc:
         raise ValueError("订阅直连拉取失败") from exc
