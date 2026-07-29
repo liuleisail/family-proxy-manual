@@ -1544,6 +1544,21 @@ _new_speed_test = _new_speed_test.replace(
     "status.textContent=(d.action==='retest-apply'?'候选池复测中：':'全量测速（含 GitHub 专项）中：')+d.completed+'/'+d.total",
     "status.textContent=(d.phase==='github'?'GitHub 专项测速中：':(d.action==='retest-apply'?'候选池复测中：':'全量测速中：'))+d.completed+'/'+d.total",
 )
+_new_speed_test = _new_speed_test.replace(
+    "function showTestStatus(d){",
+    "let handledTestCompletion='';function showTestStatus(d){",
+    1,
+)
+_new_speed_test = _new_speed_test.replace(
+    "status.className=d.applied?'status':'status bad';catalogLoaded=false;loadPools();return}",
+    "status.className=d.applied?'status':'status bad';let completion=d.action+':'+d.finished_at;if(handledTestCompletion!==completion){handledTestCompletion=completion;catalogLoaded=false;loadPools()}return}",
+    1,
+)
+_new_speed_test = _new_speed_test.replace(
+    "status.className=d.suggestions&&d.suggestions.ready?'status':'status bad';catalogLoaded=false;loadPools();return}",
+    "status.className=d.suggestions&&d.suggestions.ready?'status':'status bad';let completion=d.action+':'+d.finished_at;if(handledTestCompletion!==completion){handledTestCompletion=completion;catalogLoaded=false;loadPools()}return}",
+    1,
+)
 if _old_speed_test not in PAGE:
     raise RuntimeError("speed test template marker missing")
 PAGE = PAGE.replace(_old_speed_test, _new_speed_test, 1)
@@ -1562,7 +1577,7 @@ PAGE = PAGE.replace(
     "配置校验和重启验证均通过，候选节点已按测速结果排序",
     1,
 )
-_auto_replace_clear_js = r'''const familyShowTestStatus=showTestStatus;showTestStatus=function(d){let status=document.querySelector('#testStatus');if(d.action==='replace-clear'){clearTimeout(testPoll);if(d.running){status.textContent='正在复测其余机场节点并自动替换候选池：'+d.completed+'/'+d.total+'；可继续浏览页面';status.className='status';testPoll=setTimeout(refreshTestStatus,1000);return}if(d.error){status.textContent='自动替换未执行：'+d.error;status.className='status bad';return}if(d.finished_at){status.textContent=d.applied?'已复测、替换候选池并清空该机场节点；配置校验和运行验证均通过':'自动替换未完成';status.className=d.applied?'status':'status bad';catalogLoaded=false;loadPools();return}}familyShowTestStatus(d)};async function dropSlot(s){if(!confirm('将自动复测其余机场节点、替换全部受影响业务池，验证成功后才清空此机场。确定继续？'))return;try{showTestStatus(await api('/api/replace-clear',{method:'POST',body:JSON.stringify({slot:s})}))}catch(e){let status=document.querySelector('#testStatus');status.textContent=e.message;status.className='status bad'}}'''
+_auto_replace_clear_js = r'''const familyShowTestStatus=showTestStatus;showTestStatus=function(d){let status=document.querySelector('#testStatus');if(d.action==='replace-clear'){clearTimeout(testPoll);if(d.running){status.textContent='正在复测其余机场节点并自动替换候选池：'+d.completed+'/'+d.total+'；可继续浏览页面';status.className='status';testPoll=setTimeout(refreshTestStatus,1000);return}if(d.error){status.textContent='自动替换未执行：'+d.error;status.className='status bad';return}if(d.finished_at){status.textContent=d.applied?'已复测、替换候选池并清空该机场节点；配置校验和运行验证均通过':'自动替换未完成';status.className=d.applied?'status':'status bad';let completion=d.action+':'+d.finished_at;if(handledTestCompletion!==completion){handledTestCompletion=completion;catalogLoaded=false;loadPools()}return}}familyShowTestStatus(d)};async function dropSlot(s){if(!confirm('将自动复测其余机场节点、替换全部受影响业务池，验证成功后才清空此机场。确定继续？'))return;try{showTestStatus(await api('/api/replace-clear',{method:'POST',body:JSON.stringify({slot:s})}))}catch(e){let status=document.querySelector('#testStatus');status.textContent=e.message;status.className='status bad'}}'''
 PAGE = PAGE.replace('</script></body></html>', _auto_replace_clear_js + '</script></body></html>', 1)
 
 _probe_marker = "function options(pool){"
