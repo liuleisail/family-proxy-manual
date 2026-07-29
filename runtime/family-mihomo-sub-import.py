@@ -281,10 +281,13 @@ def clean_provider(data):
     if data.lstrip().lower().startswith((b"<!doctype html", b"<html", b"<head", b"<body")):
         raise ValueError("订阅地址返回网页而非原生 Clash/Mihomo YAML；请在机场后台复制 Clash/Mihomo 原生订阅链接")
     try:
-        document = yaml.safe_load(data) or {}
+        documents = list(yaml.safe_load_all(data))
     except yaml.YAMLError as exc:
         raise ValueError("订阅内容不是可解析的 Clash/Mihomo YAML") from exc
-    proxies = document.get("proxies")
+    # Some providers prepend a metadata document before the actual Mihomo
+    # configuration. Find the document that contains the proxy list.
+    document = next((item for item in documents if isinstance(item, dict) and isinstance(item.get("proxies"), list)), None)
+    proxies = document.get("proxies") if document else None
     if not isinstance(proxies, list):
         raise ValueError("仅接受机场原生 Clash/Mihomo YAML")
     kept = [item for item in proxies if isinstance(item, dict) and item.get("name") and not NOISE.search(str(item["name"]))]
