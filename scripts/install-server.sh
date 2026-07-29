@@ -64,6 +64,9 @@ install -m 755 "$REPO_DIR/scripts/family-mihomo-upgrade" /usr/local/sbin/family-
 install -m 755 "$REPO_DIR/scripts/homekit-direct-routes" /usr/local/sbin/homekit-direct-routes
 install -m 755 "$REPO_DIR/scripts/homekit-direct-routes" /usr/local/sbin/homekit-direct-routes.sh
 install -d -m 700 /etc/family-proxy-ui /var/lib/family-proxy/docker/family-mihomo-sub-import/providers
+family_docker_root=$(awk -F= '$1 == "FAMILY_DOCKER_ROOT" { print $2; exit }' "$CONFIG")
+[[ -n $family_docker_root && $family_docker_root == /* ]] || { echo "FAMILY_DOCKER_ROOT is required" >&2; exit 1; }
+install -d -m 700 "$family_docker_root/family-mihomo-docker/providers/rule-sets"
 if [[ ! -e /etc/family-proxy-ui/managed-ips ]]; then
   install -m 600 /dev/null /etc/family-proxy-ui/managed-ips
 fi

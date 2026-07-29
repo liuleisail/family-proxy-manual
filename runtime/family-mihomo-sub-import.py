@@ -62,6 +62,7 @@ RUNTIME_STATE = PROVIDERS / "runtime-state.json"
 RUNTIME_EVENTS = PROVIDERS / "runtime-events.json"
 ALERT_STATE = PROVIDERS / "alert-state.json"
 ALERT_CONFIG = Path("/etc/family-proxy-ui/mihomo-alert.json")
+RULE_SETS = Path("/etc/family-proxy-ui/rule-sets.json")
 VERSIONS = BASE / "family-mihomo-fallback/config-versions"
 MAX_BYTES = 12 * 1024 * 1024
 CSRF = secrets.token_urlsafe(32)
@@ -124,6 +125,71 @@ POOL_PROBE_STATE = {
     "finished_at": None,
     "error": None,
 }
+
+
+def managed_rule_sets():
+    data = read_json(RULE_SETS, [])
+    if not isinstance(data, list):
+        return []
+    valid, seen = [], set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key", "")).strip().lower()
+        behavior = str(item.get("behavior", "")).strip().lower()
+        fmt = str(item.get("format", "")).strip().lower()
+        url = str(item.get("url", "")).strip()
+        policy = str(item.get("policy", "")).strip()
+        priority = str(item.get("priority", "normal")).strip().lower()
+        try:
+            interval = int(item.get("interval", 86400))
+        except (TypeError, ValueError):
+            continue
+        if (not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", key) or key in seen
+                or behavior not in {"domain", "ipcidr", "classical"}
+                or fmt not in {"yaml", "text", "mrs"}
+                or (fmt == "mrs" and behavior == "classical")
+                or not url.startswith("https://") or not policy
+                or priority not in {"high", "normal"} or not 3600 <= interval <= 604800):
+            continue
+        valid.append({"key": key, "behavior": behavior, "format": fmt, "url": url,
+                      "policy": policy, "priority": priority, "interval": interval})
+        seen.add(key)
+    return valid
+
+
+def merge_managed_rule_sets(config):
+    rule_sets = managed_rule_sets()
+    providers = config.get("rule-providers")
+    providers = dict(providers) if isinstance(providers, dict) else {}
+    for key in list(providers):
+        if str(key).startswith("family-"):
+            providers.pop(key)
+    for item in rule_sets:
+        providers["family-" + item["key"]] = {
+            "type": "http", "behavior": item["behavior"], "format": item["format"],
+            "path": f"./providers/rule-sets/{item['key']}.{item['format']}",
+            "url": item["url"], "interval": item["interval"], "proxy": "Proxy-Auto",
+            "size-limit": 4 * 1024 * 1024,
+        }
+    if providers:
+        config["rule-providers"] = providers
+    else:
+        config.pop("rule-providers", None)
+    rules = [str(rule) for rule in config.get("rules") or []
+             if not str(rule).startswith("RULE-SET,family-")]
+    def rendered(items):
+        return [f"RULE-SET,family-{item['key']},{item['policy']}" +
+                (",no-resolve" if item["behavior"] == "ipcidr" else "") for item in items]
+    high = [item for item in rule_sets if item["priority"] == "high"]
+    normal = [item for item in rule_sets if item["priority"] == "normal"]
+    high_at = next((index for index, rule in enumerate(rules)
+                    if rule.startswith("GEOSITE,") and rule != "GEOSITE,CN,DIRECT"),
+                   next((index for index, rule in enumerate(rules) if rule == "GEOSITE,CN,DIRECT"), len(rules)))
+    rules[high_at:high_at] = rendered(high)
+    normal_at = next((index for index, rule in enumerate(rules) if rule == "GEOSITE,CN,DIRECT"), len(rules))
+    rules[normal_at:normal_at] = rendered(normal)
+    config["rules"] = rules
 
 
 def env():
@@ -425,6 +491,7 @@ def generate_config(selected=None, settings=None):
     selected = {name: list(selected.get(name, [])) for name in POOLS}
     settings = validate_pool_settings(settings if settings is not None else pool_settings())
     config = yaml.safe_load(MIHOMO_CONFIG.read_text())
+    merge_managed_rule_sets(config)
     flattened = []
     sources_by_slot = source_map()
     for slot in source_slots():

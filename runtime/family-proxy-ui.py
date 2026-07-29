@@ -33,6 +33,7 @@ DEVICE_PREFS_PATH = Path("/etc/family-proxy-ui/device-preferences.json")
 PAGE_LAYOUT_PREFS_PATH = Path("/etc/family-proxy-ui/page-layout-preferences.json")
 HOMEKIT_ROUTE_STATE_PATH = Path("/var/lib/family-proxy/homekit-direct-routes.json")
 ALERT_CONFIG_PATH = Path("/etc/family-proxy-ui/mihomo-alert.json")
+RULE_SETS_PATH = Path("/etc/family-proxy-ui/rule-sets.json")
 PLATFORM_UPDATE_STATUS_PATH = Path("/var/lib/family-proxy/platform-update-status.json")
 ALERT_SOURCES_PATH = Path("/tmp/zfsv3/nvme13/18053615760/data/docker/family-mihomo-sub-import/providers/sources.json")
 TPROXY_SYNC = "/usr/local/sbin/family-mihomo-tproxy-auto"
@@ -102,6 +103,9 @@ CAPTURE_SCOPES = {
 CAPTURE_LOCK = threading.Lock()
 CAPTURE_STATE = {"active": None}
 PROTECTED_RULES = {"GEOSITE,CN,DIRECT", "GEOIP,CN,DIRECT,no-resolve"}
+RULE_SET_KEY_PREFIX = "family-"
+RULE_SET_MAX_COUNT = 30
+RULE_SET_MAX_INTERVAL = 7 * 24 * 60 * 60
 PAGE_LAYOUT_SECTIONS = {
     "devices": ("devices", "manual_add", "bypass", "traffic", "z4pro", "router", "wireguard"),
     "dns": ("rankings", "observability", "data_management"),
@@ -756,6 +760,107 @@ def rules_version(rules):
     return hashlib.sha256(value).hexdigest()[:16]
 
 
+def rule_sets_version(rule_sets):
+    value = json.dumps(rule_sets, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(value).hexdigest()[:16]
+
+
+def load_rule_sets():
+    try:
+        value = json.loads(RULE_SETS_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RouterError("规则集清单无法读取") from exc
+    return normalize_rule_sets(value)
+
+
+def normalize_rule_sets(value, policies=None):
+    if not isinstance(value, list) or len(value) > RULE_SET_MAX_COUNT:
+        raise RouterError(f"规则集数量必须在 0 到 {RULE_SET_MAX_COUNT} 之间")
+    valid_policies = set(policies or ())
+    normalized, seen = [], set()
+    for index, item in enumerate(value, 1):
+        if not isinstance(item, dict):
+            raise RouterError(f"第 {index} 个规则集格式错误")
+        key = str(item.get("key", "")).strip().lower()
+        name = str(item.get("name", "")).strip()
+        url = str(item.get("url", "")).strip()
+        behavior = str(item.get("behavior", "")).strip().lower()
+        fmt = str(item.get("format", "")).strip().lower()
+        policy = str(item.get("policy", "")).strip()
+        priority = str(item.get("priority", "normal")).strip().lower()
+        interval = item.get("interval", 86400)
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", key) or key in seen:
+            raise RouterError(f"第 {index} 个规则集标识必须唯一，且只含小写字母、数字和连字符")
+        if not name or len(name) > 40:
+            raise RouterError(f"第 {index} 个规则集名称不能为空且不能超过 40 个字符")
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or not parsed.netloc or len(url) > 1024:
+            raise RouterError(f"第 {index} 个规则集必须使用 HTTPS 地址")
+        if behavior not in {"domain", "ipcidr", "classical"}:
+            raise RouterError(f"第 {index} 个规则集的行为类型不受支持")
+        if fmt not in {"yaml", "text", "mrs"} or (fmt == "mrs" and behavior == "classical"):
+            raise RouterError(f"第 {index} 个规则集的格式与行为类型不兼容")
+        if priority not in {"high", "normal"}:
+            raise RouterError(f"第 {index} 个规则集优先级不受支持")
+        try:
+            interval = int(interval)
+        except (TypeError, ValueError) as exc:
+            raise RouterError(f"第 {index} 个规则集更新周期无效") from exc
+        if not 3600 <= interval <= RULE_SET_MAX_INTERVAL:
+            raise RouterError(f"第 {index} 个规则集更新周期必须在 1 小时到 7 天之间")
+        if valid_policies and policy not in valid_policies:
+            raise RouterError(f"第 {index} 个规则集选择的出口不可用")
+        normalized.append({"key": key, "name": name, "url": url, "behavior": behavior,
+                           "format": fmt, "policy": policy, "priority": priority,
+                           "interval": interval})
+        seen.add(key)
+    return normalized
+
+
+def rule_set_provider(rule_set):
+    return {
+        "type": "http",
+        "behavior": rule_set["behavior"],
+        "format": rule_set["format"],
+        "path": f"./providers/rule-sets/{rule_set['key']}.{rule_set['format']}",
+        "url": rule_set["url"],
+        "interval": rule_set["interval"],
+        "proxy": "Proxy-Auto",
+        "size-limit": 4 * 1024 * 1024,
+    }
+
+
+def merge_rule_sets(document, rule_sets):
+    providers = document.get("rule-providers")
+    providers = dict(providers) if isinstance(providers, dict) else {}
+    for key in list(providers):
+        if str(key).startswith(RULE_SET_KEY_PREFIX):
+            providers.pop(key)
+    for rule_set in rule_sets:
+        providers[RULE_SET_KEY_PREFIX + rule_set["key"]] = rule_set_provider(rule_set)
+    if providers:
+        document["rule-providers"] = providers
+    else:
+        document.pop("rule-providers", None)
+    rules = [str(rule) for rule in document.get("rules", [])
+             if not str(rule).startswith("RULE-SET," + RULE_SET_KEY_PREFIX)]
+    high = [rule_set for rule_set in rule_sets if rule_set["priority"] == "high"]
+    normal = [rule_set for rule_set in rule_sets if rule_set["priority"] == "normal"]
+    def build(items):
+        return [f"RULE-SET,{RULE_SET_KEY_PREFIX}{item['key']},{item['policy']}" +
+                (",no-resolve" if item["behavior"] == "ipcidr" else "") for item in items]
+    high_index = next((index for index, rule in enumerate(rules)
+                       if rule.startswith("GEOSITE,") and rule != "GEOSITE,CN,DIRECT"),
+                      next((index for index, rule in enumerate(rules) if rule == "GEOSITE,CN,DIRECT"), len(rules)))
+    rules[high_index:high_index] = build(high)
+    normal_index = next((index for index, rule in enumerate(rules) if rule == "GEOSITE,CN,DIRECT"), len(rules))
+    rules[normal_index:normal_index] = build(normal)
+    document["rules"] = rules
+    return rules
+
+
 def load_mihomo_config():
     try:
         text = MIHOMO_CONFIG_PATH.read_text(encoding="utf-8")
@@ -777,11 +882,14 @@ def rules_payload():
         group.get("name") for group in document.get("proxy-groups", [])
         if isinstance(group, dict) and isinstance(group.get("name"), str)
     )
+    rule_sets = load_rule_sets()
     return {
         "rules": rules,
         "version": rules_version(rules),
         "policies": list(dict.fromkeys(policies)),
         "protected": sorted(PROTECTED_RULES),
+        "rule_sets": rule_sets,
+        "rule_sets_version": rule_sets_version(rule_sets),
     }
 
 
@@ -826,17 +934,26 @@ def mihomo_apply_payload(payload):
         raise RouterError("Mihomo 规则校验接口不可用") from exc
 
 
-def save_mihomo_rules(value, expected_version):
+def save_mihomo_rules(value, expected_version, rule_sets_value=None, expected_rule_sets_version=None):
     rules = normalize_rules(value)
     with RULES_LOCK:
         original_text, document, current_rules = load_mihomo_config()
         if expected_version != rules_version(current_rules):
             raise RouterError("规则已被其他操作更新，请刷新后重试")
-        if rules == current_rules:
-            return {**rules_payload(), "message": "规则没有变化"}
+        current_rule_sets = load_rule_sets()
+        if expected_rule_sets_version not in (None, "", rule_sets_version(current_rule_sets)):
+            raise RouterError("规则集已被其他操作更新，请刷新后重试")
+        policies = {"DIRECT", "REJECT", "REJECT-DROP", "PASS"}
+        policies.update(group.get("name") for group in document.get("proxy-groups", [])
+                        if isinstance(group, dict) and isinstance(group.get("name"), str))
+        rule_sets = current_rule_sets if rule_sets_value is None else normalize_rule_sets(rule_sets_value, policies)
         document["rules"] = rules
+        merged_rules = merge_rule_sets(document, rule_sets)
+        if rules == current_rules and rule_sets == current_rule_sets and merged_rules == current_rules:
+            return {**rules_payload(), "message": "规则没有变化"}
         candidate = yaml.safe_dump(document, allow_unicode=True, sort_keys=False)
         mihomo_apply_payload(candidate)
+        previous_rule_sets = RULE_SETS_PATH.read_bytes() if RULE_SETS_PATH.exists() else None
         try:
             RULE_BACKUP_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
             stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -846,10 +963,16 @@ def save_mihomo_rules(value, expected_version):
             temporary = RULE_BACKUP_DIR / f".config-{os.getpid()}-{secrets.token_hex(4)}.yaml"
             temporary.write_text(candidate, encoding="utf-8")
             os.chmod(temporary, 0o640)
+            atomic_json(RULE_SETS_PATH, rule_sets)
             os.replace(temporary, MIHOMO_CONFIG_PATH)
             for old_backup in sorted(RULE_BACKUP_DIR.glob("config-before-rules-*.yaml"))[:-20]:
                 old_backup.unlink()
         except OSError as exc:
+            if previous_rule_sets is None:
+                RULE_SETS_PATH.unlink(missing_ok=True)
+            else:
+                RULE_SETS_PATH.write_bytes(previous_rule_sets)
+                os.chmod(RULE_SETS_PATH, 0o600)
             try:
                 mihomo_apply_payload(original_text)
             except RouterError:
@@ -858,6 +981,11 @@ def save_mihomo_rules(value, expected_version):
         health = local_health()
         if not health["ready"]:
             MIHOMO_CONFIG_PATH.write_text(original_text, encoding="utf-8")
+            if previous_rule_sets is None:
+                RULE_SETS_PATH.unlink(missing_ok=True)
+            else:
+                RULE_SETS_PATH.write_bytes(previous_rule_sets)
+                os.chmod(RULE_SETS_PATH, 0o600)
             mihomo_apply_payload(original_text)
             raise RouterError("规则已撤回：应用后健康检查未通过")
         audit("rules", "mihomo", "ok", f"{len(current_rules)} -> {len(rules)}")
@@ -3342,7 +3470,11 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/alerts/test":
                 self.reply(HTTPStatus.OK, send_alert_test())
             elif path == "/api/rules":
-                self.reply(HTTPStatus.OK, save_mihomo_rules(body.get("rules"), body.get("version", "")))
+                self.reply(HTTPStatus.OK, save_mihomo_rules(
+                    body.get("rules"), body.get("version", ""),
+                    body.get("rule_sets") if "rule_sets" in body else None,
+                    body.get("rule_sets_version"),
+                ))
             else:
                 self.reply(HTTPStatus.NOT_FOUND, {"error": "not found"})
         except (RouterError, ValueError, OSError, json.JSONDecodeError) as exc:
