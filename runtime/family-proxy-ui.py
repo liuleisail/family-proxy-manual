@@ -105,6 +105,7 @@ CAPTURE_STATE = {"active": None}
 PROTECTED_RULES = {"GEOSITE,CN,DIRECT", "GEOIP,CN,DIRECT,no-resolve"}
 RULE_SET_KEY_PREFIX = "family-"
 RULE_SET_MAX_COUNT = 30
+RULE_SET_MAX_SOURCES = 16
 RULE_SET_MAX_INTERVAL = 7 * 24 * 60 * 60
 PAGE_LAYOUT_SECTIONS = {
     "devices": ("devices", "manual_add", "bypass", "traffic", "z4pro", "router", "wireguard"),
@@ -785,9 +786,6 @@ def normalize_rule_sets(value, policies=None):
             raise RouterError(f"第 {index} 个规则集格式错误")
         key = str(item.get("key", "")).strip().lower()
         name = str(item.get("name", "")).strip()
-        url = str(item.get("url", "")).strip()
-        behavior = str(item.get("behavior", "")).strip().lower()
-        fmt = str(item.get("format", "")).strip().lower()
         policy = str(item.get("policy", "")).strip()
         priority = str(item.get("priority", "normal")).strip().lower()
         interval = item.get("interval", 86400)
@@ -795,13 +793,31 @@ def normalize_rule_sets(value, policies=None):
             raise RouterError(f"第 {index} 个规则集标识必须唯一，且只含小写字母、数字和连字符")
         if not name or len(name) > 40:
             raise RouterError(f"第 {index} 个规则集名称不能为空且不能超过 40 个字符")
-        parsed = urlparse(url)
-        if parsed.scheme != "https" or not parsed.netloc or len(url) > 1024:
-            raise RouterError(f"第 {index} 个规则集必须使用 HTTPS 地址")
-        if behavior not in {"domain", "ipcidr", "classical"}:
-            raise RouterError(f"第 {index} 个规则集的行为类型不受支持")
-        if fmt not in {"yaml", "text", "mrs"} or (fmt == "mrs" and behavior == "classical"):
-            raise RouterError(f"第 {index} 个规则集的格式与行为类型不兼容")
+        raw_sources = item.get("sources")
+        if raw_sources is None:
+            raw_sources = [{"key": "source-1", "url": item.get("url", ""),
+                            "behavior": item.get("behavior", ""), "format": item.get("format", "")}]
+        if not isinstance(raw_sources, list) or not raw_sources or len(raw_sources) > RULE_SET_MAX_SOURCES:
+            raise RouterError(f"第 {index} 个规则集必须包含 1 到 {RULE_SET_MAX_SOURCES} 条来源地址")
+        sources, source_keys = [], set()
+        for source_index, source in enumerate(raw_sources, 1):
+            if not isinstance(source, dict):
+                raise RouterError(f"第 {index} 个规则集的第 {source_index} 条来源格式错误")
+            source_key = str(source.get("key", f"source-{source_index}")).strip().lower()
+            url = str(source.get("url", "")).strip()
+            behavior = str(source.get("behavior", "")).strip().lower()
+            fmt = str(source.get("format", "")).strip().lower()
+            parsed = urlparse(url)
+            if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", source_key) or source_key in source_keys:
+                raise RouterError(f"第 {index} 个规则集的来源标识必须唯一")
+            if parsed.scheme != "https" or not parsed.netloc or len(url) > 1024:
+                raise RouterError(f"第 {index} 个规则集的第 {source_index} 条来源必须使用 HTTPS 地址")
+            if behavior not in {"domain", "ipcidr", "classical"}:
+                raise RouterError(f"第 {index} 个规则集的第 {source_index} 条来源行为类型不受支持")
+            if fmt not in {"yaml", "text", "mrs"} or (fmt == "mrs" and behavior == "classical"):
+                raise RouterError(f"第 {index} 个规则集的第 {source_index} 条来源格式与行为类型不兼容")
+            sources.append({"key": source_key, "url": url, "behavior": behavior, "format": fmt})
+            source_keys.add(source_key)
         if priority not in {"high", "normal"}:
             raise RouterError(f"第 {index} 个规则集优先级不受支持")
         try:
@@ -812,20 +828,20 @@ def normalize_rule_sets(value, policies=None):
             raise RouterError(f"第 {index} 个规则集更新周期必须在 1 小时到 7 天之间")
         if valid_policies and policy not in valid_policies:
             raise RouterError(f"第 {index} 个规则集选择的出口不可用")
-        normalized.append({"key": key, "name": name, "url": url, "behavior": behavior,
-                           "format": fmt, "policy": policy, "priority": priority,
+        normalized.append({"key": key, "name": name, "sources": sources,
+                           "policy": policy, "priority": priority,
                            "interval": interval})
         seen.add(key)
     return normalized
 
 
-def rule_set_provider(rule_set):
+def rule_set_provider(rule_set, source):
     return {
         "type": "http",
-        "behavior": rule_set["behavior"],
-        "format": rule_set["format"],
-        "path": f"./providers/rule-sets/{rule_set['key']}.{rule_set['format']}",
-        "url": rule_set["url"],
+        "behavior": source["behavior"],
+        "format": source["format"],
+        "path": f"./providers/rule-sets/{rule_set['key']}-{source['key']}.{source['format']}",
+        "url": source["url"],
         "interval": rule_set["interval"],
         "proxy": "Proxy-Auto",
         "size-limit": 4 * 1024 * 1024,
@@ -839,7 +855,8 @@ def merge_rule_sets(document, rule_sets):
         if str(key).startswith(RULE_SET_KEY_PREFIX):
             providers.pop(key)
     for rule_set in rule_sets:
-        providers[RULE_SET_KEY_PREFIX + rule_set["key"]] = rule_set_provider(rule_set)
+        for source in rule_set["sources"]:
+            providers[f"{RULE_SET_KEY_PREFIX}{rule_set['key']}-{source['key']}"] = rule_set_provider(rule_set, source)
     if providers:
         document["rule-providers"] = providers
     else:
@@ -849,8 +866,9 @@ def merge_rule_sets(document, rule_sets):
     high = [rule_set for rule_set in rule_sets if rule_set["priority"] == "high"]
     normal = [rule_set for rule_set in rule_sets if rule_set["priority"] == "normal"]
     def build(items):
-        return [f"RULE-SET,{RULE_SET_KEY_PREFIX}{item['key']},{item['policy']}" +
-                (",no-resolve" if item["behavior"] == "ipcidr" else "") for item in items]
+        return [f"RULE-SET,{RULE_SET_KEY_PREFIX}{item['key']}-{source['key']},{item['policy']}" +
+                (",no-resolve" if source["behavior"] == "ipcidr" else "")
+                for item in items for source in item["sources"]]
     high_index = next((index for index, rule in enumerate(rules)
                        if rule.startswith("GEOSITE,") and rule != "GEOSITE,CN,DIRECT"),
                       next((index for index, rule in enumerate(rules) if rule == "GEOSITE,CN,DIRECT"), len(rules)))

@@ -136,23 +136,36 @@ def managed_rule_sets():
         if not isinstance(item, dict):
             continue
         key = str(item.get("key", "")).strip().lower()
-        behavior = str(item.get("behavior", "")).strip().lower()
-        fmt = str(item.get("format", "")).strip().lower()
-        url = str(item.get("url", "")).strip()
         policy = str(item.get("policy", "")).strip()
         priority = str(item.get("priority", "normal")).strip().lower()
         try:
             interval = int(item.get("interval", 86400))
         except (TypeError, ValueError):
             continue
+        raw_sources = item.get("sources")
+        if raw_sources is None:
+            raw_sources = [{"key": "source-1", "url": item.get("url", ""),
+                            "behavior": item.get("behavior", ""), "format": item.get("format", "")}]
+        sources, source_keys = [], set()
+        for source_index, source in enumerate(raw_sources if isinstance(raw_sources, list) else [], 1):
+            if not isinstance(source, dict):
+                continue
+            source_key = str(source.get("key", f"source-{source_index}")).strip().lower()
+            behavior = str(source.get("behavior", "")).strip().lower()
+            fmt = str(source.get("format", "")).strip().lower()
+            url = str(source.get("url", "")).strip()
+            if (not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", source_key) or source_key in source_keys
+                    or behavior not in {"domain", "ipcidr", "classical"}
+                    or fmt not in {"yaml", "text", "mrs"}
+                    or (fmt == "mrs" and behavior == "classical") or not url.startswith("https://")):
+                continue
+            sources.append({"key": source_key, "behavior": behavior, "format": fmt, "url": url})
+            source_keys.add(source_key)
         if (not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", key) or key in seen
-                or behavior not in {"domain", "ipcidr", "classical"}
-                or fmt not in {"yaml", "text", "mrs"}
-                or (fmt == "mrs" and behavior == "classical")
-                or not url.startswith("https://") or not policy
+                or not sources or len(sources) > 16 or not policy
                 or priority not in {"high", "normal"} or not 3600 <= interval <= 604800):
             continue
-        valid.append({"key": key, "behavior": behavior, "format": fmt, "url": url,
+        valid.append({"key": key, "sources": sources,
                       "policy": policy, "priority": priority, "interval": interval})
         seen.add(key)
     return valid
@@ -166,12 +179,13 @@ def merge_managed_rule_sets(config):
         if str(key).startswith("family-"):
             providers.pop(key)
     for item in rule_sets:
-        providers["family-" + item["key"]] = {
-            "type": "http", "behavior": item["behavior"], "format": item["format"],
-            "path": f"./providers/rule-sets/{item['key']}.{item['format']}",
-            "url": item["url"], "interval": item["interval"], "proxy": "Proxy-Auto",
-            "size-limit": 4 * 1024 * 1024,
-        }
+        for source in item["sources"]:
+            providers[f"family-{item['key']}-{source['key']}"] = {
+                "type": "http", "behavior": source["behavior"], "format": source["format"],
+                "path": f"./providers/rule-sets/{item['key']}-{source['key']}.{source['format']}",
+                "url": source["url"], "interval": item["interval"], "proxy": "Proxy-Auto",
+                "size-limit": 4 * 1024 * 1024,
+            }
     if providers:
         config["rule-providers"] = providers
     else:
@@ -179,8 +193,9 @@ def merge_managed_rule_sets(config):
     rules = [str(rule) for rule in config.get("rules") or []
              if not str(rule).startswith("RULE-SET,family-")]
     def rendered(items):
-        return [f"RULE-SET,family-{item['key']},{item['policy']}" +
-                (",no-resolve" if item["behavior"] == "ipcidr" else "") for item in items]
+        return [f"RULE-SET,family-{item['key']}-{source['key']},{item['policy']}" +
+                (",no-resolve" if source["behavior"] == "ipcidr" else "")
+                for item in items for source in item["sources"]]
     high = [item for item in rule_sets if item["priority"] == "high"]
     normal = [item for item in rule_sets if item["priority"] == "normal"]
     high_at = next((index for index, rule in enumerate(rules)
