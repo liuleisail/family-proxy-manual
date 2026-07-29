@@ -470,17 +470,19 @@ def generate_config(selected=None, settings=None):
                       if str(rule).startswith("GEOSITE,telegram,")), len(rules))
     rules.insert(insert_at, telegram_api_rule)
     # GitHub uses long-lived HTTPS connections and large release/LFS transfers.
-    # Keep it out of the generic Hong Kong-first Others policy while preserving
-    # all domestic direct and existing application rules.
+    # Keep its domains ahead of the broader Microsoft category, but route them
+    # through the visible Proxy candidate pool so the rule page and pool page
+    # describe the same node collection.
     github_rules = (
-        "DOMAIN-SUFFIX,github.com,GitHub",
-        "DOMAIN-SUFFIX,githubusercontent.com,GitHub",
-        "DOMAIN-SUFFIX,githubassets.com,GitHub",
-        "DOMAIN-SUFFIX,githubapp.com,GitHub",
+        "DOMAIN-SUFFIX,github.com,Proxy-Auto",
+        "DOMAIN-SUFFIX,githubusercontent.com,Proxy-Auto",
+        "DOMAIN-SUFFIX,githubassets.com,Proxy-Auto",
+        "DOMAIN-SUFFIX,githubapp.com,Proxy-Auto",
     )
-    # `GEOSITE,microsoft` includes GitHub. Remove only our exact rules and
-    # reinsert them before that broader rule on every regeneration.
-    rules = [rule for rule in rules if str(rule) not in github_rules]
+    legacy_github_rules = tuple(rule.replace(",Proxy-Auto", ",GitHub") for rule in github_rules)
+    # `GEOSITE,microsoft` includes GitHub. Remove only our default and legacy
+    # exact rules, then reinsert the current defaults before that broader rule.
+    rules = [rule for rule in rules if str(rule) not in (*github_rules, *legacy_github_rules)]
     insert_at = next((index for index, rule in enumerate(rules)
                       if str(rule).startswith("GEOSITE,microsoft,")), len(rules))
     rules[insert_at:insert_at] = github_rules
