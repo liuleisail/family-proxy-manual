@@ -382,16 +382,8 @@ def test_score(result):
 
 
 def rank_pool_candidates(entries):
-    """Prefer stable primary nodes, then retain one good node per backup source."""
-    chosen = []
-    for position, source in enumerate(source_slots()):
-        limit = 3 if position == 0 else 1
-        chosen.extend(sorted((entry for entry in entries if entry["source"] == source),
-                             key=lambda entry: (entry["score"], entry["name"]))[:limit])
-    for entry in sorted(entries, key=lambda entry: (source_rank(entry["name"]), entry["score"], entry["name"])):
-        if entry not in chosen and len(chosen) < 5:
-            chosen.append(entry)
-    return [entry["name"] for entry in sorted(chosen, key=lambda entry: (source_rank(entry["name"]), entry["score"], entry["name"]))[:5]]
+    """Keep the five most stable nodes, independent of subscription source."""
+    return [entry["name"] for entry in sorted(entries, key=lambda entry: (entry["score"], entry["name"]))[:5]]
 
 
 def build_suggestions(results):
@@ -427,10 +419,6 @@ def seed_pools():
         ])
     atomic_json(CANDIDATES, seeded)
     return seeded
-
-
-def source_rank(name):
-    return next((rank for rank, source in enumerate(sources()) if name.startswith(source["prefix"])), 99)
 
 
 def fallback(name, selected, url, interval, expected_status=None):
@@ -793,7 +781,7 @@ def validate_pools(value):
             raise ValueError(f"{pool} 含有不存在的节点")
         if any(not pool_matches(pool, indexed[item]) for item in entries):
             raise ValueError(f"{pool} 含有不符合地域规则的节点")
-        cleaned[pool] = sorted(entries, key=source_rank)
+        cleaned[pool] = list(entries)
     return cleaned
 
 
@@ -963,7 +951,6 @@ def rank_url_test_pool(pool, selected, results):
             item.get("success") != 3 or item.get("delay") is None,
             item.get("delay") or 999999,
             item.get("jitter") if item.get("jitter") is not None else 999999,
-            source_rank(name),
             name,
         )
 
@@ -1406,6 +1393,11 @@ PAGE = PAGE.replace(
 PAGE = PAGE.replace(
     "</style>",
     "#testStatus{min-height:36px;line-height:18px;font-variant-numeric:tabular-nums}</style>",
+    1,
+)
+PAGE = PAGE.replace(
+    "配置校验和重启验证均通过，主力节点已排在备用前",
+    "配置校验和重启验证均通过，候选节点已按测速结果排序",
     1,
 )
 
