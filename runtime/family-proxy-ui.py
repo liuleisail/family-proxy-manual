@@ -342,31 +342,6 @@ def dns_probe(name="www.baidu.com"):
             response[3] & 0x0F == 0 and int.from_bytes(response[6:8], "big") > 0)
 
 
-def proxy_auto_health():
-    """Report whether the global proxy pool still has a usable candidate.
-
-    RouterOS uses this result to leave the Z4Pro policy route only when the
-    whole shared proxy pool is exhausted.  A single business pool failing must
-    not send every managed device back to direct WAN access.
-    """
-    policy = mihomo_request("/proxies/Proxy-Auto")
-    members = list(policy.get("all") or [])
-    detail = {"proxy": policy.get("now"), "proxy_candidates": len(members)}
-    if not members:
-        detail["proxy_state"] = "候选池为空"
-        return False, detail
-
-    proxies = mihomo_request("/proxies").get("proxies", {})
-    states = [proxies.get(name, {}).get("alive") for name in members]
-    # `alive` is absent before Mihomo has completed a probe.  Do not fail over
-    # prematurely; only an explicit all-false result means every proxy failed.
-    if states and all(state is False for state in states):
-        detail["proxy_state"] = "全部候选节点不可用"
-        return False, detail
-
-    return bool(policy.get("now")), detail
-
-
 def local_health():
     started = time.monotonic()
     checks = {"mihomo": False, "dns": False, "policy": False}
@@ -375,8 +350,9 @@ def local_health():
         version = mihomo_request("/version")
         checks["mihomo"] = bool(version)
         detail["version"] = version.get("version", "")
-        checks["policy"], policy_detail = proxy_auto_health()
-        detail.update(policy_detail)
+        policy = mihomo_request("/proxies/Proxy-Auto")
+        checks["policy"] = bool(policy.get("now") and policy.get("all"))
+        detail["proxy"] = policy.get("now")
     except RouterError:
         pass
     try:
@@ -2417,8 +2393,8 @@ def cleanup_device_rules(api, ip):
         if item.get("name") in tables:
             api.remove("/routing/table", item[".id"])
             removed += 1
-    clear_device_connections(api, ip)
-    return removed
+    cleared_connections = clear_device_connections(api, ip)
+    return removed, cleared_connections
 
 
 def remove_shared_membership(api, ip):
@@ -2549,13 +2525,19 @@ def remove_device(ip):
     ip = validate_ip(ip)
     with RouterOS() as api:
         removed = remove_shared_membership(api, ip)
-        removed += cleanup_device_rules(api, ip)
+        cleaned_rules, cleared_connections = cleanup_device_rules(api, ip)
+        removed += cleaned_rules
         addresses = managed_ips()
         addresses.discard(ip)
         save_managed_ips(addresses)
         sync_tproxy()
-        audit("remove", ip, "success", f"removed_rules={removed}")
-        return {"ip": ip, "message": f"已移除 {removed} 条页面管理规则，设备恢复直连"}
+        audit("remove", ip, "success",
+              f"removed_rules={removed}; cleared_connections={cleared_connections}; egress=rb5009-direct")
+        return {
+            "ip": ip,
+            "message": (f"已撤出 {removed} 条旁路规则并清除 {cleared_connections} 条旧连接；"
+                        "后续流量由 RB5009 直接出网，不经过 Z4Pro"),
+        }
 
 
 def cpu_sample():
@@ -2721,6 +2703,11 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta n
 const csrf="__CSRF__",statusEl=document.querySelector('#status');let filter='managed',devices=[],deviceQuery='',editingMac='';function esc(s){return String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]))}function setStatus(message,ok=true){statusEl.textContent=message;statusEl.className='status '+(ok?'':'error')}async function api(path,opt={}){let response=await fetch(new URL(path,location.origin),{...opt,headers:{'Content-Type':'application/json','X-CSRF':csrf,...(opt.headers||{})}}),body=await response.json();if(!response.ok)throw Error(body.error||'请求失败');return body}function healthItem(name,ok,text){return `<div class="health-item ${ok?'':'bad'}"><b>${esc(name)}</b><span title="${esc(text)}">${esc(text)}</span></div>`}function deviceActions(d){let rename=`<button class="secondary" onclick="openRename('${d.mac}')">改名</button>`;if(d.managed)return rename+(d.fixed?'<span class="muted">固定设备</span>':`<button class="secondary danger" onclick="removeDevice('${d.ip}')">恢复直连</button>`);let join=`<button class="secondary" onclick="choose('${d.ip}')">加入旁路</button>`;if(filter==='favorites')return rename+join+`<button class="secondary danger" onclick="setFavorite('${d.mac}',false)">移出常用</button>`;let keep=d.favorite?`<button class="secondary danger" onclick="setFavorite('${d.mac}',false)">取消保留</button>`:`<button class="secondary" onclick="setFavorite('${d.mac}',true)">保留</button>`;return rename+join+keep}function render(){let q=deviceQuery.toLowerCase(),shown=devices.filter(d=>(filter==='managed'&&d.managed||filter==='favorites'&&d.favorite||filter==='online'&&d.status==='bound')&&(!q||`${d.name} ${d.ip} ${d.mac}`.toLowerCase().includes(q)));let empty={managed:'尚无已接管设备',favorites:'尚未保留常用设备，可在“全部在线”中添加',online:'当前没有可见的在线设备'}[filter];document.querySelector('#devices').innerHTML=shown.length?shown.map(d=>{let label=!d.managed?(d.favorite?'常用设备':'未接管'):d.effective?'已生效':'等待新流量',state=!d.managed?'':d.effective?'active':'wait';return `<div class="device-row"><div class="device-name">${esc(d.name)}<div class="device-meta">${esc(d.ip)}${d.static?' · 固定地址':''}${d.custom_name?' · 自定义名称':''}</div></div><div class="device-mac muted">${esc(d.mac)}</div><div class="device-online online ${d.status==='bound'?'bound':''}">${d.status==='bound'?'在线':'离线'}</div><div class="device-state state ${state}">${label}${d.managed?`<div class="device-meta">${d.packets} 个包</div>`:''}</div><div class="device-action">${deviceActions(d)}</div></div>`}).join(''):`<div class="empty">${empty}</div>`}function setFilter(value){filter=value;document.querySelectorAll('[data-filter]').forEach(b=>b.classList.toggle('active',b.dataset.filter===value));render()}async function load(){try{let data=await api('/api/devices'),summary=data.summary,checks=summary.checks||{},ready=summary.ready&&summary.netwatch==='up';devices=data.devices;let badge=document.querySelector('#health');badge.className='overall '+(ready?'':'bad');badge.innerHTML=`<span class="dot"></span><span>${ready?'旁路运行正常':'旁路需要检查'}</span>`;document.querySelector('#healthChecks').innerHTML=healthItem('RB5009',summary.router==='connected','管理连接')+healthItem('DNS',checks.dns,'国内解析')+healthItem('Mihomo',checks.mihomo,'控制接口')+healthItem('当前策略',checks.policy,summary.detail?.proxy||'未就绪')+healthItem('自动回退',summary.netwatch==='up',summary.netwatch==='up'?'已启用':'未就绪');render()}catch(e){setStatus(e.message,false)}}function choose(ip){document.querySelector('#ip').value=ip;document.querySelector('#ip').focus();window.scrollTo({top:document.querySelector('.add-row').offsetTop-90,behavior:'smooth'})}function openRename(mac){let d=devices.find(x=>x.mac===mac);if(!d)return;editingMac=mac;document.querySelector('#renameInput').value=d.name;document.querySelector('#renameDialog').showModal();requestAnimationFrame(()=>document.querySelector('#renameInput').select())}function closeRename(){document.querySelector('#renameDialog').close();editingMac=''}async function saveRename(event){event.preventDefault();let alias=document.querySelector('#renameInput').value.trim();try{await api('/api/device/preference',{method:'POST',body:JSON.stringify({mac:editingMac,alias})});closeRename();setStatus(alias?'设备名称已保存':'已恢复路由器原名称',true);await load()}catch(e){setStatus(e.message,false)}}async function setFavorite(mac,favorite){try{await api('/api/device/preference',{method:'POST',body:JSON.stringify({mac,favorite})});setStatus(favorite?'已加入常用设备':'已移出常用设备',true);await load()}catch(e){setStatus(e.message,false)}}async function enableDevice(){let ip=document.querySelector('#ip').value.trim();try{setStatus('正在检查并加入设备…',true);let result=await api('/api/enable',{method:'POST',body:JSON.stringify({ip})});setStatus(result.message,true);await load()}catch(e){setStatus(e.message,false)}}async function removeDevice(ip){if(!confirm(`将 ${ip} 恢复直连并清理旧连接？`))return;try{setStatus('正在恢复直连…',true);let result=await api('/api/remove',{method:'POST',body:JSON.stringify({ip})});setStatus(result.message,true);await load()}catch(e){setStatus(e.message,false)}}document.querySelector('#deviceSearch').addEventListener('input',event=>{deviceQuery=event.target.value.trim();render()});document.querySelector('#renameDialog').addEventListener('click',event=>{if(event.target.id==='renameDialog')closeRename()});load();setInterval(()=>{if(!document.querySelector('#renameDialog').open)load()},30000)
 </script></body></html>'''
 PAGE = PAGE.replace('<div class="eyebrow">SELECTIVE ROUTING</div>', '')
+PAGE = PAGE.replace(
+    '将 ${ip} 恢复直连并清理旧连接？',
+    '将 ${ip} 恢复为经 RB5009 直接上网，并清理旧连接？',
+    1,
+)
 PAGE = PAGE.replace(
     '.add-row{display:grid;',
     '.router-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}'
