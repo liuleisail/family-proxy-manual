@@ -342,6 +342,31 @@ def dns_probe(name="www.baidu.com"):
             response[3] & 0x0F == 0 and int.from_bytes(response[6:8], "big") > 0)
 
 
+def proxy_auto_health():
+    """Report whether the global proxy pool still has a usable candidate.
+
+    RouterOS uses this result to leave the Z4Pro policy route only when the
+    whole shared proxy pool is exhausted.  A single business pool failing must
+    not send every managed device back to direct WAN access.
+    """
+    policy = mihomo_request("/proxies/Proxy-Auto")
+    members = list(policy.get("all") or [])
+    detail = {"proxy": policy.get("now"), "proxy_candidates": len(members)}
+    if not members:
+        detail["proxy_state"] = "候选池为空"
+        return False, detail
+
+    proxies = mihomo_request("/proxies").get("proxies", {})
+    states = [proxies.get(name, {}).get("alive") for name in members]
+    # `alive` is absent before Mihomo has completed a probe.  Do not fail over
+    # prematurely; only an explicit all-false result means every proxy failed.
+    if states and all(state is False for state in states):
+        detail["proxy_state"] = "全部候选节点不可用"
+        return False, detail
+
+    return bool(policy.get("now")), detail
+
+
 def local_health():
     started = time.monotonic()
     checks = {"mihomo": False, "dns": False, "policy": False}
@@ -350,9 +375,8 @@ def local_health():
         version = mihomo_request("/version")
         checks["mihomo"] = bool(version)
         detail["version"] = version.get("version", "")
-        policy = mihomo_request("/proxies/Proxy-Auto")
-        checks["policy"] = bool(policy.get("now") and policy.get("all"))
-        detail["proxy"] = policy.get("now")
+        checks["policy"], policy_detail = proxy_auto_health()
+        detail.update(policy_detail)
     except RouterError:
         pass
     try:
