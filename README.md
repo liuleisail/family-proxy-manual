@@ -12,6 +12,12 @@
 
 ![设备与运行状态](docs/screenshots/devices.png)
 
+### 设备接管
+
+设备名称、IP 和 MAC 已在截图中遮挡，右侧保留接管状态与日常操作入口。
+
+![设备接管](docs/screenshots/device-takeover.png)
+
 ### DNS 管理
 
 ![DNS 管理](docs/screenshots/dns.png)
