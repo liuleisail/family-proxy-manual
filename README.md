@@ -22,6 +22,10 @@
 
 ![DNS 管理](docs/screenshots/dns.png)
 
+### DNS 数据管理、广告拦截与自动更新
+
+![DNS 数据管理、广告拦截与自动更新](docs/screenshots/dns-data-management.png)
+
 ### 机场与候选池
 
 ![机场与候选池](docs/screenshots/airport-pools.png)
