@@ -4,6 +4,22 @@
 
 > 本文只描述操作流程，不包含可用订阅、账户密码、私钥、Cookie、真实公网域名或家庭网络地址。
 
+## 控制界面
+
+以下截图来自脱敏的实际管理页面状态，用于说明日常操作入口；图片不包含订阅链接、节点地址、设备 IP/MAC 或登录凭据。
+
+### 设备与运行状态
+
+![设备与运行状态](docs/screenshots/device-status.png)
+
+### 代理规则
+
+![代理规则](docs/screenshots/rules.png)
+
+### 系统维护
+
+![系统维护](docs/screenshots/maintenance.png)
+
 ## 人工部署快速开始
 
 首次部署应在一台已安装 Docker、Docker Compose 插件和 `systemd` 的旁路服务器上完成。安装器只部署控制平面，不会自动改 RouterOS、导入订阅、接管设备或覆盖已有同名 Docker 容器。
