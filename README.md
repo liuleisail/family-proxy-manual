@@ -10,7 +10,15 @@
 
 ### 设备与运行状态
 
-![设备与运行状态](docs/screenshots/device-status.png)
+![设备与运行状态](docs/screenshots/devices.png)
+
+### DNS 管理
+
+![DNS 管理](docs/screenshots/dns.png)
+
+### 机场与候选池
+
+![机场与候选池](docs/screenshots/airport-pools.png)
 
 ### 代理规则
 
