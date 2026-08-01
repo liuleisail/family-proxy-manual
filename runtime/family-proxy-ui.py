@@ -91,6 +91,9 @@ WIREGUARD_STATE = {"interfaces": {}, "probe_timestamp": 0.0, "probe": None}
 CAPTURE_DIR = Path("/run/family-proxy-captures")
 CAPTURE_INTERFACE = os.environ.get("FAMILY_CAPTURE_INTERFACE", "kvmbr0")
 HOMEKIT_ROUTE_INTERFACE = os.environ.get("FAMILY_HOMEKIT_ROUTE_INTERFACE", "kvmbr0")
+HOMEKIT_ROUTE_TABLE = "3001"
+HOMEKIT_ROUTE_RULE_PREF = "2900"
+TPROXY_RETURN_PROTO = "186"
 CAPTURE_MAX_BYTES = 50_000_000
 CAPTURE_TOTAL_BYTES = 200_000_000
 CAPTURE_RETENTION_SECONDS = 24 * 60 * 60
@@ -103,7 +106,17 @@ CAPTURE_SCOPES = {
 }
 CAPTURE_LOCK = threading.Lock()
 CAPTURE_STATE = {"active": None}
-PROTECTED_RULES = {"GEOSITE,CN,DIRECT", "GEOIP,CN,DIRECT,no-resolve"}
+GITHUB_ROUTING_RULES = (
+    "DOMAIN-SUFFIX,github.com,GitHub-出口",
+    "DOMAIN-SUFFIX,githubusercontent.com,GitHub-出口",
+    "DOMAIN-SUFFIX,githubassets.com,GitHub-出口",
+    "DOMAIN-SUFFIX,githubapp.com,GitHub-出口",
+)
+PROTECTED_RULES = {
+    "GEOSITE,CN,DIRECT",
+    "GEOIP,CN,DIRECT,no-resolve",
+    *GITHUB_ROUTING_RULES,
+}
 RULE_SET_KEY_PREFIX = "family-"
 RULE_SET_MAX_COUNT = 30
 RULE_SET_MAX_SOURCES = 16
@@ -918,8 +931,18 @@ def merge_rule_sets(document, rule_sets):
     rules[high_index:high_index] = missing_high
     normal_index = next((index for index, rule in enumerate(rules) if rule == "GEOSITE,CN,DIRECT"), len(rules))
     rules[normal_index:normal_index] = missing_normal
+    rules = enforce_system_rule_order(rules)
     document["rules"] = rules
     return rules
+
+
+def enforce_system_rule_order(rules):
+    """Keep narrow system routes ahead of broader overlapping categories."""
+    ordered = [rule for rule in rules if rule not in GITHUB_ROUTING_RULES]
+    microsoft_index = next((index for index, rule in enumerate(ordered)
+                            if rule.startswith("GEOSITE,microsoft,")), len(ordered))
+    ordered[microsoft_index:microsoft_index] = GITHUB_ROUTING_RULES
+    return ordered
 
 
 def load_mihomo_config():
@@ -972,9 +995,10 @@ def normalize_rules(value):
         if "," not in rule:
             raise RouterError(f"第 {index} 条规则缺少分隔符")
         rules.append(rule)
+    rules = enforce_system_rule_order(rules)
     missing = PROTECTED_RULES - set(rules)
     if missing:
-        raise RouterError("国内直连保护规则不能删除")
+        raise RouterError("系统保护规则不能删除")
     matches = [index for index, rule in enumerate(rules) if rule.upper().startswith("MATCH,")]
     if matches != [len(rules) - 1]:
         raise RouterError("必须且只能保留一条 MATCH 规则，并放在最后")
@@ -1595,10 +1619,11 @@ def legacy_homekit_direct_ips(route_interface):
 
 
 def homekit_direct_route_sync():
-    """Maintain only controller-owned Z4Pro-to-LAN HomeKit /32 routes.
+    """Maintain source-specific Z4Pro-to-LAN HomeKit routes.
 
     Selected devices are stored by MAC, then resolved from live DHCP leases.
-    This never changes RouterOS, Mihomo, MosDNS, or a client's default route.
+    TPROXY replies keep their RouterOS return route; only traffic whose source
+    is the Z4Pro itself uses the direct LAN table.
     """
     route_interface = load_config().get("FAMILY_HOMEKIT_ROUTE_INTERFACE", HOMEKIT_ROUTE_INTERFACE).strip()
     if not re.fullmatch(r"[A-Za-z0-9_.:-]+", route_interface):
@@ -1620,14 +1645,6 @@ def homekit_direct_route_sync():
                     preferences["homekit_direct"] = sorted(migrated)
                     save_device_preferences(preferences)
                 selected = migrated
-    if not selected:
-        with HOMEKIT_ROUTE_LOCK:
-            for address in previous["ips"]:
-                subprocess.run(["ip", "route", "del", f"{address}/32", "dev", route_interface],
-                               text=True, capture_output=True, timeout=3)
-            state = {"ips": [], "macs": [], "updated_at": int(time.time()), "migration_complete": True}
-            save_homekit_route_state(state)
-        return {"selected": 0, "active": 0, "missing": [], "addresses": {}, "updated_at": state["updated_at"]}
     interface_check = subprocess.run(["ip", "link", "show", "dev", route_interface],
                                      text=True, capture_output=True, timeout=3)
     if interface_check.returncode:
@@ -1647,17 +1664,52 @@ def homekit_direct_route_sync():
             continue
     desired_ips = set(addresses.values())
     with HOMEKIT_ROUTE_LOCK:
+        current_rules = subprocess.run(["ip", "-4", "-o", "rule", "show"], text=True,
+                                       capture_output=True, timeout=3)
+        if current_rules.returncode:
+            raise RouterError("无法读取 HomeKit 本地直连策略")
+        for line in current_rules.stdout.splitlines():
+            if f"from {PROXY_IP}" not in line or f"lookup {HOMEKIT_ROUTE_TABLE}" not in line:
+                continue
+            fields = line.split()
+            destination = fields[fields.index("to") + 1] if "to" in fields else str(LAN)
+            subprocess.run(
+                ["ip", "-4", "rule", "del", "from", PROXY_IP, "to", destination,
+                 "lookup", HOMEKIT_ROUTE_TABLE], text=True, capture_output=True, timeout=3,
+            )
+        table_route = subprocess.run(
+            ["ip", "-4", "route", "replace", str(LAN), "dev", route_interface,
+             "src", PROXY_IP, "table", HOMEKIT_ROUTE_TABLE],
+            text=True, capture_output=True, timeout=3,
+        )
+        if table_route.returncode:
+            raise RouterError("HomeKit 本地直连路由表写入失败")
         for address in sorted(desired_ips, key=lambda value: tuple(map(int, value.split(".")))):
             result = subprocess.run(
-                ["ip", "route", "replace", f"{address}/32", "dev", route_interface, "src", PROXY_IP],
+                ["ip", "-4", "rule", "add", "pref", HOMEKIT_ROUTE_RULE_PREF,
+                 "from", PROXY_IP, "to", f"{address}/32", "lookup", HOMEKIT_ROUTE_TABLE],
                 text=True, capture_output=True, timeout=3,
             )
             if result.returncode:
-                raise RouterError(f"HomeKit 直连路由写入失败：{address}")
-        for address in sorted(set(previous["ips"]) - desired_ips,
+                raise RouterError(f"HomeKit 本地直连策略写入失败：{address}")
+        managed = managed_ips()
+        router_ip = load_config()["FAMILY_ROUTER_IP"]
+        for address in sorted(set(previous["ips"]) | desired_ips,
                               key=lambda value: tuple(map(int, value.split(".")))):
-            subprocess.run(["ip", "route", "del", f"{address}/32", "dev", route_interface],
-                           text=True, capture_output=True, timeout=3)
+            existing = subprocess.run(["ip", "-4", "route", "show", f"{address}/32"],
+                                      text=True, capture_output=True, timeout=3)
+            if (existing.returncode == 0 and f"dev {route_interface}" in existing.stdout
+                    and " via " not in existing.stdout and f"src {PROXY_IP}" in existing.stdout):
+                subprocess.run(["ip", "-4", "route", "del", f"{address}/32", "dev", route_interface],
+                               text=True, capture_output=True, timeout=3)
+            if address in managed:
+                result = subprocess.run(
+                    ["ip", "-4", "route", "replace", f"{address}/32", "via", router_ip,
+                     "dev", route_interface, "proto", TPROXY_RETURN_PROTO],
+                    text=True, capture_output=True, timeout=3,
+                )
+                if result.returncode:
+                    raise RouterError(f"旁路回程路由恢复失败：{address}")
         state = {
             "ips": sorted(desired_ips), "macs": sorted(selected),
             "updated_at": int(time.time()), "migration_complete": True,
