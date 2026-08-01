@@ -12,6 +12,22 @@
 
 ## 1. 获取项目与填写私密配置
 
+### 交互式首次安装（推荐）
+
+对于满足前置条件、尚未部署本项目的新服务器，最短流程如下：
+
+```bash
+git clone https://github.com/liuleisail/family-proxy-manual.git
+cd family-proxy-manual
+sudo ./scripts/bootstrap-interactive.sh
+```
+
+引导脚本会询问 LAN、旁路主机 IP、LAN 桥接口、SSD 数据目录、RouterOS API 与管理页凭据，生成仅本机可读的 `router.env`，然后执行控制平面安装、基础 Mihomo 容器创建、服务启动及 `verify-server.sh`。它拒绝覆盖已有 `router.env` 或同名 Mihomo 容器；已有部署请使用升级流程。
+
+该脚本不会自动写 RouterOS、占用 53 端口、覆盖已有 MosDNS、导入订阅或接管客户端。完成后仍应按本文第 4 节审阅 RouterOS 模板，并按实际情况对接既有 MosDNS。这些网络边界不应被封装进通用 Docker 镜像。
+
+### 手工填写配置
+
 ```bash
 git clone https://github.com/liuleisail/family-proxy-manual.git
 cd family-proxy-manual
@@ -20,7 +36,7 @@ sudo install -m 600 config/router.env.example /etc/family-proxy-ui/router.env
 sudoedit /etc/family-proxy-ui/router.env
 ```
 
-只填写 `router.env` 内的 LAN、旁路主机、RouterOS API 用户/密码及管理页用户名/密码。`FAMILY_CAPTURE_INTERFACE` 应填写承载受管设备流量的 LAN 桥接口，Z4Pro 通常为 `kvmbr0`；其它主机先用 `ip -br link` 核实。首次运行安装器会把 `UI_PASSWORD` 转为 PBKDF2 哈希并从文件中删除。该文件、网关会话密钥和节点/订阅文件均不在 Git 中。
+只填写 `router.env` 内的 LAN、旁路主机、RouterOS API 用户/密码及管理页用户名/密码。`FAMILY_CAPTURE_INTERFACE` 与 `FAMILY_HOMEKIT_ROUTE_INTERFACE` 应填写承载 LAN 流量的桥接口，Z4Pro 通常为 `kvmbr0`；其它主机先用 `ip -br link` 核实。后者仅用于已在设备页明确选择的 HomeKit 本地视频直连设备，不改客户端默认网关或 DNS。首次运行安装器会把 `UI_PASSWORD` 转为 PBKDF2 哈希并从文件中删除。该文件、网关会话密钥和节点/订阅文件均不在 Git 中。
 
 现有 DNS 仪表盘若启用了 Basic Auth，再把 `username:password` 的 Base64 结果填入 `DNS_UPSTREAM_AUTH_B64`：
 
@@ -92,7 +108,7 @@ sudo scripts/install-mosdns-management.sh \
 
 脚本先备份仪表盘、维护服务和 `upstream_overrides.json`，然后只重启维护服务并重建 `ui` 服务，以修复 Docker 单文件 bind mount 更换 inode 后可能出现的 `Stale file handle`。它不重启 MosDNS 核心、不改端口 `53`、不修改现有上游、不写 RouterOS，也不增加 DNS 重定向。
 
-打开统一入口的“DNS - 概览 - 解析上游”后可编辑服务器。保存时使用 MosDNS-T 热重载，并用国内外固定域名校验实际分流；失败自动恢复旧上游。未主动使用 MosDNS 的设备不受这些设置影响。
+打开统一入口的“DNS - 概览 - 解析路径”后，可通过国内或国外卡片右上角的编辑图标编辑服务器。保存时使用 MosDNS-T 热重载，并用国内外固定域名校验实际分流；失败自动恢复旧上游。未主动使用 MosDNS 的设备不受这些设置影响。
 
 ## 4. RouterOS 操作
 
@@ -127,6 +143,10 @@ sudo ./scripts/upgrade-server.sh
 
 升级脚本会先建立时间戳备份，然后更新并重启 `family-proxy-ui`、`family-mihomo-sub-import` 和 `family-proxy-gateway`。它不会重启 Mihomo/MosDNS 容器、启动历史停用容器或写入 RouterOS。新版网关兼容 Safari 缓存的旧 DNS 页面，升级后无需清空 DNS 数据。
 
+Mihomo 镜像维护通过管理页“维护”按需执行，不属于上述控制平面升级。检查仓库只读；实际升级会备份当前配置并保留旧镜像标签，且只允许重建 `family-mihomo-fallback`。若配置校验、控制接口或 `Proxy-Auto` 验证失败，脚本会自动回退旧镜像。不要为该功能设置自动计时器。
+
+安装器还会启用 `family-platform-update-check.timer`：每天约 09:15 查询 RouterOS 当前官方通道、Z4Pro 自带极空间升级服务，并对 Mihomo、MosDNS 执行只读镜像检查。该任务只写入维护页状态；Mihomo 的 Alpha、Beta、RC 等预发布镜像不会触发 Telegram，只有正式发布版本才可能推送。它不会升级 RouterOS、ZOS、`apt` 软件包、Docker 镜像或重启设备。
+
 极空间把持久化数据挂载在 `/tmp/zfsv3/...` 时，`family-mihomo-sub-import` 必须保持 `PrivateTmp=false`，否则 systemd 的私有 `/tmp` 会遮住机场文件并让候选池显示为 `0/5`。安装包已内置该设置；`verify-server.sh` 也会比较磁盘候选池与 API 返回数量，发现路径不可见时立即报错。
 
 失败时停止相关服务，从本次时间戳备份恢复 `/opt/family-proxy-ui/`、服务单元和本地配置，再执行：
@@ -155,5 +175,7 @@ sudo /usr/local/sbin/family-mihomo-tproxy-auto sync
 - `sync-routeros-cn-ipv4 --check` 没有异常数量或大比例漂移；Mihomo GEO 文件通过官方校验和及内核加载验证。
 - 接管测试设备在国内 App、局域网服务和外网业务上都通过；未接管设备保持原样。
 - RouterOS 文本导出、二进制备份和本次服务器备份均可定位。
+- RouterOS 的 `family-mihomo-tproxy-health` 使用专用 `18087` 端口；
+  从局域网或 WireGuard 打开 `18088` 首页应进入登录页，不能返回健康 JSON。
 
 RouterOS 的命令设计遵循其 [Packet Flow](https://help.mikrotik.com/docs/spaces/ROS/pages/328227/Packet+Flow+in+RouterOS)、[Connection Tracking](https://help.mikrotik.com/docs/spaces/ROS/pages/130220087/Connection+tracking) 与 [Netwatch](https://help.mikrotik.com/docs/spaces/ROS/pages/8323208/Netwatch) 文档：IPv4 策略路由、DNS 和 FastTrack 排除使用共享地址列表，设备增减仍保持单设备事务与独立 IPv6 防漏。

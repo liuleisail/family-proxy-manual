@@ -16,6 +16,15 @@ scp family-cn-ipv4.rsc <router-user>@<router-ip>:
 
 3. 在 `02-prepare-controller.rsc` 填写 LAN 网段和旁路主机 IP，导入脚本。脚本会在连接打标前加入国内目的地址直连规则，避免国内流量经过 `RouterOS -> Z4Pro -> RouterOS` 的额外往返。
 4. 在 RouterOS 中确认 API 服务只允许旁路主机访问。创建最小权限 API 用户前，先检查当前用户组策略和输入链顺序。
+   如果已经存在名为 `family-mihomo-tproxy-health` 的 Netwatch，
+   将其 HTTP 探针端口设为专用健康端口，避免把经 WireGuard
+   SNAT 后的远程管理访问误判成路由器探针：
+
+```routeros
+/tool netwatch set [find where name="family-mihomo-tproxy-health"] port=18087
+```
+
+   `18088` 只用于交互式管理页面，`18087` 只用于 RouterOS 健康探针。
 5. 用管理页面加入设备；仅当页面不可用时，才填写并导入 `03-enable-device-template.rsc`。
 6. 在旁路主机将同一 IP 写入 `/etc/family-proxy-ui/managed-ips` 后运行：
 

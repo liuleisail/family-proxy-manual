@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Family Proxy platform update check
+
+[Timer]
+OnCalendar=*-*-* 09:15:00
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

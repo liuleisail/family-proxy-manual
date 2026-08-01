@@ -38,10 +38,14 @@ DEFAULT_CONFIG = {
     "rule_auto_enabled": True,
     "rule_interval_hours": 24,
     "last_rule_check": 0,
+    "rule_failure_count": 0,
+    "next_rule_retry": 0,
     "adblock_mode": "off",
     "adblock_auto_enabled": True,
     "adblock_interval_hours": 24,
     "last_adblock_check": 0,
+    "adblock_failure_count": 0,
+    "next_adblock_retry": 0,
 }
 CORE_API = os.environ.get("FAMILY_MOSDNS_CORE_API", "http://172.31.53.2:9099").rstrip("/")
 DNS_SERVER = os.environ.get("FAMILY_MOSDNS_DNS_SERVER", "127.0.0.1")
@@ -144,10 +148,14 @@ def config():
         "rule_auto_enabled": bool(value.get("rule_auto_enabled", True)),
         "rule_interval_hours": max(12, min(168, int(value.get("rule_interval_hours", 24)))),
         "last_rule_check": max(0, int(value.get("last_rule_check", 0))),
+        "rule_failure_count": max(0, min(3, int(value.get("rule_failure_count", 0)))),
+        "next_rule_retry": max(0, int(value.get("next_rule_retry", 0))),
         "adblock_mode": adblock_mode,
         "adblock_auto_enabled": bool(value.get("adblock_auto_enabled", True)),
         "adblock_interval_hours": max(24, min(168, int(value.get("adblock_interval_hours", 24)))),
         "last_adblock_check": max(0, int(value.get("last_adblock_check", 0))),
+        "adblock_failure_count": max(0, min(3, int(value.get("adblock_failure_count", 0)))),
+        "next_adblock_retry": max(0, int(value.get("next_adblock_retry", 0))),
     }
 
 
@@ -364,6 +372,44 @@ def direct_download(url, limit=12 * 1024 * 1024):
     if len(content) > limit:
         raise RuntimeError("规则文件超过安全大小限制")
     return content.decode("utf-8", "replace")
+
+
+def direct_download_with_retry(url, limit=12 * 1024 * 1024, attempts=3):
+    """Retry transient source failures without ever using the proxy path."""
+    failure = None
+    for attempt in range(attempts):
+        try:
+            return direct_download(url, limit=limit)
+        except RuntimeError as exc:
+            failure = exc
+            if attempt + 1 < attempts:
+                time.sleep(2 ** attempt)
+    raise RuntimeError(f"直连下载连续 {attempts} 次失败：{failure}")
+
+
+def update_retry_state(kind, succeeded):
+    """Persist bounded retry state so a transient failure never defers updates for a full day."""
+    value = config()
+    failure_key = f"{kind}_failure_count"
+    retry_key = f"next_{kind}_retry"
+    if succeeded:
+        value[failure_key] = 0
+        value[retry_key] = 0
+    else:
+        failures = min(3, int(value.get(failure_key, 0)) + 1)
+        # 15 minutes, 1 hour, then 4 hours; normal interval resumes after success.
+        delay = (15 * 60, 60 * 60, 4 * 60 * 60)[failures - 1]
+        value[failure_key] = failures
+        value[retry_key] = int(time.time() + delay)
+    save_config(value)
+    return value
+
+
+def update_due(value, kind, now):
+    retry_at = int(value.get(f"next_{kind}_retry", 0))
+    if retry_at:
+        return now >= retry_at
+    return now - int(value[f"last_{kind}_check"]) >= int(value[f"{kind}_interval_hours"]) * 3600
 
 
 def normalize_domain(value):
@@ -588,7 +634,7 @@ def do_adblock_update():
             compiled = {}
             sources = []
             for source_key, metadata in ADBLOCK_SOURCES.items():
-                content = direct_download(metadata["url"])
+                content = direct_download_with_retry(metadata["url"])
                 domains, body = compile_adblock_source(source_key, content, allowlist)
                 compiled[source_key] = (domains, body)
                 sources.append({
@@ -605,6 +651,7 @@ def do_adblock_update():
             mode = config()["adblock_mode"]
             apply_adblock_mode(mode, validate=mode != "off")
             ADBLOCK_PENDING_ALLOWLIST_PATH.unlink(missing_ok=True)
+            update_retry_state("adblock", succeeded=True)
             set_adblock_status(
                 "updated",
                 "精简过滤规则已更新并通过数量、白名单和分流验证",
@@ -616,15 +663,17 @@ def do_adblock_update():
             )
         except Exception as exc:
             failure = str(exc)
+            retry = update_retry_state("adblock", succeeded=False)
+            retry_at = datetime.fromtimestamp(retry["next_adblock_retry"], timezone.utc).isoformat(timespec="seconds")
             if backup:
                 try:
                     set_adblock_status("rolling_back", f"过滤规则校验失败，正在恢复：{failure}", backup=str(backup))
                     restore_adblock(backup)
-                    set_adblock_status("rolled_back", f"过滤规则更新失败，已恢复旧配置：{failure}", backup=str(backup), completed_at=now_iso())
+                    set_adblock_status("rolled_back", f"过滤规则更新失败，已恢复旧配置；将于 {retry_at} 自动重试：{failure}", backup=str(backup), completed_at=now_iso())
                     return
                 except Exception as rollback_exc:
                     failure += f"；自动回滚也失败：{rollback_exc}"
-            set_adblock_status("error", f"过滤规则更新失败：{failure}", completed_at=now_iso())
+            set_adblock_status("error", f"过滤规则更新失败；将于 {retry_at} 自动重试：{failure}", completed_at=now_iso())
 
 
 def do_adblock_mode(mode):
@@ -981,6 +1030,20 @@ def wait_rule_source(tag, previous_updated, timeout=180):
     raise RuntimeError(f"{RULE_SOURCES[tag]['label']} 更新超时：{last}")
 
 
+def refresh_rule_source(tag, previous_updated, attempts=3):
+    """The MosDNS source updater occasionally sees transient upstream timeouts."""
+    failure = None
+    for attempt in range(attempts):
+        try:
+            core_request(f"/plugins/{tag}/update/{tag}", method="POST", timeout=180)
+            return wait_rule_source(tag, previous_updated)
+        except Exception as exc:
+            failure = exc
+            if attempt + 1 < attempts:
+                time.sleep(2 ** attempt)
+    raise RuntimeError(f"{RULE_SOURCES[tag]['label']}连续 {attempts} 次更新失败：{failure}")
+
+
 def do_rule_update():
     with worker_lock:
         backup = None
@@ -993,9 +1056,9 @@ def do_rule_update():
             set_rule_status("updating", "正在下载到临时状态并校验官方规则", backup=str(backup), sources=previous)
             previous_by_tag = {item["tag"]: item for item in previous}
             for tag in RULE_SOURCES:
-                core_request(f"/plugins/{tag}/update/{tag}", method="POST", timeout=180)
-                wait_rule_source(tag, previous_by_tag[tag].get("last_updated"))
+                refresh_rule_source(tag, previous_by_tag[tag].get("last_updated"))
             current, route_matrix = validate_rule_update(previous)
+            update_retry_state("rule", succeeded=True)
             set_rule_status(
                 "updated",
                 "三组官方规则已更新并通过数量、标签、上游方向与异常地址校验",
@@ -1006,15 +1069,17 @@ def do_rule_update():
             )
         except Exception as exc:
             failure = str(exc)
+            retry = update_retry_state("rule", succeeded=False)
+            retry_at = datetime.fromtimestamp(retry["next_rule_retry"], timezone.utc).isoformat(timespec="seconds")
             if backup:
                 try:
                     set_rule_status("rolling_back", f"规则校验失败，正在恢复旧文件：{failure}", backup=str(backup))
                     restore_rules(backup)
-                    set_rule_status("rolled_back", f"规则更新失败，已恢复旧规则：{failure}", sources=current_rule_sources(), backup=str(backup), completed_at=now_iso())
+                    set_rule_status("rolled_back", f"规则更新失败，已恢复旧规则；将于 {retry_at} 自动重试：{failure}", sources=current_rule_sources(), backup=str(backup), completed_at=now_iso())
                     return
                 except Exception as rollback_exc:
                     failure += f"；自动回滚也失败：{rollback_exc}"
-            set_rule_status("error", f"规则更新失败：{failure}", completed_at=now_iso())
+            set_rule_status("error", f"规则更新失败；将于 {retry_at} 自动重试：{failure}", completed_at=now_iso())
 
 
 def parse_labels(value):
@@ -1076,7 +1141,7 @@ def metrics_summary():
 
 def do_check():
     with worker_lock:
-        set_status("checking", "正在检查官方 Docker 镜像")
+        set_status("checking", "正在检查 MosDNS 整合 Docker 镜像")
         try:
             local = running_image_id()
             remote = remote_image_id()
@@ -1109,7 +1174,7 @@ def do_update():
             old_image = running_image_id()
             set_status("updating", "正在备份 MosDNS 配置", current_image=old_image)
             backup = backup_config()
-            set_status("updating", "正在拉取官方 Docker 镜像", current_image=old_image, backup=backup)
+            set_status("updating", "正在拉取 MosDNS 整合 Docker 镜像", current_image=old_image, backup=backup)
             new_image = download_latest_image()
             if new_image == old_image:
                 set_status("up_to_date", "当前已经是最新版本", update_available=False, current_image=old_image, latest_image=new_image, current_version=core_version(), checked_at=now_iso())
@@ -1167,15 +1232,15 @@ def scheduler():
         time.sleep(300)
         value = config()
         now = time.time()
-        if value["adblock_auto_enabled"] and now - value["last_adblock_check"] >= value["adblock_interval_hours"] * 3600:
-            value["last_adblock_check"] = int(now)
-            save_config(value)
-            start_worker(do_adblock_update)
+        if value["adblock_auto_enabled"] and update_due(value, "adblock", now):
+            # Do not record a successful scheduling attempt while another task owns the worker.
+            if start_worker(do_adblock_update):
+                continue
+            # A busy worker is expected during maintenance; retry scheduling on the next loop.
             continue
-        if value["rule_auto_enabled"] and now - value["last_rule_check"] >= value["rule_interval_hours"] * 3600:
-            value["last_rule_check"] = int(now)
-            save_config(value)
-            start_worker(do_rule_update)
+        if value["rule_auto_enabled"] and update_due(value, "rule", now):
+            if start_worker(do_rule_update):
+                continue
             continue
         if value["auto_enabled"] and now - value["last_auto_check"] >= value["interval_hours"] * 3600:
             value["last_auto_check"] = int(now)

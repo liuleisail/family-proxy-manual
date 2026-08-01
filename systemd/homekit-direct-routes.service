@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh HomeKit local direct routes on Z4Pro
+After=network-online.target family-proxy-ui.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/homekit-direct-routes

@@ -8,6 +8,23 @@ ipv6: false
 external-controller: 127.0.0.1:9091
 profile:
   store-selected: true
+sniffer:
+  enable: true
+  parse-pure-ip: true
+  override-destination: true
+  sniff:
+    HTTP:
+      ports: [80, 8080-8880]
+    TLS:
+      ports: [443, 8443]
+    QUIC:
+      ports: [443, 8443]
+  # Telegram apps connect to MTProto endpoints by IP. GEOIP handles routing;
+  # sniffing these ranges only adds a pointless wait for a TLS hostname.
+  skip-dst-address:
+    - 149.154.160.0/20
+    - 91.108.4.0/22
+    - 91.108.56.0/22
 proxies: []
 proxy-groups:
   - name: Proxy-Auto
@@ -17,6 +34,10 @@ proxy-groups:
     type: select
     proxies: [Proxy-Auto, DIRECT]
 rules:
+  - GEOSITE,apple,Apple
+  - IP-CIDR,17.0.0.0/8,Apple,no-resolve
+  - GEOSITE,telegram,Telegram
+  - GEOIP,telegram,Telegram,no-resolve
   - GEOSITE,CN,DIRECT
   - GEOIP,CN,DIRECT,no-resolve
   - MATCH,Others

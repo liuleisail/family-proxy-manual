@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SOURCE_DIR=/home/codexops/family-proxy-manual
+CONFIG=/etc/family-proxy-ui/router.env
+TARGET_DIR=/opt/family-proxy-ui
+BACKUP_ROOT=/var/backups/family-proxy
+
+[[ $EUID -eq 0 ]] || { echo "run through sudo" >&2; exit 1; }
+[[ -r $CONFIG ]] || { echo "missing $CONFIG" >&2; exit 1; }
+[[ -f $SOURCE_DIR/runtime/family-proxy-ui.py ]] || { echo "missing UI source" >&2; exit 1; }
+[[ -x $SOURCE_DIR/scripts/render-runtime.py ]] || { echo "missing renderer" >&2; exit 1; }
+
+stamp=$(date +%Y%m%d-%H%M%S)
+backup_dir=$BACKUP_ROOT/$stamp
+stage_dir=$(mktemp -d "$TARGET_DIR/.rendered.XXXXXX")
+trap 'rm -rf "$stage_dir"' EXIT
+
+install -d -m 700 "$backup_dir"
+[[ -f $TARGET_DIR/family-proxy-ui.py ]] && install -m 700 "$TARGET_DIR/family-proxy-ui.py" "$backup_dir/family-proxy-ui.py"
+
+python3 "$SOURCE_DIR/scripts/render-runtime.py" "$CONFIG" "$SOURCE_DIR/runtime" "$stage_dir"
+python3 -m py_compile "$stage_dir/family-proxy-ui.py"
+install -m 755 "$stage_dir/family-proxy-ui.py" "$TARGET_DIR/family-proxy-ui.py"
+
+systemctl restart family-proxy-ui.service
+systemctl is-active --quiet family-proxy-ui.service
+
+secret=$(< /etc/family-proxy-ui/gateway.secret)
+wireguard_payload="$stage_dir/wireguard-status.json"
+for attempt in $(seq 1 20); do
+    if curl --fail --silent -H "X-Family-Gateway: $secret" \
+        --output "$wireguard_payload" http://127.0.0.1:18093/api/wireguard/status; then
+        break
+    fi
+    sleep 0.25
+done
+[[ -s $wireguard_payload ]] || { echo "WireGuard API did not become ready" >&2; exit 1; }
+python3 -c 'import json, sys; payload = json.load(open(sys.argv[1])); assert {"updated_at", "interfaces", "events"} <= payload.keys(); peers = [peer for interface in payload["interfaces"] for peer in interface.get("peers", [])]; assert all("id" in peer for peer in peers); print(f"family-proxy-ui deployed and WireGuard API verified ({len(peers)} peer(s))")' "$wireguard_payload"
+echo "Backup: $backup_dir"
