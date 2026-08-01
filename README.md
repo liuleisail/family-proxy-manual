@@ -34,6 +34,12 @@
 
 ![系统维护](docs/screenshots/maintenance.png)
 
+### Telegram 推送与告警
+
+Bot Token 与 Chat ID 已在截图中遮挡，保留告警来源、故障与恢复通知以及测试消息入口。
+
+![Telegram 推送与告警](docs/screenshots/telegram-alerts.png)
+
 ## 人工部署快速开始
 
 首次部署应在一台已安装 Docker、Docker Compose 插件和 `systemd` 的旁路服务器上完成。安装器只部署控制平面，不会自动改 RouterOS、导入订阅、接管设备或覆盖已有同名 Docker 容器。
