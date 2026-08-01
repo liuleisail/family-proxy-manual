@@ -132,9 +132,9 @@ MosDNS-T 的推荐加固配置见 [MOSDNS.md](MOSDNS.md)。其中包含分流前
 
 ### HomeKit 本地视频直连
 
-当 Homebridge/HomeKit 服务位于旁路主机，且摄像头画面在 iPhone、iPad 或 Apple TV 上持续转圈时，可在“设备 - 全部在线”中为摄像头、观看设备和 HomeKit Hub 选择“HomeKit 直连”。选择按 **MAC 地址** 保存；`homekit-direct-routes.timer` 每分钟从 RouterOS DHCP 租约解析当前 IP，只维护旁路主机自身到这些设备的同网段 `/32 dev LAN-bridge` 路由。
+当 Homebridge/HomeKit 服务位于旁路主机，且摄像头画面在 iPhone、iPad 或 Apple TV 上持续转圈时，可在“设备 - 全部在线”中为摄像头、观看设备和 HomeKit Hub 选择“HomeKit 直连”。选择按 **MAC 地址** 保存；`homekit-direct-routes.timer` 每分钟从 RouterOS DHCP 租约解析当前 IP，并为旁路主机自身到这些设备维护独立的源地址策略路由。
 
-它不会修改 RouterOS、Mihomo、MosDNS、设备默认网关或 DNS，因此不会让设备退出旁路，也不会改变其外网流量走向。取消选择后，控制器只删除自己记录的对应 `/32` 直连路由。若 Apple 设备重置了私有 Wi-Fi 地址，需在“全部在线”中重新选择新 MAC；应优先使用固定 DHCP 租约。
+它不会修改 RouterOS、Mihomo、MosDNS、设备默认网关或 DNS，因此不会让设备退出旁路，也不会改变其外网流量走向。TPROXY 返回流量仍经 RB5009 回到接管设备，避免同网段直返造成 TCP 握手延迟；取消选择后，控制器只删除自己记录的源地址策略。若 Apple 设备重置了私有 Wi-Fi 地址，需在“全部在线”中重新选择新 MAC；应优先使用固定 DHCP 租约。
 
 设备页按日常操作顺序排列：设备管理、按 IP 手动加入、旁路运行状态、RB5009 状态、WireGuard 远程互联、Z4Pro 状态。“按 IP 手动加入”始终直接显示；从设备列表选择“加入旁路”时会自动填入地址。加入旁路会先把该设备当前 MAC/IP 转为 RouterOS 静态 DHCP 租约，并二次确认绑定成功后才写入旁路规则，因此设备重连 Wi-Fi 后仍使用同一 IP。常驻站点链路按最近握手显示正常、警告或故障；手机按需隧道未连接时显示灰色“待机”，不会误报故障。详情仅展示脱敏端点、流量、路由、NAT 和最近 7 天（最多 200 条）状态变化，不返回任何密钥。
 
