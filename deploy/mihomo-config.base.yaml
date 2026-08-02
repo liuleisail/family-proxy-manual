@@ -33,11 +33,15 @@ proxy-groups:
   - name: Others
     type: select
     proxies: [Proxy-Auto, DIRECT]
+  - name: V2EX-Auto
+    type: select
+    proxies: [DIRECT]
 rules:
   - GEOSITE,apple,Apple
   - IP-CIDR,17.0.0.0/8,Apple,no-resolve
   - GEOSITE,telegram,Telegram
   - GEOIP,telegram,Telegram,no-resolve
+  - DOMAIN-SUFFIX,v2ex.com,V2EX-Auto
   - GEOSITE,CN,DIRECT
   - GEOIP,CN,DIRECT,no-resolve
   - MATCH,Others

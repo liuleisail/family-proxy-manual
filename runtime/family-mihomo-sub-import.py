@@ -73,7 +73,7 @@ NOISE = re.compile(
     re.I,
 )
 OPENER = build_opener(ProxyHandler({}))
-MONITORED_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto", "GitHub-Auto")
+MONITORED_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto", "GitHub-Auto", "V2EX-Auto")
 ALERT_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto", "GitHub-Auto")
 ALERT_FAILURE_THRESHOLD = 2
 FAILSAFE_FAILURE_THRESHOLD = 2
@@ -624,6 +624,14 @@ def generate_config(selected=None, settings=None):
     insert_at = next((index for index, rule in enumerate(rules)
                       if str(rule).startswith("GEOSITE,microsoft,")), before_match_index(rules))
     rules[insert_at:insert_at] = github_rules
+    # Cloudflare may reject an otherwise healthy generic exit for V2EX. Route
+    # the site through a dedicated group whose own health check requires an
+    # actual HTTP 200 from V2EX instead of a generic connectivity response.
+    v2ex_rule = "DOMAIN-SUFFIX,v2ex.com,V2EX-Auto"
+    rules = [rule for rule in rules if str(rule) != v2ex_rule]
+    insert_at = next((index for index, rule in enumerate(rules)
+                      if str(rule).startswith(("GEOSITE,CN,", "GEOIP,CN,"))), before_match_index(rules))
+    rules.insert(insert_at, v2ex_rule)
     config["rules"] = rules
     hk, jp, sg, us, other_ai, tg, proxy = (selected[name] for name in POOLS)
     ai_groups = [group for pool, group in (("JP-AI", "JP-AI"), ("SG-AI", "SG-AI"),
@@ -631,6 +639,7 @@ def generate_config(selected=None, settings=None):
                  if selected[pool]]
     ai_nodes = jp + sg + us + other_ai
     github = github_candidates(selected)
+    v2ex = list(dict.fromkeys(proxy))
     # Bot API needs a real HTTPS request, not merely a controller delay probe.
     # Prefer the separately verified backup Hysteria2 candidates. They are only
     # used by alerts and do not influence normal Telegram client routing.
@@ -651,6 +660,7 @@ def generate_config(selected=None, settings=None):
         fallback("TG-Notify", notify, "https://api.telegram.org", 300),
         candidate_pool_group("Proxy", proxy, settings),
         fallback("GitHub-Auto", github, "https://github.com/", 300, "200"),
+        fallback("V2EX-Auto", v2ex, "https://www.v2ex.com/", 300, "200"),
         fallback("DNS-Resolve", proxy, "https://dns.google/dns-query", 300),
         fallback("AI-Auto", ai_groups, "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
         {"name": "HK-视频-出口", "type": "select", "proxies": ["HK-视频", "DIRECT"],
@@ -670,6 +680,7 @@ def generate_config(selected=None, settings=None):
         {"name": "Youtube", "type": "select", "proxies": ["HK-视频-出口", "HK-视频"] + hk},
         {"name": "Google", "type": "select", "proxies": ["Proxy-出口", "Proxy-Auto"] + proxy},
         {"name": "GitHub", "type": "select", "proxies": ["GitHub-出口", "GitHub-Auto"] + github},
+        {"name": "V2EX", "type": "select", "proxies": ["V2EX-Auto"] + v2ex},
         {"name": "Others", "type": "select", "proxies": ["Proxy-出口", "Proxy-Auto"] + proxy},
     ]
     if other_ai:
@@ -1495,7 +1506,7 @@ def status():
     result = {}
     events = read_json(RUNTIME_EVENTS, [])
     runtime = read_json(RUNTIME_STATE, {})
-    for group in ("AI", "AI-Auto", "AI-出口", "JP-AI", "SG-AI", "US-AI", "其他-AI", "Youtube", "HK-视频", "HK-视频-出口", "Telegram", "TG-Auto", "TG-出口", "Google", "GitHub", "GitHub-Auto", "GitHub-出口", "Others", "Proxy-Auto", "Proxy-出口"):
+    for group in ("AI", "AI-Auto", "AI-出口", "JP-AI", "SG-AI", "US-AI", "其他-AI", "Youtube", "HK-视频", "HK-视频-出口", "Telegram", "TG-Auto", "TG-出口", "Google", "GitHub", "GitHub-Auto", "GitHub-出口", "V2EX", "V2EX-Auto", "Others", "Proxy-Auto", "Proxy-出口"):
         try:
             data = proxy_api("/proxies/" + quote(group, safe=""))
             leaf = resolve_leaf(group)
