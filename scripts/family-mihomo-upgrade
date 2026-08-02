@@ -15,15 +15,30 @@ workdir="$root/family-mihomo-fallback"
 compose="$workdir/docker-compose.yml"
 
 write_status() {
-  local state=$1 message=$2 old_id=${3:-} new_id=${4:-} backup=${5:-} current_version=${6:-} latest_version=${7:-} latest_published=${8:-} notes_zh=${9:-} docker_proxy_ready=${10:-}
+  local state=$1 message=$2 old_id=${3:-} new_id=${4:-} backup=${5:-} current_version=${6:-} latest_version=${7:-} latest_published=${8:-} notes_zh=${9:-} docker_proxy_ready=${10:-} release_notes=${11:-} release_url=${12:-}
   mkdir -p /var/lib/family-proxy
-  python3 - "$status_file" "$state" "$message" "$old_id" "$new_id" "$backup" "$current_version" "$latest_version" "$latest_published" "$notes_zh" "$docker_proxy_ready" <<'PY'
+  python3 - "$status_file" "$state" "$message" "$old_id" "$new_id" "$backup" "$current_version" "$latest_version" "$latest_published" "$notes_zh" "$docker_proxy_ready" "$release_notes" "$release_url" <<'PY'
 import json, os, sys, time
-path, state, message, old_id, new_id, backup, current_version, latest_version, latest_published, notes_zh, docker_proxy_ready = sys.argv[1:]
+path, state, message, old_id, new_id, backup, current_version, latest_version, latest_published, notes_zh, docker_proxy_ready, release_notes, release_url = sys.argv[1:]
+previous = {}
+if state in {"applying", "success", "rolled_back", "failed", "busy"}:
+    try:
+        with open(path, encoding="utf-8") as handle: previous = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        previous = {}
+    current_version = current_version or str(previous.get("current_version") or "")
+    latest_version = latest_version or str(previous.get("latest_version") or "")
+    latest_published = latest_published or str(previous.get("latest_published") or "")
+    notes_zh = notes_zh or str(previous.get("release_notes_zh") or "")
+    release_notes = release_notes or str(previous.get("release_notes") or "")
+    release_url = release_url or str(previous.get("release_url") or "")
+    if not docker_proxy_ready and previous.get("docker_proxy_ready"):
+        docker_proxy_ready = "true"
 data = {"updated_at": int(time.time()), "state": state, "message": message,
         "old_image_id": old_id, "new_image_id": new_id, "backup": backup,
         "current_version": current_version, "latest_version": latest_version,
         "latest_published": latest_published, "release_notes_zh": notes_zh,
+        "release_notes": release_notes, "release_url": release_url,
         "docker_proxy_ready": docker_proxy_ready == "true"}
 tmp = path + ".new"
 with open(tmp, "w", encoding="utf-8") as handle: json.dump(data, handle, ensure_ascii=False)
@@ -69,7 +84,7 @@ require_layout() {
 check() {
   require_layout
   local current version local_digest remote_digest token manifest headers tags stable_info
-  local release_tag release_date docker_proxy_ready
+  local release_tag release_date docker_proxy_ready release_json release_info release_notes release_url release_published
   current=$(image)
   version=$(curl -fsS --max-time 4 http://127.0.0.1:9091/version 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version","未知"))' 2>/dev/null || printf '控制接口不可用')
   local_digest=$(docker image inspect "$current" --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null \
@@ -106,17 +121,42 @@ print(latest["digest"])
   release_tag=$(printf '%s\n' "$stable_info" | sed -n '1p')
   release_date=$(printf '%s\n' "$stable_info" | sed -n '2p')
   [[ $(printf '%s\n' "$stable_info" | sed -n '3p') == "$remote_digest" ]] || release_tag=""
+  release_notes=""; release_url=""; release_published=""
+  if [[ -n $release_tag ]]; then
+    release_json=$(curl -fsS --retry 2 --retry-all-errors --retry-delay 1 --max-time 20 \
+      -x http://127.0.0.1:7890 -H 'Accept: application/vnd.github+json' \
+      "https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/$release_tag" 2>/dev/null || true)
+    release_info=$(printf '%s' "$release_json" | python3 -c '
+import json, sys
+try:
+    payload = json.load(sys.stdin)
+except (ValueError, TypeError):
+    raise SystemExit(0)
+if not isinstance(payload, dict) or payload.get("draft") or payload.get("prerelease"):
+    raise SystemExit(0)
+body = str(payload.get("body") or "").strip()[:20000]
+url = str(payload.get("html_url") or "")
+published = str(payload.get("published_at") or "")
+print(body.replace("\0", ""))
+print("__FAMILY_RELEASE_URL__" + url)
+print("__FAMILY_RELEASE_PUBLISHED__" + published)
+' 2>/dev/null || true)
+    release_notes=$(printf '%s\n' "$release_info" | sed '/^__FAMILY_RELEASE_URL__/,$d')
+    release_url=$(printf '%s\n' "$release_info" | sed -n 's/^__FAMILY_RELEASE_URL__//p' | tail -n 1)
+    release_published=$(printf '%s\n' "$release_info" | sed -n 's/^__FAMILY_RELEASE_PUBLISHED__//p' | tail -n 1)
+    [[ -n $release_published ]] && release_date=$release_published
+  fi
   rm -f "$manifest" "$headers"
   docker_proxy_ready=false
   systemctl show docker -p Environment --value | grep -Eq 'HTTPS_PROXY=https?://[^" ]+' && docker_proxy_ready=true
   if [[ -z $remote_digest || -z $release_tag ]]; then
     write_status check_failed "无法确认 Docker Hub latest 与语义化正式标签使用同一镜像摘要；已忽略 Alpha、Beta、RC 和其他预发布版本，未拉取、未重启容器。" "$(image_id "$current")" "" "" "$version" "" "" "" "$docker_proxy_ready"
   elif [[ $local_digest == "$remote_digest" ]]; then
-    write_status current "当前镜像已是 Mihomo 最新正式版；预发布版本不会进入检测结果。" "$(image_id "$current")" "$remote_digest" "" "$version" "${release_tag}（正式版）" "$release_date" "仅跟踪 Docker Hub latest 与同摘要的语义化正式标签。" "$docker_proxy_ready"
+    write_status current "当前镜像已是 Mihomo 最新正式版；预发布版本不会进入检测结果。" "$(image_id "$current")" "$remote_digest" "" "$version" "${release_tag}（正式版）" "$release_date" "仅跟踪 Docker Hub latest 与同摘要的语义化正式标签。" "$docker_proxy_ready" "$release_notes" "$release_url"
   else
     local proxy_note=""
     [[ $docker_proxy_ready == true ]] || proxy_note=" Docker 守护进程尚未配置代理，升级按钮已保护性禁用。"
-    write_status update_available "发现 Mihomo 正式版 $release_tag；当前运行镜像为 $current。点击升级后才会切换正式通道、校验并重建容器。$proxy_note" "$(image_id "$current")" "$remote_digest" "" "$version" "${release_tag}（正式版）" "$release_date" "仅跟踪 Docker Hub latest 与同摘要的语义化正式标签。" "$docker_proxy_ready"
+    write_status update_available "发现 Mihomo 正式版 $release_tag；当前运行镜像为 $current。点击升级后才会切换正式通道、校验并重建容器。$proxy_note" "$(image_id "$current")" "$remote_digest" "" "$version" "${release_tag}（正式版）" "$release_date" "仅跟踪 Docker Hub latest 与同摘要的语义化正式标签。" "$docker_proxy_ready" "$release_notes" "$release_url"
   fi
 }
 
