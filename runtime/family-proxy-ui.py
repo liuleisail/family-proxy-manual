@@ -112,6 +112,10 @@ GITHUB_ROUTING_RULES = (
     "DOMAIN-SUFFIX,githubassets.com,GitHub-出口",
     "DOMAIN-SUFFIX,githubapp.com,GitHub-出口",
 )
+TELEGRAM_GEOIP_RULE = "GEOIP,telegram,Telegram,no-resolve"
+TELEGRAM_NOTIFY_RULE = "DOMAIN,api.telegram.org,TG-Notify"
+SYSTEM_GENERATED_RULES = {TELEGRAM_NOTIFY_RULE}
+SYSTEM_RULE_CARD_LABELS = {TELEGRAM_NOTIFY_RULE: "系统推送"}
 PROTECTED_RULES = {
     "GEOSITE,CN,DIRECT",
     "GEOIP,CN,DIRECT,no-resolve",
@@ -796,10 +800,10 @@ def load_rule_card_labels():
     try:
         value = json.loads(RULE_CARD_LABELS_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {}
+        value = {}
     except (OSError, json.JSONDecodeError) as exc:
         raise RouterError("规则卡片名称无法读取") from exc
-    return normalize_rule_card_labels(value)
+    return {**normalize_rule_card_labels(value), **SYSTEM_RULE_CARD_LABELS}
 
 
 def normalize_rule_card_labels(value, rules=None):
@@ -994,6 +998,46 @@ def rule_set_provider(rule_set, source):
     }
 
 
+def telegram_rule_set_keys(rule_sets):
+    return {
+        rule_set["key"] for rule_set in rule_sets
+        if any("telegram" in source["url"].lower() for source in rule_set["sources"])
+    }
+
+
+def has_telegram_ip_rule_set(rule_sets):
+    keys = telegram_rule_set_keys(rule_sets)
+    return any(
+        rule_set["key"] in keys and any(source["behavior"] == "ipcidr"
+                                         for source in rule_set["sources"])
+        for rule_set in rule_sets
+    )
+
+
+def enforce_telegram_system_rules(rules, rule_sets):
+    keys = telegram_rule_set_keys(rule_sets)
+    prefixes = tuple(f"RULE-SET,{RULE_SET_KEY_PREFIX}{key}-" for key in keys)
+    rules = [rule for rule in rules if rule != TELEGRAM_NOTIFY_RULE]
+    if has_telegram_ip_rule_set(rule_sets):
+        rules = [rule for rule in rules if not rule.startswith("GEOIP,telegram,")]
+    elif not any(rule.startswith("GEOIP,telegram,") for rule in rules):
+        insert_at = next((index for index, rule in enumerate(rules)
+                          if prefixes and rule.startswith(prefixes)),
+                         next((index for index, rule in enumerate(rules)
+                               if rule.startswith("GEOSITE,telegram,")),
+                              next((index for index, rule in enumerate(rules)
+                                    if rule.upper().startswith("MATCH,")), len(rules))))
+        rules.insert(insert_at, TELEGRAM_GEOIP_RULE)
+    notify_at = next((index for index, rule in enumerate(rules)
+                      if prefixes and rule.startswith(prefixes)),
+                     next((index for index, rule in enumerate(rules)
+                           if rule.startswith("GEOSITE,telegram,")),
+                          next((index for index, rule in enumerate(rules)
+                                if rule.upper().startswith("MATCH,")), len(rules))))
+    rules.insert(notify_at, TELEGRAM_NOTIFY_RULE)
+    return rules
+
+
 def merge_rule_sets(document, rule_sets):
     providers = document.get("rule-providers")
     providers = dict(providers) if isinstance(providers, dict) else {}
@@ -1032,6 +1076,7 @@ def merge_rule_sets(document, rule_sets):
     rules[high_index:high_index] = missing_high
     normal_index = next((index for index, rule in enumerate(rules) if rule == "GEOSITE,CN,DIRECT"), len(rules))
     rules[normal_index:normal_index] = missing_normal
+    rules = enforce_telegram_system_rules(rules, rule_sets)
     rules = enforce_system_rule_order(rules)
     document["rules"] = rules
     return rules
@@ -1073,7 +1118,7 @@ def rules_payload():
         "rules": rules,
         "version": rules_version(rules),
         "policies": list(dict.fromkeys(policies)),
-        "protected": sorted(PROTECTED_RULES),
+        "protected": sorted(PROTECTED_RULES | SYSTEM_GENERATED_RULES),
         "rule_sets": rule_sets,
         "rule_sets_version": rule_sets_version(rule_sets),
         "rule_card_labels": rule_card_labels,
