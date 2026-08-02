@@ -112,6 +112,7 @@ GITHUB_ROUTING_RULES = (
     "DOMAIN-SUFFIX,githubassets.com,GitHub-出口",
     "DOMAIN-SUFFIX,githubapp.com,GitHub-出口",
 )
+V2EX_ROUTING_RULE = "DOMAIN-SUFFIX,v2ex.com,V2EX-Auto"
 TELEGRAM_GEOIP_RULE = "GEOIP,telegram,Telegram,no-resolve"
 TELEGRAM_NOTIFY_RULE = "DOMAIN,api.telegram.org,TG-Notify"
 SYSTEM_GENERATED_RULES = {TELEGRAM_NOTIFY_RULE}
@@ -120,6 +121,7 @@ PROTECTED_RULES = {
     "GEOSITE,CN,DIRECT",
     "GEOIP,CN,DIRECT,no-resolve",
     *GITHUB_ROUTING_RULES,
+    V2EX_ROUTING_RULE,
 }
 RULE_SET_KEY_PREFIX = "family-"
 RULE_SET_MAX_COUNT = 30
@@ -1084,10 +1086,13 @@ def merge_rule_sets(document, rule_sets):
 
 def enforce_system_rule_order(rules):
     """Keep narrow system routes ahead of broader overlapping categories."""
-    ordered = [rule for rule in rules if rule not in GITHUB_ROUTING_RULES]
+    ordered = [rule for rule in rules if rule not in (*GITHUB_ROUTING_RULES, V2EX_ROUTING_RULE)]
     microsoft_index = next((index for index, rule in enumerate(ordered)
                             if rule.startswith("GEOSITE,microsoft,")), len(ordered))
     ordered[microsoft_index:microsoft_index] = GITHUB_ROUTING_RULES
+    cn_index = next((index for index, rule in enumerate(ordered)
+                     if rule.startswith(("GEOSITE,CN,", "GEOIP,CN,"))), len(ordered))
+    ordered.insert(cn_index, V2EX_ROUTING_RULE)
     return ordered
 
 
