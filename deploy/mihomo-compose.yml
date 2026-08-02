@@ -1,6 +1,6 @@
 services:
   family-mihomo-fallback:
-    image: metacubex/mihomo:Alpha
+    image: metacubex/mihomo:latest
     container_name: family-mihomo-fallback
     network_mode: host
     restart: unless-stopped
