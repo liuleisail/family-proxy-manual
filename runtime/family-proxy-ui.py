@@ -121,6 +121,13 @@ RULE_SET_KEY_PREFIX = "family-"
 RULE_SET_MAX_COUNT = 30
 RULE_SET_MAX_SOURCES = 16
 RULE_SET_MAX_INTERVAL = 7 * 24 * 60 * 60
+OVERSEAS_AI_RULE_SET_URL = (
+    "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ai-!cn.mrs"
+)
+LEGACY_AI_RULE_SET_URLS = {
+    "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/openai.mrs",
+    "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/gemini.mrs",
+}
 PAGE_LAYOUT_SECTIONS = {
     "devices": ("devices", "manual_add", "bypass", "traffic", "z4pro", "router", "wireguard"),
     "dns": ("rankings", "observability", "data_management"),
@@ -878,6 +885,100 @@ def normalize_rule_sets(value, policies=None):
                            "interval": interval})
         seen.add(key)
     return normalized
+
+
+def consolidate_overseas_ai_rule_set(rules, rule_sets):
+    """Replace legacy OpenAI/Gemini providers with one overseas AI provider."""
+    affected_urls = LEGACY_AI_RULE_SET_URLS | {OVERSEAS_AI_RULE_SET_URL}
+    affected_providers = set()
+    first_index = None
+    interval = 86400
+    remaining = []
+    for index, rule_set in enumerate(rule_sets):
+        kept_sources = []
+        for source in rule_set["sources"]:
+            if source["url"] not in affected_urls:
+                kept_sources.append(source)
+                continue
+            affected_providers.add(f"{RULE_SET_KEY_PREFIX}{rule_set['key']}-{source['key']}")
+            if first_index is None:
+                first_index = index
+                interval = rule_set["interval"]
+        if kept_sources:
+            remaining.append({**rule_set, "sources": kept_sources})
+
+    if first_index is None:
+        return list(rules), list(rule_sets), False
+
+    used_keys = {item["key"] for item in remaining}
+    target_key = "overseas-ai"
+    suffix = 2
+    while target_key in used_keys:
+        target_key = f"overseas-ai-{suffix}"
+        suffix += 1
+    target = {
+        "key": target_key,
+        "name": "海外 AI",
+        "sources": [{
+            "key": "category-ai-cn-1",
+            "url": OVERSEAS_AI_RULE_SET_URL,
+            "behavior": "domain",
+            "format": "mrs",
+        }],
+        "policy": "AI-Auto",
+        "priority": "high",
+        "interval": interval,
+    }
+    insert_at = min(first_index, len(remaining))
+    remaining.insert(insert_at, target)
+
+    target_rule = f"RULE-SET,{RULE_SET_KEY_PREFIX}{target_key}-category-ai-cn-1,AI-Auto"
+    migrated_rules = []
+    inserted = False
+    for rule in rules:
+        parts = rule.split(",", 2)
+        if len(parts) >= 2 and parts[0] == "RULE-SET" and parts[1] in affected_providers:
+            if not inserted:
+                migrated_rules.append(target_rule)
+                inserted = True
+            continue
+        if rule == target_rule:
+            if inserted:
+                continue
+            inserted = True
+        migrated_rules.append(rule)
+    if not inserted:
+        match_index = next((index for index, rule in enumerate(migrated_rules)
+                            if rule.upper().startswith("MATCH,")), len(migrated_rules))
+        migrated_rules.insert(match_index, target_rule)
+    changed = migrated_rules != list(rules) or remaining != list(rule_sets)
+    return migrated_rules, remaining, changed
+
+
+def place_single_match_last(rules):
+    matches = [rule for rule in rules if rule.upper().startswith("MATCH,")]
+    if len(matches) != 1 or rules[-1] == matches[0]:
+        return list(rules), False
+    return [rule for rule in rules if not rule.upper().startswith("MATCH,")] + matches, True
+
+
+def migrate_overseas_ai_rule_set():
+    _, _, current_rules = load_mihomo_config()
+    current_rule_sets = load_rule_sets()
+    current_labels = load_rule_card_labels()
+    rules, rule_sets, changed = consolidate_overseas_ai_rule_set(current_rules, current_rule_sets)
+    rules, match_changed = place_single_match_last(rules)
+    changed = changed or match_changed
+    if not changed:
+        return {"changed": False, "message": "海外 AI 规则集合无需迁移"}
+    labels = normalize_rule_card_labels(current_labels, rules)
+    result = save_mihomo_rules(
+        rules, rules_version(current_rules),
+        rule_sets, rule_sets_version(current_rule_sets),
+        labels, rule_card_labels_version(current_labels),
+    )
+    return {"changed": True, "message": "OpenAI、Gemini 和海外 AI 已合并为一个规则集合",
+            "rule_sets": len(result["rule_sets"]), "rules": len(result["rules"])}
 
 
 def rule_set_provider(rule_set, source):
@@ -3632,6 +3733,9 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] == "platform-update-check":
         print(json.dumps(check_platform_updates(), ensure_ascii=False))
+        raise SystemExit(0)
+    if len(sys.argv) == 2 and sys.argv[1] == "migrate-overseas-ai-rule-set":
+        print(json.dumps(migrate_overseas_ai_rule_set(), ensure_ascii=False))
         raise SystemExit(0)
     if len(sys.argv) == 2 and sys.argv[1] == "homekit-direct-routes":
         print(json.dumps(homekit_direct_route_sync(), ensure_ascii=False))

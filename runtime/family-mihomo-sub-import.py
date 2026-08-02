@@ -234,6 +234,11 @@ def merge_managed_rule_sets(config):
     config["rules"] = rules
 
 
+def before_match_index(rules):
+    return next((index for index, rule in enumerate(rules)
+                 if str(rule).upper().startswith("MATCH,")), len(rules))
+
+
 def env():
     return dict(line.strip().split("=", 1) for line in ENV.read_text().splitlines()
                 if "=" in line and not line.lstrip().startswith("#"))
@@ -564,7 +569,7 @@ def generate_config(selected=None, settings=None):
     telegram_ip_rule = "GEOIP,telegram,Telegram,no-resolve"
     if not any(str(rule).startswith("GEOIP,telegram,") for rule in rules):
         insert_at = next((index for index, rule in enumerate(rules)
-                          if str(rule).startswith("GEOSITE,telegram,")), len(rules))
+                          if str(rule).startswith("GEOSITE,telegram,")), before_match_index(rules))
         rules.insert(insert_at, telegram_ip_rule)
     # The notification bot is control-plane traffic. Keep it separate from
     # normal Telegram client sessions so a failing regional TG route cannot
@@ -572,7 +577,7 @@ def generate_config(selected=None, settings=None):
     telegram_api_rule = "DOMAIN,api.telegram.org,TG-Notify"
     rules = [rule for rule in rules if str(rule) != telegram_api_rule]
     insert_at = next((index for index, rule in enumerate(rules)
-                      if str(rule).startswith("GEOSITE,telegram,")), len(rules))
+                      if str(rule).startswith("GEOSITE,telegram,")), before_match_index(rules))
     rules.insert(insert_at, telegram_api_rule)
     # GitHub uses long-lived HTTPS connections and large release/LFS transfers.
     # Keep its domains ahead of the broader Microsoft category. The internal
@@ -595,7 +600,7 @@ def generate_config(selected=None, settings=None):
     # exact rules, then reinsert the current defaults before that broader rule.
     rules = [rule for rule in rules if str(rule) not in (*github_rules, *legacy_github_rules)]
     insert_at = next((index for index, rule in enumerate(rules)
-                      if str(rule).startswith("GEOSITE,microsoft,")), len(rules))
+                      if str(rule).startswith("GEOSITE,microsoft,")), before_match_index(rules))
     rules[insert_at:insert_at] = github_rules
     config["rules"] = rules
     hk, jp, sg, us, other_ai, tg, proxy = (selected[name] for name in POOLS)
