@@ -187,6 +187,20 @@ def managed_rule_sets():
     return valid
 
 
+def telegram_rule_set_keys(rule_sets):
+    return {
+        item["key"] for item in rule_sets
+        if any("telegram" in source["url"].lower() for source in item["sources"])
+    }
+
+
+def has_telegram_ip_rule_set(rule_sets):
+    keys = telegram_rule_set_keys(rule_sets)
+    return any(item["key"] in keys and any(source["behavior"] == "ipcidr"
+                                             for source in item["sources"])
+               for item in rule_sets)
+
+
 def merge_managed_rule_sets(config):
     rule_sets = managed_rule_sets()
     providers = config.get("rule-providers")
@@ -232,6 +246,7 @@ def merge_managed_rule_sets(config):
     normal_at = next((index for index, rule in enumerate(rules) if rule == "GEOSITE,CN,DIRECT"), len(rules))
     rules[normal_at:normal_at] = missing_normal
     config["rules"] = rules
+    return rule_sets
 
 
 def before_match_index(rules):
@@ -534,7 +549,7 @@ def generate_config(selected=None, settings=None):
     selected = {name: list(selected.get(name, [])) for name in POOLS}
     settings = validate_pool_settings(settings if settings is not None else pool_settings())
     config = yaml.safe_load(MIHOMO_CONFIG.read_text())
-    merge_managed_rule_sets(config)
+    rule_sets = merge_managed_rule_sets(config)
     flattened = []
     sources_by_slot = source_map()
     for slot in source_slots():
@@ -551,15 +566,16 @@ def generate_config(selected=None, settings=None):
     config["proxies"] = flattened
     # Telegram mobile clients commonly connect to MTProto endpoints by IP.
     # Skipping those ranges avoids waiting for a TLS hostname that will never
-    # arrive; the GEOIP telegram rule below still selects the dedicated pool.
+    # arrive; either the managed Telegram IP set or the GEOIP fallback below
+    # still selects the dedicated pool.
     sniffer = config.setdefault("sniffer", {})
     skipped = list(sniffer.get("skip-dst-address") or [])
     for cidr in ("149.154.160.0/20", "91.108.4.0/22", "91.108.56.0/22"):
         if cidr not in skipped:
             skipped.append(cidr)
     sniffer["skip-dst-address"] = skipped
-    # Telegram clients commonly connect to Telegram IPs directly, so GEOSITE
-    # alone cannot route those sessions into the dedicated Telegram pool.
+    # Telegram clients commonly connect to Telegram IPs directly. Prefer the
+    # managed MRS IP set and retain GEOIP only when that set is absent.
     rules = list(config.get("rules") or [])
     apple_ip_rule = "IP-CIDR,17.0.0.0/8,Apple,no-resolve"
     if apple_ip_rule not in rules:
@@ -567,7 +583,9 @@ def generate_config(selected=None, settings=None):
                           if str(rule).startswith("GEOSITE,apple,")), 0)
         rules.insert(insert_at, apple_ip_rule)
     telegram_ip_rule = "GEOIP,telegram,Telegram,no-resolve"
-    if not any(str(rule).startswith("GEOIP,telegram,") for rule in rules):
+    if has_telegram_ip_rule_set(rule_sets):
+        rules = [rule for rule in rules if not str(rule).startswith("GEOIP,telegram,")]
+    elif not any(str(rule).startswith("GEOIP,telegram,") for rule in rules):
         insert_at = next((index for index, rule in enumerate(rules)
                           if str(rule).startswith("GEOSITE,telegram,")), before_match_index(rules))
         rules.insert(insert_at, telegram_ip_rule)
@@ -576,8 +594,12 @@ def generate_config(selected=None, settings=None):
     # suppress an alert about that very failure.
     telegram_api_rule = "DOMAIN,api.telegram.org,TG-Notify"
     rules = [rule for rule in rules if str(rule) != telegram_api_rule]
+    telegram_keys = telegram_rule_set_keys(rule_sets)
+    telegram_prefixes = tuple(f"RULE-SET,family-{key}-" for key in telegram_keys)
     insert_at = next((index for index, rule in enumerate(rules)
-                      if str(rule).startswith("GEOSITE,telegram,")), before_match_index(rules))
+                      if telegram_prefixes and str(rule).startswith(telegram_prefixes)),
+                     next((index for index, rule in enumerate(rules)
+                           if str(rule).startswith("GEOSITE,telegram,")), before_match_index(rules)))
     rules.insert(insert_at, telegram_api_rule)
     # GitHub uses long-lived HTTPS connections and large release/LFS transfers.
     # Keep its domains ahead of the broader Microsoft category. The internal
