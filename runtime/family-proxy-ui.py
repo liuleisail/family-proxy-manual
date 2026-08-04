@@ -2497,6 +2497,28 @@ def ensure_shared_policy(api):
                       "dst-address-list": "local_lan_ipv4",
                       "comment": SHARED_TAG + " local bypass"})
 
+    # HomeKit discovery and IGMP must stay on the LAN. Keep this narrow rule
+    # before the shared connection marker so managed devices do not send
+    # multicast discovery into Mihomo.
+    mangle = api.print("/ip/firewall/mangle")
+    mark_rule = next((item for item in mangle
+                      if item.get("comment") == SHARED_TAG + " mark connection"), None)
+    if mark_rule:
+        multicast_comment = SHARED_TAG + " multicast direct"
+        multicast_rule = next((item for item in mangle
+                               if item.get("comment") == multicast_comment), None)
+        multicast_props = {
+            "chain": "prerouting", "action": "accept",
+            "src-address-list": SHARED_LIST, "dst-address": "224.0.0.0/4",
+            "comment": multicast_comment,
+        }
+        if multicast_rule:
+            api.set("/ip/firewall/mangle", multicast_rule[".id"], **multicast_props)
+            api.talk("/ip/firewall/mangle/move", {
+                "numbers": multicast_rule[".id"], "destination": mark_rule[".id"]})
+        else:
+            add_before(api, "/ip/firewall/mangle", mark_rule[".id"], **multicast_props)
+
     nat = api.print("/ip/firewall/nat")
     if not any(item.get("comment") == SHARED_TAG + " DNS TCP" for item in nat):
         tcp_id = add_before(api, "/ip/firewall/nat", nat_anchor,

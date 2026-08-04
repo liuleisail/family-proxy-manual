@@ -42,6 +42,13 @@
   add chain=prerouting action=mark-connection new-connection-mark=$sharedMark passthrough=yes src-address-list=$sharedList dst-address-list=!local_lan_ipv4 connection-mark=no-mark comment=($sharedTag . " mark connection") place-before=$mangleAnchor
 }
 :local connectionMarker [find where comment=($sharedTag . " mark connection")]
+:local multicastDirect [find where comment=($sharedTag . " multicast direct")]
+:if ([:len $multicastDirect] = 0) do={
+  add chain=prerouting action=accept src-address-list=$sharedList dst-address=224.0.0.0/4 comment=($sharedTag . " multicast direct") place-before=$connectionMarker
+} else={
+  set $multicastDirect chain=prerouting action=accept src-address-list=$sharedList dst-address=224.0.0.0/4
+  move $multicastDirect destination=$connectionMarker
+}
 :if ([:len [find where comment=($sharedTag . " CN direct")]] = 0) do={
   add chain=prerouting action=accept src-address-list=$sharedList dst-address-list=$cnList comment=($sharedTag . " CN direct") place-before=$connectionMarker
 }
