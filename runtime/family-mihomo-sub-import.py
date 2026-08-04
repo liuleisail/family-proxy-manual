@@ -63,6 +63,7 @@ RUNTIME_EVENTS = PROVIDERS / "runtime-events.json"
 ALERT_STATE = PROVIDERS / "alert-state.json"
 ALERT_CONFIG = Path("/etc/family-proxy-ui/mihomo-alert.json")
 FAILSAFE_STATE = PROVIDERS / "direct-fallback-state.json"
+EMERGENCY_SCAN_STATE = PROVIDERS / "emergency-scan-state.json"
 RULE_SETS = Path("/etc/family-proxy-ui/rule-sets.json")
 VERSIONS = BASE / "family-mihomo-fallback/config-versions"
 MAX_BYTES = 12 * 1024 * 1024
@@ -77,16 +78,42 @@ MONITORED_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Aut
 ALERT_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto", "GitHub-Auto")
 ALERT_FAILURE_THRESHOLD = 2
 FAILSAFE_FAILURE_THRESHOLD = 2
-FAILSAFE_RECOVERY_THRESHOLD = 2
+FAILSAFE_RECOVERY_THRESHOLD = 3
+EMERGENCY_WARM_LIMIT = 8
+EMERGENCY_SCAN_LIMIT = 24
+EMERGENCY_SCAN_WORKERS = 4
+EMERGENCY_SCAN_COOLDOWN = 15 * 60
+EMERGENCY_MIN_DWELL = 10 * 60
+EMERGENCY_SCAN_LOCK = threading.Lock()
 # These select groups are internal safety switches. Business policy groups use
 # them by default, while a manual node selection in a business group remains
 # untouched by the monitor.
 FAILSAFE_EXITS = {
-    "HK-视频-出口": {"primary": "HK-视频", "watched": ("HK-视频",)},
-    "AI-出口": {"primary": "AI-Auto", "watched": ("JP-AI", "SG-AI", "US-AI", "其他-AI")},
-    "TG-出口": {"primary": "TG-Auto", "watched": ("TG-Auto",)},
-    "Proxy-出口": {"primary": "Proxy-Auto", "watched": ("Proxy-Auto",)},
-    "GitHub-出口": {"primary": "GitHub-Auto", "watched": ("GitHub-Auto",)},
+    "HK-视频-出口": {"primary": "HK-视频", "emergency": "HK-视频-应急",
+                     "watched": ("HK-视频",), "pools": ("HK-视频",),
+                     "url": "https://www.youtube.com/generate_204"},
+    "AI-出口": {"primary": "AI-Auto", "emergency": "AI-应急",
+                "watched": ("JP-AI", "SG-AI", "US-AI", "其他-AI"),
+                "pools": ("JP-AI", "SG-AI", "US-AI", "其他-AI"),
+                "url": "https://chatgpt.com/cdn-cgi/trace"},
+    "TG-出口": {"primary": "TG-Auto", "emergency": "TG-应急",
+                "watched": ("TG-Auto",), "pools": ("TG",),
+                "url": "https://core.telegram.org"},
+    "Proxy-出口": {"primary": "Proxy-Auto", "emergency": "Proxy-应急",
+                   "watched": ("Proxy-Auto",), "pools": ("Proxy",),
+                   "url": "https://www.gstatic.com/generate_204"},
+    "GitHub-出口": {"primary": "GitHub-Auto", "emergency": "GitHub-应急",
+                    "watched": ("GitHub-Auto",),
+                    "pools": ("JP-AI", "SG-AI", "US-AI", "Proxy"),
+                    "url": "https://github.com/"},
+}
+BUSINESS_WRAPPERS = {
+    "HK-视频-出口": (("Youtube", "HK-视频"),),
+    "AI-出口": (("AI", "AI-Auto"), ("Gemini", "AI-Auto")),
+    "TG-出口": (("Telegram", "TG-Auto"),),
+    "Proxy-出口": (("TikTok", "Proxy-Auto"), ("Google", "Proxy-Auto"),
+                   ("Others", "Proxy-Auto")),
+    "GitHub-出口": (("GitHub", "GitHub-Auto"),),
 }
 # Full-library screening stays inexpensive. Before a candidate pool is applied,
 # each selected node is tested three times against the actual service it serves.
@@ -422,6 +449,35 @@ def rank_pool_candidates(entries):
     return [entry["name"] for entry in sorted(entries, key=lambda entry: (entry["score"], entry["name"]))[:5]]
 
 
+def interleave_sources(entries):
+    """Keep emergency scans source-diverse without changing active pool order."""
+    buckets = {slot: [] for slot in source_slots()}
+    for entry in entries:
+        buckets.setdefault(entry["source"], []).append(entry["name"])
+    ordered = []
+    while any(buckets.values()):
+        for slot in source_slots():
+            if buckets.get(slot):
+                ordered.append(buckets[slot].pop(0))
+    return ordered
+
+
+def emergency_catalog(selected=None):
+    """Return unprobed, business-filtered cold reserves for hidden select groups."""
+    selected = selected or pools()
+    available = nodes()
+    result = {}
+    for spec in FAILSAFE_EXITS.values():
+        active = {name for pool in spec["pools"] for name in selected.get(pool, [])}
+        eligible = [
+            node for node in available
+            if node["name"] not in active
+            and any(pool_matches(pool, node) for pool in spec["pools"])
+        ]
+        result[spec["emergency"]] = interleave_sources(eligible)
+    return result
+
+
 def build_suggestions(results):
     indexed = node_index()
     result_by_name = {item["name"]: item for item in results}
@@ -640,6 +696,7 @@ def generate_config(selected=None, settings=None):
     ai_nodes = jp + sg + us + other_ai
     github = github_candidates(selected)
     v2ex = list(dict.fromkeys(proxy))
+    emergency = emergency_catalog(selected)
     # Bot API needs a real HTTPS request, not merely a controller delay probe.
     # Prefer the separately verified backup Hysteria2 candidates. They are only
     # used by alerts and do not influence normal Telegram client routing.
@@ -663,15 +720,17 @@ def generate_config(selected=None, settings=None):
         fallback("V2EX-Auto", v2ex, "https://www.v2ex.com/", 300, "200"),
         fallback("DNS-Resolve", proxy, "https://dns.google/dns-query", 300),
         fallback("AI-Auto", ai_groups, "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
-        {"name": "HK-视频-出口", "type": "select", "proxies": ["HK-视频", "DIRECT"],
+        *({"name": name, "type": "select", "proxies": entries,
+           "empty-fallback": "DIRECT"} for name, entries in emergency.items()),
+        {"name": "HK-视频-出口", "type": "select", "proxies": ["HK-视频", "HK-视频-应急", "DIRECT"],
          "default-selected": "HK-视频"},
-        {"name": "AI-出口", "type": "select", "proxies": ["AI-Auto", "DIRECT"],
+        {"name": "AI-出口", "type": "select", "proxies": ["AI-Auto", "AI-应急", "DIRECT"],
          "default-selected": "AI-Auto"},
-        {"name": "TG-出口", "type": "select", "proxies": ["TG-Auto", "DIRECT"],
+        {"name": "TG-出口", "type": "select", "proxies": ["TG-Auto", "TG-应急", "DIRECT"],
          "default-selected": "TG-Auto"},
-        {"name": "Proxy-出口", "type": "select", "proxies": ["Proxy-Auto", "DIRECT"],
+        {"name": "Proxy-出口", "type": "select", "proxies": ["Proxy-Auto", "Proxy-应急", "DIRECT"],
          "default-selected": "Proxy-Auto"},
-        {"name": "GitHub-出口", "type": "select", "proxies": ["GitHub-Auto", "DIRECT"],
+        {"name": "GitHub-出口", "type": "select", "proxies": ["GitHub-Auto", "GitHub-应急", "DIRECT"],
          "default-selected": "GitHub-Auto"},
         {"name": "AI", "type": "select", "proxies": ["AI-出口", "AI-Auto"] + ai_groups + ai_nodes},
         {"name": "Gemini", "type": "select", "proxies": ["AI-出口", "AI-Auto", "SG-AI", "JP-AI", "US-AI"] + (["其他-AI"] if other_ai else []) + sg + jp + us + other_ai},
@@ -1382,10 +1441,21 @@ def group_health_state(proxies, group):
     names = [name for name in data.get("all", []) if name != "DIRECT"]
     if not names:
         return "empty"
+    if data.get("alive") is False:
+        return "down"
     leaves = [proxies.get(name, {}) for name in names]
     if leaves and all(item.get("alive") is False for item in leaves):
         return "down"
     return "up"
+
+
+def selected_group_health(proxies, group):
+    data = proxies.get(group, {})
+    selected = data.get("now")
+    if not selected:
+        return "empty"
+    leaf = proxies.get(selected, {})
+    return "down" if leaf.get("alive") is False else "up"
 
 
 def set_failsafe_exit(exit_name, target):
@@ -1396,41 +1466,187 @@ def set_failsafe_exit(exit_name, target):
         proxy_api("/proxies/" + quote(exit_name, safe=""), method="PUT", data={"name": target})
 
 
+def probe_emergency_node(name, url, attempts=2):
+    delays = []
+    for _ in range(attempts):
+        query = urlencode({"url": url, "timeout": 4000})
+        try:
+            data = proxy_api("/proxies/" + quote(name, safe="") + "/delay?" + query)
+            if data.get("delay"):
+                delays.append(int(data["delay"]))
+        except Exception:
+            pass
+    return {
+        "name": name,
+        "success": len(delays),
+        "delay": round(statistics.median(delays)) if delays else None,
+        "jitter": max(delays) - min(delays) if len(delays) > 1 else 0 if delays else None,
+    }
+
+
+def probe_emergency_batch(names, url):
+    with ThreadPoolExecutor(max_workers=EMERGENCY_SCAN_WORKERS) as executor:
+        results = list(executor.map(lambda name: probe_emergency_node(name, url), names))
+    return sorted(results, key=lambda item: (
+        item["success"] < 2,
+        item["delay"] if item["delay"] is not None else 999999,
+        item["jitter"] if item["jitter"] is not None else 999999,
+        item["name"],
+    ))
+
+
+def scan_emergency_exit(exit_name, spec):
+    if not EMERGENCY_SCAN_LOCK.acquire(blocking=False):
+        return None, {"error": "scan-busy", "results": []}
+    try:
+        data = proxy_api("/proxies/" + quote(spec["emergency"], safe=""))
+        names = [name for name in data.get("all", []) if name != "DIRECT"][:EMERGENCY_SCAN_LIMIT]
+        batches = (names[:EMERGENCY_WARM_LIMIT], names[EMERGENCY_WARM_LIMIT:])
+        results = []
+        for batch in batches:
+            if not batch:
+                continue
+            tested = probe_emergency_batch(batch, spec["url"])
+            results.extend(tested)
+            stable = [item for item in tested if item["success"] >= 2 and item["delay"] is not None]
+            if stable:
+                winner = stable[0]["name"]
+                report = {
+                    "exit": exit_name,
+                    "tested_at": datetime.now().astimezone().isoformat(),
+                    "tested": len(results),
+                    "catalog": len(data.get("all", [])),
+                    "winner": winner,
+                    "results": results,
+                }
+                scans = read_json(EMERGENCY_SCAN_STATE, {})
+                scans[exit_name] = report
+                atomic_json(EMERGENCY_SCAN_STATE, scans)
+                return winner, report
+        report = {
+            "exit": exit_name,
+            "tested_at": datetime.now().astimezone().isoformat(),
+            "tested": len(results),
+            "catalog": len(data.get("all", [])),
+            "winner": None,
+            "results": results,
+        }
+        scans = read_json(EMERGENCY_SCAN_STATE, {})
+        scans[exit_name] = report
+        atomic_json(EMERGENCY_SCAN_STATE, scans)
+        return None, report
+    finally:
+        EMERGENCY_SCAN_LOCK.release()
+
+
+def adopt_failsafe_wrappers():
+    """Wrap automatic selections while preserving explicit leaf-node choices."""
+    for exit_name, bindings in BUSINESS_WRAPPERS.items():
+        for business_group, automatic_group in bindings:
+            try:
+                data = proxy_api("/proxies/" + quote(business_group, safe=""))
+                if data.get("now") == automatic_group and exit_name in data.get("all", []):
+                    proxy_api("/proxies/" + quote(business_group, safe=""), method="PUT",
+                              data={"name": exit_name})
+            except Exception:
+                continue
+
+
 def update_failsafes(proxies, events, now):
     state = read_json(FAILSAFE_STATE, {})
+    now_epoch = time.time()
     for exit_name, spec in FAILSAFE_EXITS.items():
         watched = {group: group_health_state(proxies, group) for group in spec["watched"]}
         unavailable = bool(watched) and all(value in ("down", "empty") for value in watched.values())
         previous = state.get(exit_name, {})
         down_checks = int(previous.get("down_checks", 0)) + 1 if unavailable else 0
         up_checks = 0 if unavailable else int(previous.get("up_checks", 0)) + 1
-        desired = "DIRECT" if down_checks >= FAILSAFE_FAILURE_THRESHOLD else spec["primary"]
-        if previous.get("active") == "DIRECT" and up_checks < FAILSAFE_RECOVERY_THRESHOLD:
-            desired = "DIRECT"
-        transition = "active" in previous and previous.get("active") != desired
+        actual = (proxies.get(exit_name) or {}).get("now")
+        active = actual if actual in (spec["primary"], spec["emergency"], "DIRECT") else previous.get("active", spec["primary"])
+        desired = active
+        phase = previous.get("phase", "normal")
+        emergency_node = previous.get("emergency_node")
+        activated_epoch = float(previous.get("activated_epoch") or 0)
+        last_scan_epoch = float(previous.get("last_scan_epoch") or 0)
+        last_error = None
+        scan_report = None
+
+        emergency_down = active == spec["emergency"] and selected_group_health(proxies, spec["emergency"]) == "down"
+        emergency_down_checks = int(previous.get("emergency_down_checks", 0)) + 1 if emergency_down else 0
+        needs_scan = (
+            active == spec["primary"] and down_checks >= FAILSAFE_FAILURE_THRESHOLD
+        ) or (
+            active == spec["emergency"] and emergency_down_checks >= FAILSAFE_FAILURE_THRESHOLD
+        )
+        if needs_scan and now_epoch - last_scan_epoch >= EMERGENCY_SCAN_COOLDOWN:
+            last_scan_epoch = now_epoch
+            try:
+                emergency_node, scan_report = scan_emergency_exit(exit_name, spec)
+                if emergency_node:
+                    set_failsafe_exit(spec["emergency"], emergency_node)
+                    desired = spec["emergency"]
+                    phase = "emergency"
+                    activated_epoch = now_epoch
+                    send_telegram_alert(
+                        f"家庭旁路应急切换\n{exit_name} 常用候选池异常\n"
+                        f"已切换应急节点：{emergency_node}\n时间：{now}")
+                else:
+                    phase = "exhausted"
+                    last_error = "限量应急扫描未找到稳定节点"
+                    if not previous.get("exhausted_alerted"):
+                        send_telegram_alert(
+                            f"家庭旁路告警\n{exit_name} 常用候选和应急扫描均不可用\n"
+                            f"已保留原路径，未盲目切换 DIRECT\n时间：{now}")
+            except Exception as exc:
+                last_error = type(exc).__name__
+        elif active == spec["emergency"]:
+            dwell_complete = now_epoch - activated_epoch >= EMERGENCY_MIN_DWELL
+            if not unavailable and up_checks >= FAILSAFE_RECOVERY_THRESHOLD and dwell_complete:
+                desired = spec["primary"]
+                phase = "normal"
+                emergency_node = None
+                send_telegram_alert(f"家庭旁路恢复\n{exit_name} 常用候选池已稳定恢复\n时间：{now}")
+        elif active == "DIRECT":
+            # The controller no longer selects DIRECT automatically. Preserve
+            # an operator's explicit emergency choice until they change it.
+            phase = "manual-direct"
+        elif not unavailable:
+            phase = "normal"
+
+        transition = active != desired
         error = None
         try:
             set_failsafe_exit(exit_name, desired)
         except Exception as exc:
             error = type(exc).__name__
-            desired = previous.get("active", spec["primary"])
+            desired = active
             transition = False
         if transition:
             events.append({
                 "time": now,
                 "group": exit_name,
-                "from": previous.get("active", spec["primary"]),
+                "from": active,
                 "to": desired,
-                "reason": "候选池连续全失效，临时直连" if desired == "DIRECT" else "候选池连续恢复，自动回到代理",
+                "reason": ("常用候选池异常，按需选用应急节点"
+                           if desired == spec["emergency"] else
+                           "常用候选池连续恢复，自动回到代理"),
             })
         state[exit_name] = {
             "active": desired,
             "primary": spec["primary"],
+            "emergency": spec["emergency"],
+            "phase": phase,
+            "emergency_node": emergency_node,
             "watched": watched,
             "down_checks": down_checks,
             "up_checks": up_checks,
+            "emergency_down_checks": emergency_down_checks,
+            "activated_epoch": activated_epoch,
+            "last_scan_epoch": last_scan_epoch,
+            "last_scan": scan_report,
+            "exhausted_alerted": phase == "exhausted",
             "checked_at": now,
-            "last_error": error,
+            "last_error": error or last_error,
         }
     atomic_json(FAILSAFE_STATE, state)
     return state
@@ -1487,6 +1703,7 @@ def monitor_once():
                     state = {"down_checks": 0, "alerted": False, "checked_at": now, "last_error": None}
                 alert_state[key] = state
     if all_proxies:
+        adopt_failsafe_wrappers()
         update_failsafes(all_proxies, events, now)
     atomic_json(RUNTIME_STATE, current)
     atomic_json(RUNTIME_EVENTS, events[-100:])
@@ -1524,6 +1741,7 @@ def status():
                              "history": [], "last_change": None, "since": None,
                              "udp_declared": False, "quic_verified": False}
     return {"groups": result, "events": events[-20:], "failsafes": read_json(FAILSAFE_STATE, {}),
+            "emergency_scans": read_json(EMERGENCY_SCAN_STATE, {}),
             "versions": [path.name for path in sorted(VERSIONS.glob("*.yaml"), reverse=True)[:5]]}
 
 
@@ -1658,7 +1876,7 @@ PAGE = PAGE.replace(
     1,
 )
 _status_marker = "async function loadStatus(){let d=await api('/api/status');"
-_status_replacement = r'''function renderDirectFallbacks(entries){let target=document.querySelector('#directFallbackStatus');if(!target)return;let active=Object.entries(entries||{}).filter(function(entry){return entry[1]&&entry[1].active==='DIRECT'});if(!active.length){target.textContent='所有自动出口均处于代理模式';target.className='status';return}target.textContent='代理候选池连续全失效，当前临时直连：'+active.map(function(entry){return entry[0]}).join('、');target.className='status bad'}async function loadStatus(){let d=await api('/api/status');renderDirectFallbacks(d.failsafes);'''
+_status_replacement = r'''function renderDirectFallbacks(entries){let target=document.querySelector('#directFallbackStatus');if(!target)return;let rows=Object.entries(entries||{}),emergency=rows.filter(function(entry){return entry[1]&&entry[1].phase==='emergency'}),exhausted=rows.filter(function(entry){return entry[1]&&entry[1].phase==='exhausted'}),manual=rows.filter(function(entry){return entry[1]&&entry[1].active==='DIRECT'});if(emergency.length){target.textContent='应急节点已生效：'+emergency.map(function(entry){return entry[0]+' · '+(entry[1].emergency_node||'待确认')}).join('、');target.className='status bad';return}if(exhausted.length){target.textContent='常用候选异常，限量应急扫描未找到稳定节点：'+exhausted.map(function(entry){return entry[0]}).join('、');target.className='status bad';return}if(manual.length){target.textContent='人工 DIRECT 正在生效：'+manual.map(function(entry){return entry[0]}).join('、');target.className='status bad';return}target.textContent='所有自动出口均使用常用候选池；冷备节点不做周期测速';target.className='status'}async function loadStatus(){let d=await api('/api/status');renderDirectFallbacks(d.failsafes);'''
 if _status_marker not in PAGE:
     raise RuntimeError("runtime status load marker missing")
 PAGE = PAGE.replace(_status_marker, _status_replacement, 1)
