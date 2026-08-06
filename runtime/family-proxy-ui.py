@@ -3691,7 +3691,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_frontend_file("favicon.svg", cache=True)
             return
         if path.startswith("/assets/"):
-            self.send_frontend_file(path[len("/assets/"):], cache=True)
+            self.send_frontend_file("assets/" + path[len("/assets/"):], cache=True)
             return
         if path == "/":
             if FRONTEND_INDEX_PATH.is_file():
