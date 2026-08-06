@@ -3533,7 +3533,7 @@ PAGE = PAGE.replace(
     '<a class="active" href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav>',
     1,
 )
-PAGE = PAGE.replace('</style>', '@media(max-width:760px){.nav{grid-template-columns:repeat(5,1fr)}}</style>', 1)
+PAGE = PAGE.replace('</style>', '@media(max-width:760px){.nav{grid-template-columns:repeat(6,1fr)}}</style>', 1)
 RULES_PAGE = RULES_PAGE.replace(
     '<a href="/">设备</a><a class="active" href="/rules">规则</a><a href="/airport/">机场与候选池</a><a href="/dns/">DNS</a>',
     '<a href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a class="active" href="/rules">规则</a><a href="/mihomo-maintenance">维护</a>',
@@ -3542,6 +3542,11 @@ RULES_PAGE = RULES_PAGE.replace(
 PAGE = PAGE.replace(
     "fetch(path,{...opt,headers:",
     "fetch(new URL(path,location.origin),{...opt,headers:",
+    1,
+)
+PAGE = PAGE.replace(
+    '<nav class="nav"><a class="active" href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav>',
+    '<nav class="nav"><a class="active" href="/legacy">原管理界面</a><a href="/">新版控制台</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav>',
     1,
 )
 
@@ -3738,6 +3743,16 @@ class Handler(BaseHTTPRequestHandler):
             if FRONTEND_INDEX_PATH.is_file():
                 self.send_frontend_file("index.html")
                 return
+            data = PAGE.replace("__CSRF__", CSRF_TOKEN).encode()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Frame-Options", "DENY")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if path == "/legacy":
             data = PAGE.replace("__CSRF__", CSRF_TOKEN).encode()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")

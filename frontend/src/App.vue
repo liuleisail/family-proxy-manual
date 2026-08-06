@@ -345,6 +345,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
         <div class="mobile-brand"><div class="brand-mark"><Zap :size="16" /></div><strong>家庭旁路</strong></div>
         <div class="breadcrumb"><span>控制台</span><ChevronRight :size="14" /><strong>{{ views.find((item) => item.id === activeView)?.label }}</strong></div>
         <div class="top-actions">
+          <a class="secondary-button console-switch" href="/legacy" title="打开原管理界面" aria-label="打开原管理界面"><ArrowUpRight :size="15" /><span>原管理界面</span></a>
           <button class="icon-button" title="刷新状态" aria-label="刷新状态" :disabled="loading" @click="load"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
           <a class="icon-button mobile-rules-link" href="/rules" title="规则配置" aria-label="规则配置"><SlidersHorizontal :size="17" /></a>
           <button class="icon-button" :title="isDark ? '切换浅色模式' : '切换深色模式'" :aria-label="isDark ? '切换浅色模式' : '切换深色模式'" @click="setTheme(!isDark)"><Sun v-if="isDark" :size="17" /><Moon v-else :size="17" /></button>
