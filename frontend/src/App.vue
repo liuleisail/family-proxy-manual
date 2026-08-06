@@ -345,7 +345,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
         <div class="mobile-brand"><div class="brand-mark"><Zap :size="16" /></div><strong>家庭旁路</strong></div>
         <div class="breadcrumb"><span>控制台</span><ChevronRight :size="14" /><strong>{{ views.find((item) => item.id === activeView)?.label }}</strong></div>
         <div class="top-actions">
-          <a class="secondary-button console-switch" href="/legacy" title="打开原管理界面" aria-label="打开原管理界面"><ArrowUpRight :size="15" /><span>原管理界面</span></a>
+          <a class="secondary-button console-switch" href="/legacy" title="回到旧版入口" aria-label="回到旧版入口"><ArrowUpRight :size="15" /><span>回到旧版入口</span></a>
           <button class="icon-button" title="刷新状态" aria-label="刷新状态" :disabled="loading" @click="load"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
           <a class="icon-button mobile-rules-link" href="/rules" title="规则配置" aria-label="规则配置"><SlidersHorizontal :size="17" /></a>
           <button class="icon-button" :title="isDark ? '切换浅色模式' : '切换深色模式'" :aria-label="isDark ? '切换浅色模式' : '切换深色模式'" @click="setTheme(!isDark)"><Sun v-if="isDark" :size="17" /><Moon v-else :size="17" /></button>
@@ -424,6 +424,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
       <nav class="mobile-nav" aria-label="移动端主导航"><button v-for="item in views" :key="item.id" :class="{ active: activeView === item.id }" @click="selectView(item.id)"><component :is="item.icon" :size="18" /><span>{{ item.label }}</span></button></nav>
     </main>
     <div v-if="toastMessage" class="toast"><CheckCircle2 :size="16" />{{ toastMessage }}</div>
+    <a class="legacy-float-button" href="/legacy" title="回到原版管理界面" aria-label="回到原版管理界面"><ArrowUpRight :size="15" /><span>回到原版</span></a>
     <div v-if="renameTarget" class="modal-backdrop" @click.self="renameTarget = null"><form class="modal-card device-editor" @submit.prevent="saveRename"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="renameTarget = null"><X :size="17" /></button><span class="eyebrow">DEVICE PROFILE</span><h2>编辑设备</h2><p>{{ renameTarget.ip }} · {{ renameTarget.mac }}</p><label>显示名称<input v-model="renameDraft" autofocus maxlength="40" /></label><fieldset class="icon-picker"><legend>显示图标</legend><div class="icon-options"><button v-for="item in deviceIconOptions" :key="item.key" type="button" class="icon-choice" :class="{ selected: iconDraft === item.key }" :title="item.label" :aria-label="item.label" @click="iconDraft = item.key"><component :is="item.icon" :size="19" /><span>{{ item.label }}</span></button></div></fieldset><div class="modal-actions"><button type="button" class="secondary-button" @click="renameTarget = null">取消</button><button class="primary-button" type="submit" :disabled="busy === 'rename'">保存</button></div></form></div>
   </div>
 </template>
