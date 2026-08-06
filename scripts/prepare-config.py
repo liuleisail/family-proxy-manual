@@ -30,7 +30,13 @@ def main():
         raise SystemExit("usage: prepare-config.py /etc/family-proxy-ui/router.env")
     path = Path(sys.argv[1])
     pairs, values = parse(path)
-    missing = sorted(name for name in REQUIRED if not values.get(name))
+    setup_pending = values.get("SETUP_PENDING", "false").lower() == "true"
+    required = set(REQUIRED)
+    if setup_pending:
+        # The browser wizard supplies RouterOS credentials and the final UI account.
+        # Network identity and a temporary UI hash are still required to start safely.
+        required -= {"ROUTER_HOST", "ROUTER_USER", "ROUTER_PASSWORD"}
+    missing = sorted(name for name in required if not values.get(name))
     placeholders = sorted(name for name, value in values.items() if "replace_with" in value or value == "change_me")
     if missing or placeholders:
         message = []
