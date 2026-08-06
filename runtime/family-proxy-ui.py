@@ -114,9 +114,28 @@ GITHUB_ROUTING_RULES = (
 )
 V2EX_ROUTING_RULE = "DOMAIN-SUFFIX,v2ex.com,V2EX-Auto"
 TELEGRAM_GEOIP_RULE = "GEOIP,telegram,Telegram,no-resolve"
-TELEGRAM_NOTIFY_RULE = "DOMAIN,api.telegram.org,TG-Notify"
-SYSTEM_GENERATED_RULES = {TELEGRAM_NOTIFY_RULE}
-SYSTEM_RULE_CARD_LABELS = {TELEGRAM_NOTIFY_RULE: "系统推送"}
+TELEGRAM_LEGACY_NOTIFY_RULE = "DOMAIN,api.telegram.org,TG-Notify"
+TELEGRAM_NOTIFY_RULE = (
+    "AND,((SRC-IP-CIDR,127.0.0.1/32),(DOMAIN,api.telegram.org)),TG-Notify"
+)
+TELEGRAM_CLIENT_IP_RULES = (
+    "IP-CIDR,149.154.160.0/20,TG-Auto,no-resolve",
+    "IP-CIDR,91.108.4.0/22,TG-Auto,no-resolve",
+    "IP-CIDR,91.108.56.0/22,TG-Auto,no-resolve",
+)
+TELEGRAM_API_RULE = "DOMAIN,api.telegram.org,TG-Auto"
+TELEGRAM_GENERATED_RULES = {
+    TELEGRAM_LEGACY_NOTIFY_RULE,
+    TELEGRAM_NOTIFY_RULE,
+    TELEGRAM_API_RULE,
+    *TELEGRAM_CLIENT_IP_RULES,
+}
+SYSTEM_GENERATED_RULES = TELEGRAM_GENERATED_RULES
+SYSTEM_RULE_CARD_LABELS = {
+    TELEGRAM_NOTIFY_RULE: "系统推送",
+    TELEGRAM_API_RULE: "Telegram 客户端",
+    **{rule: "Telegram 客户端 IP" for rule in TELEGRAM_CLIENT_IP_RULES},
+}
 PROTECTED_RULES = {
     "GEOSITE,CN,DIRECT",
     "GEOIP,CN,DIRECT,no-resolve",
@@ -1019,7 +1038,7 @@ def has_telegram_ip_rule_set(rule_sets):
 def enforce_telegram_system_rules(rules, rule_sets):
     keys = telegram_rule_set_keys(rule_sets)
     prefixes = tuple(f"RULE-SET,{RULE_SET_KEY_PREFIX}{key}-" for key in keys)
-    rules = [rule for rule in rules if rule != TELEGRAM_NOTIFY_RULE]
+    rules = [rule for rule in rules if rule not in TELEGRAM_GENERATED_RULES]
     if has_telegram_ip_rule_set(rule_sets):
         rules = [rule for rule in rules if not rule.startswith("GEOIP,telegram,")]
     elif not any(rule.startswith("GEOIP,telegram,") for rule in rules):
@@ -1036,7 +1055,8 @@ def enforce_telegram_system_rules(rules, rule_sets):
                            if rule.startswith("GEOSITE,telegram,")),
                           next((index for index, rule in enumerate(rules)
                                 if rule.upper().startswith("MATCH,")), len(rules))))
-    rules.insert(notify_at, TELEGRAM_NOTIFY_RULE)
+    for offset, rule in enumerate((TELEGRAM_NOTIFY_RULE, *TELEGRAM_CLIENT_IP_RULES, TELEGRAM_API_RULE)):
+        rules.insert(notify_at + offset, rule)
     return rules
 
 
