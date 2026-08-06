@@ -12,6 +12,7 @@ type Device = {
   ip: string
   mac: string
   name?: string
+  router_name?: string
   custom_name?: string
   status?: string
   static?: boolean
@@ -127,6 +128,21 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   return body as T
 }
 
+function normalizeDevicePayload(payload: DevicePayload): DevicePayload {
+  return {
+    ...payload,
+    devices: (payload.devices || []).map((device) => {
+      const rawCustomName = device.custom_name as unknown
+      return {
+        ...device,
+        custom_name: typeof rawCustomName === 'boolean'
+          ? (rawCustomName ? device.name : undefined)
+          : typeof rawCustomName === 'string' ? rawCustomName : undefined,
+      }
+    }),
+  }
+}
+
 function notify(message: string) {
   toastMessage.value = message
   window.clearTimeout(toastTimer)
@@ -145,7 +161,7 @@ async function load() {
     api<PlatformPayload>('/api/platform/updates'),
   ])
   const [devices, status, wg, groups, mihomoUpdate, platformUpdate] = results
-  if (devices.status === 'fulfilled') devicePayload.value = devices.value
+  if (devices.status === 'fulfilled') devicePayload.value = normalizeDevicePayload(devices.value)
   if (status.status === 'fulfilled') system.value = status.value
   if (wg.status === 'fulfilled') wireguard.value = wg.value
   if (groups.status === 'fulfilled') mihomo.value = groups.value
@@ -185,7 +201,7 @@ function toggleFavorite(device: Device) {
 
 function openRename(device: Device) {
   renameTarget.value = device
-  renameDraft.value = device.custom_name || device.name || ''
+  renameDraft.value = device.name || ''
 }
 
 async function saveRename() {
@@ -220,7 +236,7 @@ const filteredDevices = computed(() => {
   const query = searchQuery.value.toLowerCase()
   return devices.value.filter((device) => {
     const matchesFilter = filter.value === 'all' || (filter.value === 'managed' && device.managed) || (filter.value === 'online' && device.status === 'bound') || (filter.value === 'favorites' && device.favorite)
-    const text = `${device.name || ''} ${device.custom_name || ''} ${device.ip} ${device.mac}`.toLowerCase()
+    const text = `${device.name || ''} ${device.router_name || ''} ${device.ip} ${device.mac}`.toLowerCase()
     return matchesFilter && (!query || text.includes(query))
   })
 })
