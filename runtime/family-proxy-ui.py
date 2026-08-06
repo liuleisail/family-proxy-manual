@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import mimetypes
 import os
 import re
 import secrets
@@ -30,6 +31,7 @@ CONFIG_PATH = Path("/etc/family-proxy-ui/router.env")
 GATEWAY_SECRET_PATH = Path("/etc/family-proxy-ui/gateway.secret")
 MANAGED_IPS_PATH = Path("/etc/family-proxy-ui/managed-ips")
 DEVICE_PREFS_PATH = Path("/etc/family-proxy-ui/device-preferences.json")
+SETUP_STATE_PATH = Path("/etc/family-proxy-ui/setup-state.json")
 PAGE_LAYOUT_PREFS_PATH = Path("/etc/family-proxy-ui/page-layout-preferences.json")
 HOMEKIT_ROUTE_STATE_PATH = Path("/var/lib/family-proxy/homekit-direct-routes.json")
 ALERT_CONFIG_PATH = Path("/etc/family-proxy-ui/mihomo-alert.json")
@@ -43,6 +45,12 @@ MIHOMO_CONFIG_PATH = Path("__FAMILY_DOCKER_ROOT__/family-mihomo-fallback/config.
 MIHOMO_UPGRADE_SCRIPT = "/usr/local/sbin/family-mihomo-upgrade"
 RULE_BACKUP_DIR = MIHOMO_CONFIG_PATH.parent / "rule-backups"
 RULES_TEMPLATE_PATH = Path("/opt/family-proxy-ui/rules.html")
+FRONTEND_ROOT = Path(os.environ.get("FAMILY_FRONTEND_ROOT", "/opt/family-proxy-ui/frontend"))
+if not FRONTEND_ROOT.exists():
+    local_frontend = Path(__file__).resolve().parent.parent / "frontend/dist"
+    if local_frontend.exists():
+        FRONTEND_ROOT = local_frontend
+FRONTEND_INDEX_PATH = FRONTEND_ROOT / "index.html"
 MIHOMO_GROUPS = ("AI", "Youtube", "Telegram", "Google", "Others")
 LAN = ipaddress.ip_network("__FAMILY_LAN_CIDR__")
 PROXY_IP = "__FAMILY_PROXY_IP__"
@@ -55,6 +63,10 @@ SHARED_LIST = "family_mihomo_devices"
 SHARED_TABLE = "family_mihomo_shared"
 SHARED_CONN_MARK = "family_mihomo_conn"
 SHARED_TAG = "family-mihomo-shared"
+DEVICE_ICON_KEYS = frozenset({
+    "phone", "laptop", "desktop", "tablet", "tv", "camera",
+    "gamepad", "speaker", "router", "home", "watch", "server",
+})
 def load_csrf_token():
     try:
         token = CSRF_TOKEN_PATH.read_text(encoding="utf-8").strip()
@@ -1590,7 +1602,10 @@ def normalize_mac(value):
 
 
 def load_device_preferences():
-    defaults = {"aliases": {}, "favorites": [], "homekit_direct": [], "wireguard_aliases": {}}
+    defaults = {
+        "aliases": {}, "favorites": [], "homekit_direct": [],
+        "wireguard_aliases": {}, "device_icons": {},
+    }
     if not DEVICE_PREFS_PATH.exists():
         return defaults
     try:
@@ -1601,11 +1616,14 @@ def load_device_preferences():
     favorites = data.get("favorites", [])
     homekit_direct = data.get("homekit_direct", [])
     wireguard_aliases = data.get("wireguard_aliases", {})
+    device_icons = data.get("device_icons", {})
     if (not isinstance(aliases, dict) or not isinstance(favorites, list)
-            or not isinstance(homekit_direct, list) or not isinstance(wireguard_aliases, dict)):
+            or not isinstance(homekit_direct, list) or not isinstance(wireguard_aliases, dict)
+            or not isinstance(device_icons, dict)):
         raise RouterError("设备名称与常用名单格式错误")
     clean_aliases = {}
     clean_wireguard_aliases = {}
+    clean_device_icons = {}
     clean_favorites = set()
     clean_homekit_direct = set()
     for mac, alias in aliases.items():
@@ -1630,11 +1648,19 @@ def load_device_preferences():
             clean_homekit_direct.add(normalize_mac(mac))
         except RouterError:
             continue
+    for mac, icon in device_icons.items():
+        try:
+            normalized = normalize_mac(mac)
+        except RouterError:
+            continue
+        if isinstance(icon, str) and icon in DEVICE_ICON_KEYS:
+            clean_device_icons[normalized] = icon
     return {
         "aliases": clean_aliases,
         "favorites": sorted(clean_favorites),
         "homekit_direct": sorted(clean_homekit_direct),
         "wireguard_aliases": clean_wireguard_aliases,
+        "device_icons": clean_device_icons,
     }
 
 
@@ -1896,7 +1922,7 @@ def homekit_direct_route_sync():
     }
 
 
-def update_device_preference(mac, alias=None, favorite=None, homekit_direct=None):
+def update_device_preference(mac, alias=None, favorite=None, homekit_direct=None, icon=None):
     mac = normalize_mac(mac)
     with RouterOS() as api:
         lease = next((item for item in api.print("/ip/dhcp-server/lease")
@@ -1933,6 +1959,10 @@ def update_device_preference(mac, alias=None, favorite=None, homekit_direct=None
             else:
                 direct_macs.discard(mac)
         data["homekit_direct"] = sorted(direct_macs)
+        if icon is not None:
+            if not isinstance(icon, str) or icon not in DEVICE_ICON_KEYS:
+                raise RouterError("设备图标不受支持")
+            data["device_icons"][mac] = icon
         save_device_preferences(data)
     ip = lease.get("address", "")
     try:
@@ -1947,13 +1977,30 @@ def update_device_preference(mac, alias=None, favorite=None, homekit_direct=None
             save_device_preferences(rollback)
         raise
     audit("device_preference", ip, "success",
-          f"mac={mac} favorite={favorite} homekit_direct={homekit_direct} alias_changed={alias is not None}")
+          f"mac={mac} favorite={favorite} homekit_direct={homekit_direct} "
+          f"icon={icon or ''} alias_changed={alias is not None}")
     message = "设备信息已保存"
     if homekit_direct is not None:
         message = "已启用 HomeKit 本地直连" if homekit_direct else "已移除 HomeKit 本地直连"
         if direct_status and direct_status["missing"]:
             message += "；等待 DHCP 租约出现后生效"
-    return {"message": message, "mac": mac, "homekit": direct_status}
+    return {"message": message, "mac": mac, "homekit": direct_status, "icon": icon}
+
+
+def setup_status():
+    try:
+        state = json.loads(SETUP_STATE_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"pending": False}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RouterError("首次配置状态读取失败") from exc
+    if state.get("pending") is not True:
+        return {"pending": False}
+    token = str(state.get("token") or "").strip()
+    return {
+        "pending": bool(token),
+        "url": "/setup?" + urlencode({"token": token}) if token else "/setup",
+    }
 
 
 def update_wireguard_alias(key, alias):
@@ -2429,6 +2476,7 @@ def list_devices():
                 "name": preferences["aliases"].get(mac) or router_name,
                 "router_name": router_name,
                 "custom_name": mac in preferences["aliases"],
+                "icon": preferences["device_icons"].get(mac, "phone"),
                 "status": lease.get("status", "unknown"),
                 "static": lease.get("dynamic") != "true",
                 "managed": is_managed,
@@ -3496,6 +3544,16 @@ PAGE = PAGE.replace(
     "fetch(new URL(path,location.origin),{...opt,headers:",
     1,
 )
+PAGE = PAGE.replace(
+    '<nav class="nav"><a class="active" href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav>',
+    '<nav class="nav"><a class="active" href="/legacy">原管理界面</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav><a class="topbar-console-switch" href="/">新版控制台</a>',
+    1,
+)
+PAGE = PAGE.replace(
+    '</style></head>',
+    '.topbar-console-switch{display:inline-flex;align-items:center;min-height:36px;margin-left:auto;padding:0 13px;border:1px solid #48484a;border-radius:7px;background:#1c1c1e;color:#f5f5f7;text-decoration:none;font-size:13px;font-weight:650;white-space:nowrap}.topbar-console-switch:hover{background:#2c2c2e;border-color:#636366}@media(max-width:760px){.topbar-console-switch{align-self:flex-end}}</style></head>',
+    1,
+)
 
 
 MIHOMO_PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>Mihomo 节点</title><style>:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#000;color:#f5f5f7}*{box-sizing:border-box}body{margin:0;background:#000}.wrap{max-width:820px;margin:auto;padding:36px 18px 60px}a{color:#0a84ff;text-decoration:none}h1{font-size:30px;margin:24px 0 7px;letter-spacing:0}.sub{color:#8e8e93;margin:0 0 24px}.group{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.row{display:grid;grid-template-columns:160px 1fr auto;align-items:center;gap:14px;padding:14px 16px;border-top:1px solid #38383a}.row:first-child{border-top:0}h2{font-size:15px;margin:0}.current{color:#8e8e93;font-size:12px;margin-top:4px;overflow-wrap:anywhere}select{min-width:0;width:100%;height:38px;padding:0 10px;border:1px solid #48484a;border-radius:7px;background:#2c2c2e;color:#fff;font:14px inherit}button{height:38px;border:0;border-radius:7px;background:#0a84ff;color:#fff;padding:0 15px;font-weight:600}.status{margin-top:14px;color:#30d158}.error{color:#ff453a}@media(max-width:620px){.row{grid-template-columns:1fr}.wrap{padding-top:24px}button{width:100%}}</style></head><body><main class="wrap"><a href="/">返回设备管理</a><h1>节点管理</h1><p class="sub">手动选择只影响对应业务组；AI 组不使用香港节点。</p><div class="group" id="groups"></div><div class="status" id="status"></div></main><script>const csrf="__CSRF__",status=document.querySelector('#status');function esc(s){return String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]))}async function req(path,opt={}){let r=await fetch(path,{...opt,headers:{'Content-Type':'application/json','X-CSRF':csrf}}),d=await r.json();if(!r.ok)throw Error(d.error||'请求失败');return d}async function load(){try{let d=await req('/api/mihomo');document.querySelector('#groups').innerHTML=d.groups.map(g=>`<section class="row"><div><h2>${esc(g.name)}</h2><div class="current">当前：${esc(g.now||'未选择')}</div></div><select id="group-${esc(g.name)}">${g.all.map(n=>`<option ${n===g.now?'selected':''}>${esc(n)}</option>`).join('')}</select><button onclick="choose('${esc(g.name)}')">应用</button></section>`).join('')}catch(e){status.textContent=e.message;status.className='status error'}}async function choose(group){try{let node=document.querySelector('#group-'+group).value,d=await req('/api/mihomo/select',{method:'POST',body:JSON.stringify({group,node})});status.textContent=d.message;status.className='status';await load()}catch(e){status.textContent=e.message;status.className='status error'}}load()</script></body></html>'''
@@ -3616,6 +3674,32 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         return False
 
+    def send_frontend_file(self, relative_path, cache=False):
+        root = FRONTEND_ROOT.resolve()
+        try:
+            candidate = (root / relative_path).resolve()
+            candidate.relative_to(root)
+        except (OSError, ValueError):
+            self.reply(HTTPStatus.NOT_FOUND, {"error": "frontend asset not found"})
+            return
+        if not candidate.is_file():
+            self.reply(HTTPStatus.NOT_FOUND, {"error": "frontend asset not found"})
+            return
+        try:
+            data = candidate.read_bytes()
+        except OSError:
+            self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "frontend asset unavailable"})
+            return
+        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type + ("; charset=utf-8" if content_type.startswith("text/") else ""))
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable" if cache else "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.end_headers()
+        self.wfile.write(data)
+
     def send_capture_file(self, capture_id):
         try:
             capture_path, metadata_path = capture_paths(capture_id)
@@ -3649,7 +3733,31 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self.require_auth():
             return
+        if path == "/favicon.ico":
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            return
+        if path == "/favicon.svg":
+            self.send_frontend_file("favicon.svg", cache=True)
+            return
+        if path.startswith("/assets/"):
+            self.send_frontend_file("assets/" + path[len("/assets/"):], cache=True)
+            return
         if path == "/":
+            if FRONTEND_INDEX_PATH.is_file():
+                self.send_frontend_file("index.html")
+                return
+            data = PAGE.replace("__CSRF__", CSRF_TOKEN).encode()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Frame-Options", "DENY")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if path == "/legacy":
             data = PAGE.replace("__CSRF__", CSRF_TOKEN).encode()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -3743,6 +3851,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/csrf":
             self.reply(HTTPStatus.OK, {"csrf": CSRF_TOKEN})
             return
+        if path == "/api/setup-status":
+            try:
+                self.reply(HTTPStatus.OK, setup_status())
+            except RouterError as exc:
+                self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+            return
         if path == "/api/page-layout":
             try:
                 self.reply(HTTPStatus.OK, load_page_layout_preferences())
@@ -3806,6 +3920,7 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("mac", ""), body.get("alias") if "alias" in body else None,
                     body.get("favorite") if "favorite" in body else None,
                     body.get("homekit_direct") if "homekit_direct" in body else None,
+                    body.get("icon") if "icon" in body else None,
                 ))
             elif path == "/api/wireguard/preference":
                 self.reply(HTTPStatus.OK, update_wireguard_alias(body.get("key", ""), body.get("alias", "")))

@@ -10,6 +10,7 @@ BACKUP_ROOT=/var/backups/family-proxy
 [[ -r $CONFIG ]] || { echo "missing $CONFIG" >&2; exit 1; }
 [[ -f $SOURCE_DIR/runtime/family-proxy-ui.py ]] || { echo "missing UI source" >&2; exit 1; }
 [[ -x $SOURCE_DIR/scripts/render-runtime.py ]] || { echo "missing renderer" >&2; exit 1; }
+[[ -f $SOURCE_DIR/frontend/dist/index.html ]] || { echo "missing frontend build: run (cd frontend && npm install && npm run build)" >&2; exit 1; }
 
 stamp=$(date +%Y%m%d-%H%M%S)
 backup_dir=$BACKUP_ROOT/$stamp
@@ -22,6 +23,8 @@ install -d -m 700 "$backup_dir"
 python3 "$SOURCE_DIR/scripts/render-runtime.py" "$CONFIG" "$SOURCE_DIR/runtime" "$stage_dir"
 python3 -m py_compile "$stage_dir/family-proxy-ui.py"
 install -m 755 "$stage_dir/family-proxy-ui.py" "$TARGET_DIR/family-proxy-ui.py"
+install -d -m 755 "$TARGET_DIR/frontend"
+cp -a "$SOURCE_DIR/frontend/dist/." "$TARGET_DIR/frontend/"
 
 systemctl restart family-proxy-ui.service
 systemctl is-active --quiet family-proxy-ui.service
