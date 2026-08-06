@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import mimetypes
 import os
 import re
 import secrets
@@ -43,6 +44,12 @@ MIHOMO_CONFIG_PATH = Path("__FAMILY_DOCKER_ROOT__/family-mihomo-fallback/config.
 MIHOMO_UPGRADE_SCRIPT = "/usr/local/sbin/family-mihomo-upgrade"
 RULE_BACKUP_DIR = MIHOMO_CONFIG_PATH.parent / "rule-backups"
 RULES_TEMPLATE_PATH = Path("/opt/family-proxy-ui/rules.html")
+FRONTEND_ROOT = Path(os.environ.get("FAMILY_FRONTEND_ROOT", "/opt/family-proxy-ui/frontend"))
+if not FRONTEND_ROOT.exists():
+    local_frontend = Path(__file__).resolve().parent.parent / "frontend/dist"
+    if local_frontend.exists():
+        FRONTEND_ROOT = local_frontend
+FRONTEND_INDEX_PATH = FRONTEND_ROOT / "index.html"
 MIHOMO_GROUPS = ("AI", "Youtube", "Telegram", "Google", "Others")
 LAN = ipaddress.ip_network("__FAMILY_LAN_CIDR__")
 PROXY_IP = "__FAMILY_PROXY_IP__"
@@ -3616,6 +3623,32 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         return False
 
+    def send_frontend_file(self, relative_path, cache=False):
+        root = FRONTEND_ROOT.resolve()
+        try:
+            candidate = (root / relative_path).resolve()
+            candidate.relative_to(root)
+        except (OSError, ValueError):
+            self.reply(HTTPStatus.NOT_FOUND, {"error": "frontend asset not found"})
+            return
+        if not candidate.is_file():
+            self.reply(HTTPStatus.NOT_FOUND, {"error": "frontend asset not found"})
+            return
+        try:
+            data = candidate.read_bytes()
+        except OSError:
+            self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "frontend asset unavailable"})
+            return
+        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type + ("; charset=utf-8" if content_type.startswith("text/") else ""))
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable" if cache else "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.end_headers()
+        self.wfile.write(data)
+
     def send_capture_file(self, capture_id):
         try:
             capture_path, metadata_path = capture_paths(capture_id)
@@ -3649,7 +3682,21 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self.require_auth():
             return
+        if path == "/favicon.ico":
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            return
+        if path == "/favicon.svg":
+            self.send_frontend_file("favicon.svg", cache=True)
+            return
+        if path.startswith("/assets/"):
+            self.send_frontend_file(path[len("/assets/"):], cache=True)
+            return
         if path == "/":
+            if FRONTEND_INDEX_PATH.is_file():
+                self.send_frontend_file("index.html")
+                return
             data = PAGE.replace("__CSRF__", CSRF_TOKEN).encode()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")

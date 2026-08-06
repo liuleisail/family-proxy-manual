@@ -56,6 +56,9 @@ install -m 755 /opt/family-proxy-ui/rendered/family-proxy-ui.py /opt/family-prox
 install -m 755 /opt/family-proxy-ui/rendered/family-mihomo-sub-import.py /opt/family-proxy-ui/family-mihomo-sub-import.py
 install -m 755 /opt/family-proxy-ui/rendered/family-proxy-gateway.py /opt/family-proxy-ui/family-proxy-gateway.py
 install -m 644 "$REPO_DIR/runtime/rules.html" /opt/family-proxy-ui/rules.html
+[[ -f "$REPO_DIR/frontend/dist/index.html" ]] || { echo "frontend/dist is missing; run: (cd frontend && npm install && npm run build)" >&2; exit 1; }
+install -d -m 755 /opt/family-proxy-ui/frontend
+cp -a "$REPO_DIR/frontend/dist/." /opt/family-proxy-ui/frontend/
 install -m 755 "$REPO_DIR/scripts/family-mihomo-tproxy-auto" /usr/local/sbin/family-mihomo-tproxy-auto
 install -m 755 "$REPO_DIR/scripts/refresh-cn-ipv4" /usr/local/sbin/refresh-family-cn-ipv4
 install -m 755 "$REPO_DIR/scripts/sync-routeros-cn-ipv4.py" /usr/local/sbin/sync-routeros-cn-ipv4
