@@ -20,7 +20,7 @@ class EmergencyFailoverTests(unittest.TestCase):
             "emergency": "TG-应急",
             "watched": ("TG-Auto",),
             "pools": ("TG",),
-            "url": "https://core.telegram.org",
+            "url": "https://api.telegram.org",
         }
         self.proxies = {
             "TG-出口": {"now": "TG-Auto"},

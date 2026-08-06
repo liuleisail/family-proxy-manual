@@ -98,7 +98,7 @@ FAILSAFE_EXITS = {
                 "url": "https://chatgpt.com/cdn-cgi/trace"},
     "TG-出口": {"primary": "TG-Auto", "emergency": "TG-应急",
                 "watched": ("TG-Auto",), "pools": ("TG",),
-                "url": "https://core.telegram.org"},
+                "url": "https://api.telegram.org"},
     "Proxy-出口": {"primary": "Proxy-Auto", "emergency": "Proxy-应急",
                    "watched": ("Proxy-Auto",), "pools": ("Proxy",),
                    "url": "https://www.gstatic.com/generate_204"},
@@ -123,7 +123,7 @@ POOL_TEST_URLS = {
     "SG-AI": "https://chatgpt.com/cdn-cgi/trace",
     "US-AI": "https://chatgpt.com/cdn-cgi/trace",
     "其他-AI": "https://chatgpt.com/cdn-cgi/trace",
-    "TG": "https://core.telegram.org",
+    "TG": "https://api.telegram.org",
     "Proxy": "https://www.gstatic.com/generate_204",
     "GitHub-Auto": "https://github.com/",
 }
@@ -139,7 +139,7 @@ POOL_RUNTIME = {
     "SG-AI": {"group": "SG-AI", "url": "https://chatgpt.com/cdn-cgi/trace", "interval": 180, "expected_status": "200", "default": "fallback"},
     "US-AI": {"group": "US-AI", "url": "https://chatgpt.com/cdn-cgi/trace", "interval": 180, "expected_status": "200", "default": "fallback"},
     "其他-AI": {"group": "其他-AI", "url": "https://chatgpt.com/cdn-cgi/trace", "interval": 180, "expected_status": "200", "default": "fallback"},
-    "TG": {"group": "TG-Auto", "url": "https://core.telegram.org", "interval": 120, "tolerance": 150, "default": "url-test"},
+    "TG": {"group": "TG-Auto", "url": "https://api.telegram.org", "interval": 120, "tolerance": 150, "default": "url-test"},
     "Proxy": {"group": "Proxy-Auto", "url": "https://www.gstatic.com/generate_204", "interval": 300, "expected_status": "204", "default": "fallback"},
 }
 TEST_JOB_LOCK = threading.Lock()
@@ -625,11 +625,11 @@ def generate_config(selected=None, settings=None):
     # arrive; either the managed Telegram IP set or the GEOIP fallback below
     # still selects the dedicated pool.
     sniffer = config.setdefault("sniffer", {})
-    skipped = list(sniffer.get("skip-dst-address") or [])
-    for cidr in ("149.154.160.0/20", "91.108.4.0/22", "91.108.56.0/22"):
-        if cidr not in skipped:
-            skipped.append(cidr)
-    sniffer["skip-dst-address"] = skipped
+    telegram_skip_cidrs = {"149.154.160.0/20", "91.108.4.0/22", "91.108.56.0/22"}
+    sniffer["skip-dst-address"] = [
+        cidr for cidr in (sniffer.get("skip-dst-address") or [])
+        if cidr not in telegram_skip_cidrs
+    ]
     # Telegram clients commonly connect to Telegram IPs directly. Prefer the
     # managed MRS IP set and retain GEOIP only when that set is absent.
     rules = list(config.get("rules") or [])
@@ -648,15 +648,30 @@ def generate_config(selected=None, settings=None):
     # The notification bot is control-plane traffic. Keep it separate from
     # normal Telegram client sessions so a failing regional TG route cannot
     # suppress an alert about that very failure.
-    telegram_api_rule = "DOMAIN,api.telegram.org,TG-Notify"
-    rules = [rule for rule in rules if str(rule) != telegram_api_rule]
+    telegram_notify_rule = (
+        "AND,((SRC-IP-CIDR,127.0.0.1/32),(DOMAIN,api.telegram.org)),TG-Notify"
+    )
+    telegram_client_ip_rules = (
+        "IP-CIDR,149.154.160.0/20,TG-Auto,no-resolve",
+        "IP-CIDR,91.108.4.0/22,TG-Auto,no-resolve",
+        "IP-CIDR,91.108.56.0/22,TG-Auto,no-resolve",
+    )
+    telegram_api_rule = "DOMAIN,api.telegram.org,TG-Auto"
+    telegram_generated_rules = (
+        "DOMAIN,api.telegram.org,TG-Notify",
+        telegram_notify_rule,
+        telegram_api_rule,
+        *telegram_client_ip_rules,
+    )
+    rules = [rule for rule in rules if str(rule) not in telegram_generated_rules]
     telegram_keys = telegram_rule_set_keys(rule_sets)
     telegram_prefixes = tuple(f"RULE-SET,family-{key}-" for key in telegram_keys)
     insert_at = next((index for index, rule in enumerate(rules)
                       if telegram_prefixes and str(rule).startswith(telegram_prefixes)),
                      next((index for index, rule in enumerate(rules)
                            if str(rule).startswith("GEOSITE,telegram,")), before_match_index(rules)))
-    rules.insert(insert_at, telegram_api_rule)
+    for offset, rule in enumerate((telegram_notify_rule, *telegram_client_ip_rules, telegram_api_rule)):
+        rules.insert(insert_at + offset, rule)
     # GitHub uses long-lived HTTPS connections and large release/LFS transfers.
     # Keep its domains ahead of the broader Microsoft category. The internal
     # safety wrapper only switches to DIRECT after its candidate pool has been
