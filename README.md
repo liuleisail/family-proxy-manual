@@ -62,6 +62,26 @@ sudo ./scripts/bootstrap-interactive.sh
 
 该入口**不**自动写 RouterOS、接管设备、导入订阅，或覆盖已有 Mihomo/MosDNS 容器。RouterOS 必须先在终端审阅并导入模板；现有 MosDNS 仅按兼容安装步骤对接。这是为了在不同家庭网络上仍保留可恢复边界，而不是把现网规则打包进镜像。
 
+### 一键安装与首次启动向导
+
+新服务器也可以使用网页向导完成首次设置：
+
+```bash
+git clone https://github.com/liuleisail/family-proxy-manual.git
+cd family-proxy-manual
+sudo ./scripts/install-one-click.sh
+```
+
+脚本只在终端询问启动网关所需的 LAN、旁路 IP、接口和数据目录；安装完成后输出一个仅局域网可访问的一次性地址。用同一局域网设备打开该地址，在进入管理页前填写 RouterOS API、管理页账号、DNS 页面认证及可选 GEO 更新策略。向导提交后会原子更新 `router.env`、删除一次性令牌、重启控制面并进入正常登录页。RouterOS 规则、订阅和客户端接管仍需人工审阅，不会被一键安装自动执行。
+
+该入口要求服务器已经安装 Docker Engine、Compose 插件和 `systemd`；它不会替换已有 Docker、Mihomo、MosDNS 或 RouterOS 配置。安装器输出的向导地址只应在家庭局域网内打开，不要通过 Telegram、工单或公网反向代理转发。向导完成后先执行：
+
+```bash
+sudo ./scripts/verify-server.sh
+```
+
+确认控制面和本机服务正常后，再按 [DEPLOYMENT.md](DEPLOYMENT.md) 审阅 RouterOS 模板、接入现有 DNS，并只加入一台测试设备。
+
 ### 可选：建立专用运维密钥账号
 
 建议把日常人工管理员和旁路运维通道分开。旁路服务器可建立一个独立的 SSH 运维账号：仅允许一把保存在操作者电脑本地的 ED25519 私钥登录，禁用该账号的密码登录；需要无交互维护时，再通过受控的 `sudoers` 规则授权。这个账号等同于拥有相应的系统维护权限，因此私钥必须为本机私有文件（权限 `600`），不能上传到仓库、NAS 共享目录或聊天工具。

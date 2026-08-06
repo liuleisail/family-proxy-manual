@@ -4,26 +4,37 @@
 import base64
 import hashlib
 import hmac
+import html
 import http.client
 import ipaddress
 import json
 import os
+import re
 import secrets
+import subprocess
 import threading
 import time
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 CONFIG = Path("/etc/family-proxy-ui/router.env")
 SECRET_PATH = Path("/etc/family-proxy-ui/gateway.secret")
-LAN = ipaddress.ip_network("__FAMILY_LAN_CIDR__")
+SETUP_STATE_PATH = Path("/etc/family-proxy-ui/setup-state.json")
+LAN = ipaddress.ip_network(os.environ.get("FAMILY_LAN_CIDR", "__FAMILY_LAN_CIDR__"))
 SESSION_TTL = 12 * 60 * 60
+SETUP_LOCK = threading.Lock()
 HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade"}
 
 LOGIN_PAGE = '''<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>家庭旁路</title><style>:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#000;color:#f5f5f7}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px}.box{width:min(360px,100%);padding:28px;border:1px solid #2c2c2e;border-radius:10px;background:#1c1c1e}h1{font-size:24px;margin:0 0 8px}p{margin:0 0 22px;color:#98989d;font-size:14px}label{display:block;margin:13px 0 6px;font-size:13px}input{width:100%;height:40px;border:1px solid #48484a;border-radius:7px;background:#2c2c2e;color:#fff;padding:0 11px;font:15px inherit;outline:none}input:focus{border-color:#0a84ff;box-shadow:0 0 0 3px rgba(10,132,255,.2)}button{width:100%;height:40px;margin-top:20px;border:0;border-radius:7px;background:#0a84ff;color:#fff;font:600 15px inherit}.error{min-height:18px;margin-top:12px;color:#ff6961;font-size:13px}</style><main class="box"><h1>家庭旁路</h1><p>登录后可管理设备、规则与机场候选池。</p><form method="post" action="/login"><label>用户名</label><input name="username" autocomplete="username" required autofocus><label>密码</label><input name="password" type="password" autocomplete="current-password" required><button>登录</button><div class="error">__ERROR__</div></form></main>'''
+
+SETUP_PAGE = '''<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>首次设置 - 家庭旁路</title><style>:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#0b0c0e;color:#f5f5f7}*{box-sizing:border-box}body{margin:0;padding:28px 16px 48px}.box{width:min(760px,100%);margin:auto;padding:28px;border:1px solid #2c2c2e;border-radius:10px;background:#1c1c1e}h1{font-size:25px;margin:0 0 8px}h2{font-size:16px;margin:26px 0 12px;padding-top:20px;border-top:1px solid #38383a}p,.hint{color:#98989d;font-size:13px;line-height:1.55}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 18px}.field{min-width:0}label{display:block;margin:0 0 6px;font-size:13px}input{width:100%;height:40px;border:1px solid #48484a;border-radius:7px;background:#2c2c2e;color:#fff;padding:0 11px;font:15px inherit;outline:none}input:focus{border-color:#0a84ff;box-shadow:0 0 0 3px rgba(10,132,255,.2)}.check{display:flex;align-items:center;gap:9px;margin-top:14px;color:#d1d1d6;font-size:13px}.check input{width:17px;height:17px;margin:0}.error{min-height:20px;margin-top:16px;color:#ff6961;font-size:13px}.actions{display:flex;justify-content:flex-end;gap:10px;margin-top:24px}button{height:40px;border:0;border-radius:7px;padding:0 18px;background:#0a84ff;color:#fff;font:600 14px inherit;cursor:pointer}button:focus{box-shadow:0 0 0 3px rgba(10,132,255,.25);outline:none}@media(max-width:620px){.box{padding:22px 18px}.grid{grid-template-columns:1fr}.actions button{width:100%}.actions{display:block}}</style><main class="box"><h1>首次设置</h1><p>完成本机控制面的基础配置后，才会进入正常登录页。此页面仅接受局域网连接，不会写入 RouterOS 规则、接管设备或导入订阅。</p><form method="post" action="/setup"><input type="hidden" name="token" value="__TOKEN__"><h2>RouterOS 控制连接</h2><div class="grid"><div class="field"><label for="router_host">API 地址</label><input id="router_host" name="router_host" value="__ROUTER_HOST__" autocomplete="off" required></div><div class="field"><label for="router_user">API 用户</label><input id="router_user" name="router_user" value="__ROUTER_USER__" autocomplete="username" required></div><div class="field"><label for="router_password">API 密码</label><input id="router_password" name="router_password" type="password" autocomplete="new-password" required></div></div><h2>管理页账号</h2><div class="grid"><div class="field"><label for="ui_username">用户名</label><input id="ui_username" name="ui_username" value="__UI_USERNAME__" autocomplete="username" required></div><div class="field"><label for="ui_password">新密码</label><input id="ui_password" name="ui_password" type="password" autocomplete="new-password" minlength="12" required></div><div class="field"><label for="ui_password_confirm">确认密码</label><input id="ui_password_confirm" name="ui_password_confirm" type="password" autocomplete="new-password" minlength="12" required></div></div><h2>可选服务</h2><div class="grid"><div class="field"><label for="dns_username">DNS 页面用户名</label><input id="dns_username" name="dns_username" autocomplete="off"></div><div class="field"><label for="dns_password">DNS 页面密码</label><input id="dns_password" name="dns_password" type="password" autocomplete="new-password"></div><div class="field"><label for="mosdns_api_url">MosDNS API 地址</label><input id="mosdns_api_url" name="mosdns_api_url" value="__MOSDNS_API_URL__" autocomplete="off"></div><div class="field"><label for="geodata_proxy">GEO 更新代理</label><input id="geodata_proxy" name="geodata_proxy" value="__GEODATA_PROXY__" autocomplete="off"></div></div><label class="check"><input type="checkbox" name="router_cn_auto_sync" __ROUTER_CN_AUTO_SYNC__> 每周更新后同步 RouterOS 国内地址表</label><label class="check"><input type="checkbox" name="geodata_auto_update" __GEODATA_AUTO_UPDATE__> 自动更新 Mihomo GEO 数据（需服务器可直连官方源）</label><div class="error">__ERROR__</div><div class="actions"><button type="submit">保存并进入系统</button></div></form></main>'''
+
+SETUP_COMPLETE_PAGE = '''<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>设置完成 - 家庭旁路</title><style>:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#0b0c0e;color:#f5f5f7}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px}.box{width:min(440px,100%);padding:28px;border:1px solid #2c2c2e;border-radius:10px;background:#1c1c1e}h1{font-size:24px;margin:0 0 10px}p{color:#98989d;font-size:14px;line-height:1.6}a{display:inline-block;margin-top:12px;color:#fff;background:#0a84ff;border-radius:7px;padding:11px 16px;text-decoration:none;font-weight:600}</style><main class="box"><h1>设置已完成</h1><p>控制面正在重新加载新配置。等待几秒后进入管理页登录。</p><a href="/login">进入登录页</a></main>'''
+
+SETUP_ERROR_PAGE = '''<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>首次设置 - 家庭旁路</title><style>:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#0b0c0e;color:#f5f5f7}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px}.box{width:min(500px,100%);padding:28px;border:1px solid #633b3b;border-radius:10px;background:#1c1c1e}h1{font-size:22px;margin:0 0 10px}.error{color:#ff6961;font-size:14px;line-height:1.6}a{color:#fff}</style><main class="box"><h1>首次设置无法继续</h1><p class="error">__ERROR__</p><a href="__SETUP_LINK__">返回设置页</a></main>'''
 
 
 PAGE_LAYOUT = {
@@ -93,6 +104,176 @@ def config():
                 if "=" in line and not line.lstrip().startswith("#"))
 
 
+def merge_env_text(text, updates, remove=()):
+    """Replace selected env keys without exposing or reordering unrelated settings."""
+    remove = set(remove)
+    seen = set()
+    lines = []
+    for raw in text.splitlines():
+        if "=" in raw and not raw.lstrip().startswith("#"):
+            key = raw.split("=", 1)[0].strip()
+            if key in remove:
+                continue
+            if key in updates:
+                lines.append(f"{key}={updates[key]}")
+                seen.add(key)
+                continue
+        lines.append(raw)
+    for key, value in updates.items():
+        if key not in seen:
+            lines.append(f"{key}={value}")
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def setup_state():
+    try:
+        value = json.loads(SETUP_STATE_PATH.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def setup_pending():
+    return setup_state().get("pending") is True
+
+
+def setup_link():
+    token = setup_state().get("token", "")
+    return "/setup?" + urlencode({"token": token}) if token else "/setup"
+
+
+def setup_token_valid(token):
+    expected = setup_state().get("token", "")
+    return bool(expected and token and hmac.compare_digest(str(token), str(expected)))
+
+
+def hash_password(password):
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 210000).hex()
+    return salt.hex(), digest
+
+
+def valid_endpoint(value):
+    return bool(value and len(value) <= 255 and re.fullmatch(r"[A-Za-z0-9_.:-]+", value))
+
+
+def valid_url(value, allow_blank=False):
+    if not value and allow_blank:
+        return True
+    parsed = urlsplit(value)
+    return (parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+            and not any(char.isspace() for char in value) and len(value) <= 255)
+
+
+def setup_updates(form):
+    def get(name):
+        return form.get(name, [""])[0].strip()
+
+    router_host = get("router_host")
+    router_user = get("router_user")
+    router_password = form.get("router_password", [""])[0]
+    ui_username = get("ui_username")
+    ui_password = form.get("ui_password", [""])[0]
+    ui_password_confirm = form.get("ui_password_confirm", [""])[0]
+    dns_username = get("dns_username")
+    dns_password = form.get("dns_password", [""])[0]
+    mosdns_api_url = get("mosdns_api_url")
+    geodata_proxy = get("geodata_proxy")
+
+    if not valid_endpoint(router_host):
+        raise ValueError("RouterOS API 地址格式不正确")
+    if not router_user or len(router_user) > 64 or not re.fullmatch(r"[^=\r\n]+", router_user):
+        raise ValueError("RouterOS API 用户格式不正确")
+    if not router_password or "\n" in router_password or "\r" in router_password:
+        raise ValueError("RouterOS API 密码不能为空")
+    if not ui_username or len(ui_username) > 64 or not re.fullmatch(r"[^=\r\n]+", ui_username):
+        raise ValueError("管理页用户名格式不正确")
+    if len(ui_password) < 12 or "\n" in ui_password or "\r" in ui_password:
+        raise ValueError("管理页密码至少需要 12 个字符")
+    if ui_password != ui_password_confirm:
+        raise ValueError("两次输入的管理页密码不一致")
+    if bool(dns_username) != bool(dns_password) or "\n" in dns_password or "\r" in dns_password:
+        raise ValueError("DNS 页面用户名和密码必须同时填写")
+    if not valid_url(mosdns_api_url) or not valid_url(geodata_proxy, allow_blank=True):
+        raise ValueError("可选服务地址必须是 http 或 https 地址")
+
+    salt, digest = hash_password(ui_password)
+    dns_auth = base64.b64encode(f"{dns_username}:{dns_password}".encode()).decode() if dns_username else ""
+    return {
+        "ROUTER_HOST": router_host,
+        "ROUTER_USER": router_user,
+        "ROUTER_PASSWORD": router_password,
+        "UI_USERNAME": ui_username,
+        "UI_PASSWORD_SALT": salt,
+        "UI_PASSWORD_HASH": digest,
+        "DNS_UPSTREAM_AUTH_B64": dns_auth,
+        "MOSDNS_API_URL": mosdns_api_url,
+        "FAMILY_GEODATA_PROXY": geodata_proxy,
+        "ROUTER_CN_AUTO_SYNC": "true" if "router_cn_auto_sync" in form else "false",
+        "MIHOMO_GEODATA_AUTO_UPDATE": "true" if "geodata_auto_update" in form else "false",
+        "SETUP_PENDING": "false",
+    }
+
+
+def write_setup_config(updates):
+    temporary = CONFIG.with_suffix(".new")
+    merged = merge_env_text(CONFIG.read_text(encoding="utf-8"), updates, remove=("UI_PASSWORD",))
+    temporary.write_text(merged, encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, CONFIG)
+
+
+def write_setup_state(state):
+    temporary = SETUP_STATE_PATH.with_suffix(".new")
+    temporary.write_text(json.dumps(state, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, SETUP_STATE_PATH)
+
+
+def setup_page(error=""):
+    values = config()
+    checked_router = "checked" if values.get("ROUTER_CN_AUTO_SYNC", "true").lower() == "true" else ""
+    checked_geodata = "checked" if values.get("MIHOMO_GEODATA_AUTO_UPDATE", "false").lower() == "true" else ""
+    replacements = {
+        "__TOKEN__": html.escape(setup_state().get("token", ""), quote=True),
+        "__ROUTER_HOST__": html.escape(values.get("ROUTER_HOST", ""), quote=True),
+        "__ROUTER_USER__": html.escape(values.get("ROUTER_USER", ""), quote=True),
+        "__UI_USERNAME__": html.escape(values.get("UI_USERNAME", ""), quote=True),
+        "__MOSDNS_API_URL__": html.escape(values.get("MOSDNS_API_URL", "http://127.0.0.1:9099"), quote=True),
+        "__GEODATA_PROXY__": html.escape(values.get("FAMILY_GEODATA_PROXY", "http://127.0.0.1:7890"), quote=True),
+        "__ROUTER_CN_AUTO_SYNC__": checked_router,
+        "__GEODATA_AUTO_UPDATE__": checked_geodata,
+        "__ERROR__": html.escape(error),
+    }
+    body = SETUP_PAGE
+    for marker, value in replacements.items():
+        body = body.replace(marker, value)
+    return body.encode("utf-8")
+
+
+def setup_error_page(error):
+    body = SETUP_ERROR_PAGE.replace("__ERROR__", html.escape(error)).replace(
+        "__SETUP_LINK__", html.escape(setup_link(), quote=True)).encode("utf-8")
+    return body
+
+
+def restart_after_setup():
+    try:
+        subprocess.run(
+            ["systemctl", "restart", "family-proxy-ui", "family-mihomo-sub-import"],
+            check=True, capture_output=True, timeout=30,
+        )
+        if config().get("MIHOMO_GEODATA_AUTO_UPDATE", "false").lower() == "true":
+            subprocess.run(["systemctl", "enable", "--now", "family-mihomo-geodata-refresh.timer"],
+                           check=True, capture_output=True, timeout=15)
+        else:
+            subprocess.run(["systemctl", "disable", "--now", "family-mihomo-geodata-refresh.timer"],
+                           check=False, capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        # Configuration is already durable; the next installer/upgrade retries the reload.
+        pass
+
+
 def secret():
     value = SECRET_PATH.read_bytes()
     if len(value) < 32:
@@ -148,6 +329,32 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def setup_response(self, body, status=HTTPStatus.OK):
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def handle_setup(self, form):
+        token = form.get("token", [""])[0]
+        with SETUP_LOCK:
+            if not setup_token_valid(token):
+                self.setup_response(setup_error_page("安装向导令牌无效或已使用，请重新运行安装器获取新地址。"), HTTPStatus.FORBIDDEN)
+                return
+            try:
+                updates = setup_updates(form)
+                write_setup_config(updates)
+                write_setup_state({"pending": False, "completed_at": int(time.time()), "version": 1})
+            except (OSError, ValueError) as exc:
+                self.setup_response(setup_page(str(exc)), HTTPStatus.BAD_REQUEST)
+                return
+        self.setup_response(SETUP_COMPLETE_PAGE.encode("utf-8"))
+        threading.Thread(target=restart_after_setup, daemon=True).start()
 
     def redirect(self, location):
         self.send_response(HTTPStatus.SEE_OTHER)
@@ -272,11 +479,26 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             self.send_error(HTTPStatus.FORBIDDEN)
             return
-        if self.path == "/favicon.ico":
+        parsed = urlsplit(self.path)
+        if parsed.path == "/favicon.ico":
             self.send_response(HTTPStatus.NO_CONTENT)
             self.end_headers()
             return
-        if self.path == "/login":
+        if setup_pending():
+            if parsed.path in {"/", "/login"}:
+                self.redirect(setup_link())
+                return
+            if parsed.path == "/setup":
+                token = parse_qs(parsed.query).get("token", [""])[0]
+                if not setup_token_valid(token):
+                    self.setup_response(setup_error_page("安装向导令牌无效或已使用，请打开安装器输出的完整地址。"), HTTPStatus.FORBIDDEN)
+                    return
+                self.setup_response(setup_page())
+                return
+        if parsed.path == "/setup":
+            self.redirect("/login")
+            return
+        if parsed.path == "/login":
             self.page()
             return
         if not valid_session(self.headers.get("Cookie", "")):
@@ -288,10 +510,19 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             self.send_error(HTTPStatus.FORBIDDEN)
             return
-        if self.path == "/login":
+        parsed = urlsplit(self.path)
+        if setup_pending() and parsed.path == "/setup":
+            size = int(self.headers.get("Content-Length", "0"))
+            if size > 32768:
+                self.setup_response(setup_error_page("请求内容过大。"), HTTPStatus.BAD_REQUEST)
+                return
+            form = parse_qs(self.rfile.read(size).decode(errors="replace"))
+            self.handle_setup(form)
+            return
+        if parsed.path == "/login":
             self.login()
             return
-        if self.path == "/logout":
+        if parsed.path == "/logout":
             self.send_response(HTTPStatus.SEE_OTHER)
             self.send_header("Location", "/login")
             self.send_header("Set-Cookie", "family_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict")

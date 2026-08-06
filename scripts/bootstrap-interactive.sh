@@ -5,6 +5,12 @@ set -Eeuo pipefail
 
 repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 config=/etc/family-proxy-ui/router.env
+web_setup=0
+if [[ ${1:-} == "--web-setup" ]]; then
+  web_setup=1
+  shift
+fi
+[[ $# -eq 0 ]] || { echo "用法：$0 [--web-setup]" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || { echo "请使用 sudo 运行此脚本。" >&2; exit 1; }
 [[ -f $config ]] && {
@@ -48,8 +54,13 @@ derive_prefix() {
   printf '%s.' "${network%.*}"
 }
 
-echo "家庭旁路交互式首次安装"
-echo "仅写入本机私密配置，随后调用带备份和验证的安装器。"
+if (( web_setup )); then
+  echo "家庭旁路一键安装"
+  echo "先配置本机启动参数，安装后在局域网网页向导中填写 RouterOS 和管理页账号。"
+else
+  echo "家庭旁路交互式首次安装"
+  echo "仅写入本机私密配置，随后调用带备份和验证的安装器。"
+fi
 echo "不会自动写入 RouterOS、导入机场订阅或接管任何客户端。"
 echo
 ip -br -4 addr || true
@@ -65,11 +76,19 @@ ask FAMILY_ROUTER_IP "RouterOS LAN 地址" "${FAMILY_LAN_PREFIX}1"
 ask FAMILY_CAPTURE_INTERFACE "承载 LAN 流量的桥接口" "kvmbr0"
 ask FAMILY_HOMEKIT_ROUTE_INTERFACE "HomeKit 本地直连接口" "$FAMILY_CAPTURE_INTERFACE"
 ask FAMILY_DOCKER_ROOT "SSD 持久化目录" "/var/lib/family-proxy/docker"
-ask ROUTER_HOST "RouterOS API 地址" "$FAMILY_ROUTER_IP"
-ask ROUTER_USER "RouterOS API 用户"
-ask_secret ROUTER_PASSWORD "RouterOS API 密码"
-ask UI_USERNAME "管理页用户名" "admin"
-ask_secret UI_PASSWORD "管理页密码"
+if (( web_setup )); then
+  ROUTER_HOST=$FAMILY_ROUTER_IP
+  ROUTER_USER=setup
+  ROUTER_PASSWORD=
+  UI_USERNAME=setup
+  UI_PASSWORD=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
+else
+  ask ROUTER_HOST "RouterOS API 地址" "$FAMILY_ROUTER_IP"
+  ask ROUTER_USER "RouterOS API 用户"
+  ask_secret ROUTER_PASSWORD "RouterOS API 密码"
+  ask UI_USERNAME "管理页用户名" "admin"
+  ask_secret UI_PASSWORD "管理页密码"
+fi
 
 install -d -m 700 /etc/family-proxy-ui
 umask 077
@@ -93,15 +112,32 @@ umask 077
   printf 'MOSDNS_API_URL=http://127.0.0.1:9099\n'
   printf 'FAMILY_GEODATA_PROXY=http://127.0.0.1:7890\n'
   printf 'MIHOMO_GEODATA_AUTO_UPDATE=false\n'
+  printf 'SETUP_PENDING=%s\n' "$([[ $web_setup -eq 1 ]] && echo true || echo false)"
 } >"$config"
 chmod 600 "$config"
 unset ROUTER_PASSWORD UI_PASSWORD
+
+setup_token=
+if (( web_setup )); then
+  setup_token=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
+  setup_state=/etc/family-proxy-ui/setup-state.json
+  printf '{"pending":true,"token":"%s","version":1}\n' "$setup_token" >"$setup_state"
+  chmod 600 "$setup_state"
+fi
 
 echo "已写入私密配置：$config"
 "$repo_dir/scripts/install-server.sh"
 "$repo_dir/scripts/install-mihomo-container.sh"
 "$repo_dir/scripts/install-server.sh" --start
-"$repo_dir/scripts/verify-server.sh"
+
+if (( web_setup )); then
+  echo
+  echo "基础服务已启动。请在同一局域网设备打开以下一次性地址完成首次设置："
+  echo "http://$FAMILY_PROXY_IP:18088/?token=$setup_token"
+  echo "完成向导后再运行：sudo $repo_dir/scripts/verify-server.sh"
+else
+  "$repo_dir/scripts/verify-server.sh"
+fi
 
 echo
 echo "基础部署完成。下一步："

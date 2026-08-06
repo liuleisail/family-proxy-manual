@@ -24,6 +24,14 @@ sudo ./scripts/bootstrap-interactive.sh
 
 引导脚本会询问 LAN、旁路主机 IP、LAN 桥接口、SSD 数据目录、RouterOS API 与管理页凭据，生成仅本机可读的 `router.env`，然后执行控制平面安装、基础 Mihomo 容器创建、服务启动及 `verify-server.sh`。它拒绝覆盖已有 `router.env` 或同名 Mihomo 容器；已有部署请使用升级流程。
 
+如果希望像系统初始设置一样在浏览器中填写敏感配置，可使用一键安装入口：
+
+```bash
+sudo ./scripts/install-one-click.sh
+```
+
+它先在终端收集 LAN、旁路 IP、接口和持久化目录，随后安装基础服务并打印一次性向导地址。向导只允许 LAN 客户端访问，令牌完成一次提交后立即失效；RouterOS API 密码只写入权限为 `600` 的本机配置，管理页密码直接转换为 PBKDF2 哈希。完成页面向导后运行 `sudo ./scripts/verify-server.sh` 做完整核查。旧的 `bootstrap-interactive.sh` 仍保留为全量终端安装方式。
+
 该脚本不会自动写 RouterOS、占用 53 端口、覆盖已有 MosDNS、导入订阅或接管客户端。完成后仍应按本文第 4 节审阅 RouterOS 模板，并按实际情况对接既有 MosDNS。这些网络边界不应被封装进通用 Docker 镜像。
 
 ### 手工填写配置
