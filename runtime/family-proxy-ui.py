@@ -3533,7 +3533,7 @@ PAGE = PAGE.replace(
     '<a class="active" href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav>',
     1,
 )
-PAGE = PAGE.replace('</style>', '@media(max-width:760px){.nav{grid-template-columns:repeat(6,1fr)}}</style>', 1)
+PAGE = PAGE.replace('</style>', '@media(max-width:760px){.nav{grid-template-columns:repeat(5,1fr)}}</style>', 1)
 RULES_PAGE = RULES_PAGE.replace(
     '<a href="/">设备</a><a class="active" href="/rules">规则</a><a href="/airport/">机场与候选池</a><a href="/dns/">DNS</a>',
     '<a href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a class="active" href="/rules">规则</a><a href="/mihomo-maintenance">维护</a>',
@@ -3546,7 +3546,12 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     '<nav class="nav"><a class="active" href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav>',
-    '<nav class="nav"><a class="active" href="/legacy">原管理界面</a><a href="/">新版控制台</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav>',
+    '<nav class="nav"><a class="active" href="/legacy">原管理界面</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav><a class="topbar-console-switch" href="/">新版控制台</a>',
+    1,
+)
+PAGE = PAGE.replace(
+    '</style></head>',
+    '.topbar-console-switch{display:inline-flex;align-items:center;min-height:36px;margin-left:auto;padding:0 13px;border:1px solid #48484a;border-radius:7px;background:#1c1c1e;color:#f5f5f7;text-decoration:none;font-size:13px;font-weight:650;white-space:nowrap}.topbar-console-switch:hover{background:#2c2c2e;border-color:#636366}@media(max-width:760px){.topbar-console-switch{align-self:flex-end}}</style></head>',
     1,
 )
 
