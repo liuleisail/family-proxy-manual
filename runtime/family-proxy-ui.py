@@ -31,6 +31,7 @@ CONFIG_PATH = Path("/etc/family-proxy-ui/router.env")
 GATEWAY_SECRET_PATH = Path("/etc/family-proxy-ui/gateway.secret")
 MANAGED_IPS_PATH = Path("/etc/family-proxy-ui/managed-ips")
 DEVICE_PREFS_PATH = Path("/etc/family-proxy-ui/device-preferences.json")
+SETUP_STATE_PATH = Path("/etc/family-proxy-ui/setup-state.json")
 PAGE_LAYOUT_PREFS_PATH = Path("/etc/family-proxy-ui/page-layout-preferences.json")
 HOMEKIT_ROUTE_STATE_PATH = Path("/var/lib/family-proxy/homekit-direct-routes.json")
 ALERT_CONFIG_PATH = Path("/etc/family-proxy-ui/mihomo-alert.json")
@@ -62,6 +63,10 @@ SHARED_LIST = "family_mihomo_devices"
 SHARED_TABLE = "family_mihomo_shared"
 SHARED_CONN_MARK = "family_mihomo_conn"
 SHARED_TAG = "family-mihomo-shared"
+DEVICE_ICON_KEYS = frozenset({
+    "phone", "laptop", "desktop", "tablet", "tv", "camera",
+    "gamepad", "speaker", "router", "home", "watch", "server",
+})
 def load_csrf_token():
     try:
         token = CSRF_TOKEN_PATH.read_text(encoding="utf-8").strip()
@@ -1597,7 +1602,10 @@ def normalize_mac(value):
 
 
 def load_device_preferences():
-    defaults = {"aliases": {}, "favorites": [], "homekit_direct": [], "wireguard_aliases": {}}
+    defaults = {
+        "aliases": {}, "favorites": [], "homekit_direct": [],
+        "wireguard_aliases": {}, "device_icons": {},
+    }
     if not DEVICE_PREFS_PATH.exists():
         return defaults
     try:
@@ -1608,11 +1616,14 @@ def load_device_preferences():
     favorites = data.get("favorites", [])
     homekit_direct = data.get("homekit_direct", [])
     wireguard_aliases = data.get("wireguard_aliases", {})
+    device_icons = data.get("device_icons", {})
     if (not isinstance(aliases, dict) or not isinstance(favorites, list)
-            or not isinstance(homekit_direct, list) or not isinstance(wireguard_aliases, dict)):
+            or not isinstance(homekit_direct, list) or not isinstance(wireguard_aliases, dict)
+            or not isinstance(device_icons, dict)):
         raise RouterError("设备名称与常用名单格式错误")
     clean_aliases = {}
     clean_wireguard_aliases = {}
+    clean_device_icons = {}
     clean_favorites = set()
     clean_homekit_direct = set()
     for mac, alias in aliases.items():
@@ -1637,11 +1648,19 @@ def load_device_preferences():
             clean_homekit_direct.add(normalize_mac(mac))
         except RouterError:
             continue
+    for mac, icon in device_icons.items():
+        try:
+            normalized = normalize_mac(mac)
+        except RouterError:
+            continue
+        if isinstance(icon, str) and icon in DEVICE_ICON_KEYS:
+            clean_device_icons[normalized] = icon
     return {
         "aliases": clean_aliases,
         "favorites": sorted(clean_favorites),
         "homekit_direct": sorted(clean_homekit_direct),
         "wireguard_aliases": clean_wireguard_aliases,
+        "device_icons": clean_device_icons,
     }
 
 
@@ -1903,7 +1922,7 @@ def homekit_direct_route_sync():
     }
 
 
-def update_device_preference(mac, alias=None, favorite=None, homekit_direct=None):
+def update_device_preference(mac, alias=None, favorite=None, homekit_direct=None, icon=None):
     mac = normalize_mac(mac)
     with RouterOS() as api:
         lease = next((item for item in api.print("/ip/dhcp-server/lease")
@@ -1940,6 +1959,10 @@ def update_device_preference(mac, alias=None, favorite=None, homekit_direct=None
             else:
                 direct_macs.discard(mac)
         data["homekit_direct"] = sorted(direct_macs)
+        if icon is not None:
+            if not isinstance(icon, str) or icon not in DEVICE_ICON_KEYS:
+                raise RouterError("设备图标不受支持")
+            data["device_icons"][mac] = icon
         save_device_preferences(data)
     ip = lease.get("address", "")
     try:
@@ -1954,13 +1977,30 @@ def update_device_preference(mac, alias=None, favorite=None, homekit_direct=None
             save_device_preferences(rollback)
         raise
     audit("device_preference", ip, "success",
-          f"mac={mac} favorite={favorite} homekit_direct={homekit_direct} alias_changed={alias is not None}")
+          f"mac={mac} favorite={favorite} homekit_direct={homekit_direct} "
+          f"icon={icon or ''} alias_changed={alias is not None}")
     message = "设备信息已保存"
     if homekit_direct is not None:
         message = "已启用 HomeKit 本地直连" if homekit_direct else "已移除 HomeKit 本地直连"
         if direct_status and direct_status["missing"]:
             message += "；等待 DHCP 租约出现后生效"
-    return {"message": message, "mac": mac, "homekit": direct_status}
+    return {"message": message, "mac": mac, "homekit": direct_status, "icon": icon}
+
+
+def setup_status():
+    try:
+        state = json.loads(SETUP_STATE_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"pending": False}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RouterError("首次配置状态读取失败") from exc
+    if state.get("pending") is not True:
+        return {"pending": False}
+    token = str(state.get("token") or "").strip()
+    return {
+        "pending": bool(token),
+        "url": "/setup?" + urlencode({"token": token}) if token else "/setup",
+    }
 
 
 def update_wireguard_alias(key, alias):
@@ -2436,6 +2476,7 @@ def list_devices():
                 "name": preferences["aliases"].get(mac) or router_name,
                 "router_name": router_name,
                 "custom_name": mac in preferences["aliases"],
+                "icon": preferences["device_icons"].get(mac, "phone"),
                 "status": lease.get("status", "unknown"),
                 "static": lease.get("dynamic") != "true",
                 "managed": is_managed,
@@ -3790,6 +3831,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/csrf":
             self.reply(HTTPStatus.OK, {"csrf": CSRF_TOKEN})
             return
+        if path == "/api/setup-status":
+            try:
+                self.reply(HTTPStatus.OK, setup_status())
+            except RouterError as exc:
+                self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+            return
         if path == "/api/page-layout":
             try:
                 self.reply(HTTPStatus.OK, load_page_layout_preferences())
@@ -3853,6 +3900,7 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("mac", ""), body.get("alias") if "alias" in body else None,
                     body.get("favorite") if "favorite" in body else None,
                     body.get("homekit_direct") if "homekit_direct" in body else None,
+                    body.get("icon") if "icon" in body else None,
                 ))
             elif path == "/api/wireguard/preference":
                 self.reply(HTTPStatus.OK, update_wireguard_alias(body.get("key", ""), body.get("alias", "")))
