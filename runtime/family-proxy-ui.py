@@ -3550,7 +3550,7 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     '</style></head>',
-    '.topbar-console-switch{display:inline-flex;align-items:center;min-height:36px;margin-left:auto;padding:0 13px;border:1px solid #48484a;border-radius:7px;background:#1c1c1e;color:#f5f5f7;text-decoration:none;font-size:13px;font-weight:650;white-space:nowrap}.topbar-console-switch:hover{background:#2c2c2e;border-color:#636366}@media(max-width:760px){.topbar-console-switch{align-self:flex-end}}</style></head>',
+    '.topbar-console-switch{display:inline-flex;align-items:center;min-height:36px;margin-left:auto;padding:0 13px;border:1px solid #48484a;border-radius:7px;background:#1c1c1e;color:#f5f5f7;text-decoration:none;font-size:13px;font-weight:650;white-space:nowrap}.topbar-console-switch:hover{background:#2c2c2e;border-color:#636366}.topbar-inner{position:relative}.nav{position:absolute;left:50%;transform:translateX(-50%)}@media(max-width:760px){.topbar-console-switch{align-self:flex-end}.topbar-inner{position:static}.nav{position:static;transform:none}}</style></head>',
     1,
 )
 
