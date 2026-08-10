@@ -31,6 +31,7 @@ checks = (
     (18093, '/api/health'),
     (18093, '/api/system/status'),
     (18093, '/api/wireguard/status'),
+    (18093, '/api/wireguard/remote-access'),
     (18093, '/api/captures'),
     (18090, '/api/state'),
 )
@@ -63,6 +64,15 @@ for port, path in checks:
             for interface in payload['interfaces']:
                 if forbidden & interface.keys() or any(forbidden & peer.keys() for peer in interface.get('peers', [])):
                     raise SystemExit('WireGuard status exposes key material')
+        if path == '/api/wireguard/remote-access':
+            if not {'mode', 'supported', 'clients'} <= payload.keys():
+                raise SystemExit('remote WireGuard payload is incomplete')
+            if payload.get('supported') and payload.get('interface'):
+                if not {'name', 'listen_port', 'network'} <= payload['interface'].keys():
+                    raise SystemExit('remote WireGuard interface payload is incomplete')
+            forbidden = {'public-key', 'private-key', 'preshared-key', 'config'}
+            if forbidden & payload.keys():
+                raise SystemExit('remote WireGuard status exposes key material')
         if path == '/api/captures':
             expected = {'file_bytes': 50_000_000, 'total_bytes': 200_000_000,
                         'retention_seconds': 86_400}
