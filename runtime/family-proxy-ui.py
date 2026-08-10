@@ -46,10 +46,9 @@ MIHOMO_UPGRADE_SCRIPT = "/usr/local/sbin/family-mihomo-upgrade"
 RULE_BACKUP_DIR = MIHOMO_CONFIG_PATH.parent / "rule-backups"
 RULES_TEMPLATE_PATH = Path("/opt/family-proxy-ui/rules.html")
 FRONTEND_ROOT = Path(os.environ.get("FAMILY_FRONTEND_ROOT", "/opt/family-proxy-ui/frontend"))
-if not FRONTEND_ROOT.exists():
-    local_frontend = Path(__file__).resolve().parent.parent / "frontend/dist"
-    if local_frontend.exists():
-        FRONTEND_ROOT = local_frontend
+local_frontend = Path(__file__).resolve().parent.parent / "frontend/dist"
+if not (FRONTEND_ROOT / "index.html").is_file() and (local_frontend / "index.html").is_file():
+    FRONTEND_ROOT = local_frontend
 FRONTEND_INDEX_PATH = FRONTEND_ROOT / "index.html"
 MIHOMO_GROUPS = ("AI", "Youtube", "Telegram", "Google", "Others")
 LAN = ipaddress.ip_network("__FAMILY_LAN_CIDR__")
@@ -3748,12 +3747,11 @@ class Handler(BaseHTTPRequestHandler):
             if FRONTEND_INDEX_PATH.is_file():
                 self.send_frontend_file("index.html")
                 return
-            data = PAGE.replace("__CSRF__", CSRF_TOKEN).encode()
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+            data = "新版控制台资源未安装，请先部署 frontend/dist。".encode("utf-8")
+            self.send_response(HTTPStatus.SERVICE_UNAVAILABLE)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Frame-Options", "DENY")
             self.end_headers()
             self.wfile.write(data)
             return

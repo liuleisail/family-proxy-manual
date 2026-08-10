@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch, type Component } from 'vue'
 import {
-  Activity, AlertTriangle, ArrowUpRight, Camera, Check, CheckCircle2, ChevronRight,
+  Activity, AlertTriangle, ArrowDown, ArrowUp, ArrowUpRight, Camera, Check, CheckCircle2, ChevronRight,
   CircleHelp, Cpu, Gamepad2, Gauge, Globe2, HardDrive, HeartPulse, House,
   Laptop, LayoutDashboard, Menu, Monitor, Moon, MoreHorizontal, Network, Pencil,
   Plus, RefreshCw, Router, Search, Server, Settings2, ShieldCheck,
   SlidersHorizontal, Smartphone, Sparkles, Speaker, Sun, Tablet, Thermometer,
-  Tv, Users, Watch, Wifi, X, Zap,
+  Trash2, Tv, Users, Watch, Wifi, X, Zap,
 } from '@lucide/vue'
+
+type JsonRecord = Record<string, any>
 
 type Device = {
   ip: string
@@ -67,14 +69,21 @@ type StatusPayload = {
   kernel?: string
 }
 
-type WireGuardPayload = { interfaces?: Array<{ name?: string; peers?: Array<{ latest_handshake?: number }> }> }
+type WireGuardPayload = { interfaces?: Array<{ name?: string; peers?: Array<{ name?: string; public_key?: string; endpoint?: string; latest_handshake?: number; rx?: number; tx?: number }> }> }
 type UpdatePayload = { state?: string; status?: string; current?: string; latest?: string; current_version?: string; latest_version?: string; checked_at?: number; message?: string }
 type PlatformPayload = { checked_at?: number; routeros?: UpdatePayload; z4pro?: UpdatePayload; mihomo?: UpdatePayload; mosdns?: UpdatePayload }
+type DnsLog = JsonRecord & { query_name?: string; client_ip?: string; query_type?: string; duration_ms?: number; response_code?: string; query_time?: string }
+type AirportSource = { slot: string; label: string; imported?: boolean; nodes?: number; updated_at?: string }
+type AirportState = { slots?: AirportSource[]; nodes?: Array<{ name?: string; source?: string; label?: string }>; pools?: Record<string, string[]>; settings?: Record<string, JsonRecord>; tests?: JsonRecord; suggestions?: JsonRecord; derived_exits?: JsonRecord }
+type RulePayload = { rules?: string[]; version?: string; policies?: string[]; protected?: string[]; rule_sets?: JsonRecord[]; rule_sets_version?: string; rule_card_labels?: Record<string, string>; rule_card_labels_version?: string }
 
 const views = [
   { id: 'overview', label: '总览', caption: '网络概况', icon: LayoutDashboard },
   { id: 'members', label: '接管设备', caption: '设备与策略', icon: Users },
   { id: 'traffic', label: '流量观察', caption: '实时快照', icon: Activity },
+  { id: 'dns', label: 'DNS 管理', caption: '解析与数据', icon: Globe2 },
+  { id: 'airport', label: '机场候选池', caption: '订阅与出口', icon: Server },
+  { id: 'rules', label: '规则配置', caption: '分流与策略', icon: SlidersHorizontal },
   { id: 'setup', label: '首次配置', caption: '安装与状态', icon: Sparkles },
   { id: 'ops', label: '系统维护', caption: '运行与更新', icon: Settings2 },
 ]
@@ -93,6 +102,10 @@ const wireguard = ref<WireGuardPayload>({})
 const mihomo = ref<Record<string, unknown>>({})
 const updateStatus = ref<UpdatePayload>({})
 const platformStatus = ref<PlatformPayload>({})
+const mosdnsStatus = ref<JsonRecord>({})
+const alertConfig = ref<JsonRecord>({})
+const alertToken = ref('')
+const alertChat = ref('')
 const searchQuery = ref('')
 const filter = ref('all')
 const renameTarget = ref<Device | null>(null)
@@ -100,6 +113,58 @@ const renameDraft = ref('')
 const iconDraft = ref('phone')
 let poller: number | undefined
 let toastTimer: number | undefined
+const dnsTab = ref('overview')
+const dnsStats = ref<JsonRecord>({})
+const dnsWindows = ref<JsonRecord>({})
+const dnsDomains = ref<JsonRecord[]>([])
+const dnsClients = ref<JsonRecord[]>([])
+const dnsEffective = ref<JsonRecord[]>([])
+const dnsSlowest = ref<JsonRecord[]>([])
+const dnsDomestic = ref<JsonRecord>({})
+const dnsForeign = ref<JsonRecord>({})
+const dnsPerformance = ref<JsonRecord>({})
+const dnsLogs = ref<DnsLog[]>([])
+const dnsLogQuery = ref('')
+const dnsLogFilter = ref('all')
+const dnsCapture = ref<JsonRecord>({})
+const dnsCapacity = ref<JsonRecord>({})
+const dnsRuleData = ref<JsonRecord>({})
+const dnsAdblock = ref<JsonRecord>({})
+const dnsRuleUpdate = ref<JsonRecord>({})
+const dnsVerify = ref<JsonRecord>({})
+const dnsUpstreamsOpen = ref(false)
+const dnsDomesticDraft = ref('')
+const dnsForeignDraft = ref('')
+const dnsAllowlistOpen = ref(false)
+const dnsAllowlistDraft = ref('')
+
+const airportTab = ref('sources')
+const airportState = ref<AirportState>({})
+const airportPools = ref<Record<string, string[]>>({})
+const airportSettings = ref<Record<string, JsonRecord>>({})
+const airportUrls = ref<Record<string, string>>({})
+const airportStatus = ref<JsonRecord>({})
+const airportProbes = ref<JsonRecord>({})
+const airportFilter = ref('')
+const airportPoolEditor = ref('')
+const airportPoolMode = ref('fallback')
+const airportCsrf = ref('')
+
+const rulesPayload = ref<RulePayload>({ rules: [] })
+const ruleDraft = ref<string[]>([])
+const ruleDirty = ref(false)
+const ruleAdvanced = ref(false)
+const rulePreviewTarget = ref('')
+const rulePreview = ref<JsonRecord | null>(null)
+const ruleSetEditorOpen = ref(false)
+const ruleSetName = ref('')
+const ruleSetUrls = ref('')
+const ruleSetPolicy = ref('Proxy-Auto')
+const ruleSetPriority = ref('normal')
+const ruleSetInterval = ref('86400')
+const ruleSetBehavior = ref('domain')
+const ruleSetFormat = ref('mrs')
+const ruleSetEditorIndex = ref(-1)
 
 function setTheme(value: boolean) {
   isDark.value = value
@@ -115,6 +180,7 @@ function selectView(value: string) {
   const next = normalizeView(value)
   activeView.value = next
   if (window.location.hash !== `#${next}`) window.location.hash = next
+  void loadFeatureView(next)
 }
 
 function formatBytes(value?: number) {
@@ -153,6 +219,69 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const body = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(body.error || `请求失败（${response.status}）`)
   return body as T
+}
+
+async function serviceApi<T>(path: string, options: RequestInit = {}, serviceCsrf = ''): Promise<T> {
+  const headers = new Headers(options.headers)
+  headers.set('Accept', 'application/json')
+  if (options.body) headers.set('Content-Type', 'application/json')
+  if ((options.method || 'GET').toUpperCase() !== 'GET' && serviceCsrf) headers.set('X-CSRF', serviceCsrf)
+  const response = await fetch(path, { ...options, headers, cache: 'no-store' })
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(body.error || body.message || `请求失败（${response.status}）`)
+  return body as T
+}
+
+async function dnsApi<T>(path: string, options: RequestInit = {}) {
+  const headers = new Headers(options.headers)
+  headers.set('X-Requested-With', 'family-dns')
+  return serviceApi<T>(`/dns${path}`, { ...options, headers })
+}
+
+async function dnsMaintenanceApi<T>(path: string, options: RequestInit = {}) {
+  return serviceApi<T>(`/dns/maintenance-api${path}`, options)
+}
+
+async function ensureAirportCsrf() {
+  if (airportCsrf.value) return airportCsrf.value
+  const response = await fetch('/airport/', { cache: 'no-store' })
+  const html = await response.text()
+  const match = html.match(/(?:const|let)\s+csrf\s*=\s*['"]([^'"]+)/)
+  if (!response.ok || !match) throw new Error('机场服务安全状态不可用，请刷新页面后重试')
+  airportCsrf.value = match[1]
+  return airportCsrf.value
+}
+
+async function airportApi<T>(path: string, options: RequestInit = {}) {
+  const method = (options.method || 'GET').toUpperCase()
+  return serviceApi<T>(`/airport${path}`, options, method === 'GET' ? '' : await ensureAirportCsrf())
+}
+
+function arrayFrom(value: unknown, keys: string[] = []) {
+  if (Array.isArray(value)) return value as JsonRecord[]
+  if (value && typeof value === 'object') {
+    for (const key of keys) {
+      const nested = (value as JsonRecord)[key]
+      if (Array.isArray(nested)) return nested as JsonRecord[]
+      if (nested && typeof nested === 'object') return Object.values(nested) as JsonRecord[]
+    }
+  }
+  return []
+}
+
+function textValue(value: unknown, fallback = '不可用') {
+  return value === undefined || value === null || value === '' ? fallback : String(value)
+}
+
+function timeValue(value: unknown) {
+  if (!value) return '尚无记录'
+  const date = new Date(typeof value === 'number' ? value : String(value))
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false })
+}
+
+function msValue(value: unknown) {
+  const amount = Number(value || 0)
+  return `${amount < 10 ? amount.toFixed(2) : amount.toFixed(1)} ms`
 }
 
 function normalizeDevicePayload(payload: DevicePayload): DevicePayload {
@@ -270,6 +399,663 @@ async function checkPlatform() {
   await action('platform-check', '/api/platform/updates/check', {}, '设备系统更新检查已启动')
 }
 
+async function loadDnsOverview() {
+  const results = await Promise.allSettled([
+    dnsApi<JsonRecord>('/api/v2/audit/stats'),
+    dnsApi<JsonRecord>('/api/v2/audit/stats/windows'),
+    dnsApi<JsonRecord[]>('/api/v2/audit/rank/domain?limit=6'),
+    dnsApi<JsonRecord[]>('/api/v2/audit/rank/client?limit=6'),
+    dnsApi<JsonRecord[]>('/api/v2/audit/rank/effective?limit=6'),
+    dnsApi<JsonRecord[]>('/api/v2/audit/rank/slowest?limit=6'),
+    dnsApi<JsonRecord>('/api/v1/upstream/runtime/domestic'),
+    dnsApi<JsonRecord>('/api/v1/upstream/runtime/foreign'),
+    dnsMaintenanceApi<JsonRecord>('/metrics'),
+  ])
+  const [stats, windows, domains, clients, effective, slowest, domestic, foreign, performance] = results
+  if (stats.status === 'fulfilled') dnsStats.value = stats.value
+  if (windows.status === 'fulfilled') dnsWindows.value = windows.value
+  if (domains.status === 'fulfilled') dnsDomains.value = arrayFrom(domains.value, ['items', 'domains'])
+  if (clients.status === 'fulfilled') dnsClients.value = arrayFrom(clients.value, ['items', 'clients'])
+  if (effective.status === 'fulfilled') dnsEffective.value = arrayFrom(effective.value, ['items'])
+  if (slowest.status === 'fulfilled') dnsSlowest.value = arrayFrom(slowest.value, ['items'])
+  if (domestic.status === 'fulfilled') dnsDomestic.value = domestic.value
+  if (foreign.status === 'fulfilled') dnsForeign.value = foreign.value
+  if (performance.status === 'fulfilled') dnsPerformance.value = performance.value
+  if (results.every((item) => item.status === 'rejected')) notify('DNS 概览暂时无法读取')
+}
+
+async function loadDnsLogs() {
+  try {
+    const result = await dnsApi<JsonRecord>('/api/v2/audit/logs?limit=500')
+    dnsLogs.value = arrayFrom(result, ['logs', 'items']) as DnsLog[]
+  } catch (error) {
+    notify(error instanceof Error ? `DNS 日志读取失败：${error.message}` : 'DNS 日志读取失败')
+  }
+}
+
+async function loadDnsData() {
+  const results = await Promise.allSettled([
+    dnsApi<JsonRecord>('/api/v1/audit/status'),
+    dnsApi<JsonRecord>('/api/v1/audit/capacity'),
+    dnsApi<JsonRecord | JsonRecord[]>('/plugins/geosite_cn/config'),
+    dnsApi<JsonRecord | JsonRecord[]>('/plugins/geosite_no_cn/config'),
+    dnsApi<JsonRecord | JsonRecord[]>('/plugins/geoip_cn/config'),
+    dnsApi<JsonRecord[]>('/plugins/adguard/rules'),
+    dnsMaintenanceApi<JsonRecord>('/rules/status'),
+    dnsMaintenanceApi<JsonRecord>('/adblock/status'),
+    dnsMaintenanceApi<JsonRecord>('/verify/status'),
+  ])
+  const [capture, capacity, cn, noCn, cnIp, adblockRules, rules, adblock, verify] = results
+  if (capture.status === 'fulfilled') dnsCapture.value = capture.value
+  if (capacity.status === 'fulfilled') dnsCapacity.value = capacity.value
+  if (cn.status === 'fulfilled' || noCn.status === 'fulfilled' || cnIp.status === 'fulfilled') {
+    dnsRuleData.value = {
+      domestic: cn.status === 'fulfilled' ? (Array.isArray(cn.value) ? cn.value[0] : cn.value) : {},
+      foreign: noCn.status === 'fulfilled' ? (Array.isArray(noCn.value) ? noCn.value[0] : noCn.value) : {},
+      ip: cnIp.status === 'fulfilled' ? (Array.isArray(cnIp.value) ? cnIp.value[0] : cnIp.value) : {},
+      extras: adblockRules.status === 'fulfilled' ? adblockRules.value : [],
+    }
+  }
+  if (rules.status === 'fulfilled') dnsRuleUpdate.value = rules.value
+  if (adblock.status === 'fulfilled') dnsAdblock.value = adblock.value
+  if (verify.status === 'fulfilled') dnsVerify.value = verify.value
+}
+
+function dnsRouteName(log: DnsLog) {
+  const raw = `${log.effective_tag || ''} ${log.domain_set || ''} ${log.matched_rule_source || ''}`.toLowerCase()
+  if (raw.includes('foreign') || raw.includes('nocn') || raw.includes('代理')) return '代理'
+  if (raw.includes('domestic') || raw.includes('cn') || raw.includes('直连') || raw.includes('白名单')) return '直连'
+  return textValue(log.effective_tag, '默认')
+}
+
+function dnsUpstreamText(data: JsonRecord) {
+  const items = arrayFrom(data, ['runtime_targets', 'targets', 'upstreams', 'items'])
+  return items.map((item) => textValue(item.addr || item.address || item.url || item.name)).join('、') || '已配置'
+}
+
+function dnsFirst(data: JsonRecord, key: string) {
+  const value = data[key]
+  return Number(value || 0)
+}
+
+function dnsWindow(key: string) {
+  const items = arrayFrom(dnsWindows.value, ['items'])
+  return items.find((item) => item.key === key) || {}
+}
+
+async function openDnsUpstreams() {
+  if (!dnsDomesticDraft.value) dnsDomesticDraft.value = arrayFrom(dnsDomestic.value, ['runtime_targets', 'targets', 'upstreams', 'items']).map((item) => `${item.addr || item.address || item.url || ''}${item.dial_addr ? ` | ${item.dial_addr}` : ''}`).join('\n')
+  if (!dnsForeignDraft.value) dnsForeignDraft.value = arrayFrom(dnsForeign.value, ['runtime_targets', 'targets', 'upstreams', 'items']).map((item) => `${item.addr || item.address || item.url || ''}${item.dial_addr ? ` | ${item.dial_addr}` : ''}`).join('\n')
+  dnsUpstreamsOpen.value = true
+}
+
+async function saveDnsUpstreams() {
+  if (!dnsDomesticDraft.value.trim() || !dnsForeignDraft.value.trim()) {
+    notify('国内和国外至少各保留一个上游服务器')
+    return
+  }
+  busy.value = 'dns-upstreams'
+  try {
+    await dnsMaintenanceApi('/upstreams', { method: 'POST', body: JSON.stringify({ domestic: dnsDomesticDraft.value, foreign: dnsForeignDraft.value }) })
+    dnsUpstreamsOpen.value = false
+    notify('DNS 上游已保存并通过验证')
+    await loadDnsOverview()
+  } catch (error) {
+    notify(error instanceof Error ? error.message : 'DNS 上游保存失败')
+  } finally {
+    busy.value = ''
+  }
+}
+
+async function runDnsAction(path: string, message: string, payload: unknown = {}) {
+  try {
+    await dnsMaintenanceApi(path, { method: 'POST', body: JSON.stringify(payload) })
+    notify(message)
+    await loadDnsData()
+  } catch (error) {
+    notify(error instanceof Error ? error.message : 'DNS 操作失败')
+  }
+}
+
+async function updateDnsRules() {
+  await runDnsAction('/rules/update', '已开始下载并校验官方规则')
+}
+
+async function toggleDnsRuleAuto() {
+  const enabled = !Boolean(dnsRuleUpdate.value.config?.rule_auto_enabled)
+  await runDnsAction('/rules/auto', enabled ? '规则自动更新已开启' : '规则自动更新已关闭', { enabled })
+}
+
+async function setDnsAdblockMode(mode: string) {
+  if (mode === 'block' && !window.confirm('启用后，命中的广告和成人域名会返回 NXDOMAIN。继续吗？')) return
+  await runDnsAction('/adblock/mode', '正在切换过滤模式并执行验证', { mode })
+}
+
+async function updateDnsAdblock() {
+  await runDnsAction('/adblock/update', '已开始使用本地网络更新精简规则')
+}
+
+async function toggleDnsAdblockAuto() {
+  const enabled = !Boolean(dnsAdblock.value.auto_enabled)
+  await runDnsAction('/adblock/auto', enabled ? '精简过滤自动更新已开启' : '精简过滤自动更新已关闭', { enabled })
+}
+
+function openDnsAllowlist() {
+  dnsAllowlistDraft.value = String(dnsAdblock.value.allowlist || '')
+  dnsAllowlistOpen.value = true
+}
+
+async function saveDnsAllowlist() {
+  await runDnsAction('/adblock/allowlist', '放行名单已保存并通过验证', { value: dnsAllowlistDraft.value })
+  dnsAllowlistOpen.value = false
+}
+
+async function runDnsVerify(mode: string) {
+  if (mode === 'full' && !window.confirm('完整回归会清理 DNS 路由缓存，首次查询可能短暂变慢。继续吗？')) return
+  await runDnsAction('/verify/run', mode === 'full' ? '已开始完整 DNS 回归' : '已开始快速 DNS 检查', { mode })
+}
+
+async function flushDnsCaches() {
+  if (!window.confirm('确定清空 DNS 缓存吗？')) return
+  const tags = ['cache_all', 'cache_cn', 'cache_all_noleak', 'cache_cnmihomo', 'cache_google', 'cache_google_node', 'cache_node']
+  const results = await Promise.allSettled(tags.map((tag) => dnsApi(`/plugins/${tag}/flush`, { method: 'POST' })))
+  const ok = results.filter((item) => item.status === 'fulfilled').length
+  notify(ok ? `已清理 ${ok} 组 DNS 缓存` : 'DNS 缓存清理失败')
+}
+
+async function toggleDnsCapture() {
+  const active = Boolean(dnsCapture.value.capturing)
+  await dnsApi(`/api/v1/audit/${active ? 'stop' : 'start'}`, { method: 'POST' })
+  notify(active ? '已暂停查询记录采集' : '已开始查询记录采集')
+  await loadDnsData()
+}
+
+async function clearDnsLogs() {
+  if (!window.confirm('确定清空全部查询日志吗？此操作无法撤销。')) return
+  await dnsApi('/api/v1/audit/clear', { method: 'POST' })
+  dnsLogs.value = []
+  notify('查询日志已清空')
+  await loadDnsOverview()
+}
+
+async function loadAirportState() {
+  try {
+    const [state, catalog] = await Promise.all([
+      airportApi<AirportState>('/api/state'),
+      airportApi<AirportState>('/api/nodes'),
+    ])
+    const merged = { ...state, ...catalog, pools: state.pools || catalog.pools, settings: state.settings || catalog.settings }
+    airportState.value = merged
+    airportPools.value = Object.fromEntries(Object.entries(merged.pools || {}).map(([key, values]) => [key, [...values]]))
+    airportSettings.value = merged.settings || {}
+    return merged
+  } catch (error) {
+    notify(error instanceof Error ? `机场状态读取失败：${error.message}` : '机场状态读取失败')
+    return null
+  }
+}
+
+async function loadAirportRuntime() {
+  const results = await Promise.allSettled([
+    airportApi<JsonRecord>('/api/status'),
+    airportApi<JsonRecord>('/api/probes'),
+  ])
+  if (results[0].status === 'fulfilled') airportStatus.value = results[0].value
+  if (results[1].status === 'fulfilled') airportProbes.value = results[1].value
+}
+
+function airportMetric(node: string) {
+  const results = arrayFrom(airportState.value.tests, ['results'])
+  return results.find((item) => item.name === node) || {}
+}
+
+function airportFilteredNodes(pool: string) {
+  const query = airportFilter.value.trim().toLowerCase()
+  const used = new Set(airportPools.value[pool] || [])
+  return (airportState.value.nodes || []).filter((node) => !used.has(String(node.name || '')) && (!query || String(node.name || '').toLowerCase().includes(query)))
+}
+
+function addAirportNode(pool: string, node: string) {
+  if (!node) return
+  if ((airportPools.value[pool] || []).length >= 5) {
+    notify('每个候选池最多保留 5 个节点')
+    return
+  }
+  airportPools.value[pool] = [...(airportPools.value[pool] || []), node]
+}
+
+function selectAirportNode(pool: string, event: Event) {
+  const select = event.target as HTMLSelectElement
+  addAirportNode(pool, select.value)
+  select.value = ''
+}
+
+function historyText(value: unknown) {
+  const history = Array.isArray(value) ? value : []
+  return history.map((item) => `${number((item as JsonRecord).delay)} ms`).join(' · ') || '暂无记录'
+}
+
+async function probeAirportPool(name: string) {
+  try {
+    await airportApi('/api/pool-probe', { method: 'POST', body: JSON.stringify({ pool: name }) })
+    notify(`${name} 专项复测已启动`)
+    await loadAirportRuntime()
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '业务池复测失败')
+  }
+}
+
+function moveAirportNode(pool: string, index: number, delta: number) {
+  const values = [...(airportPools.value[pool] || [])]
+  const target = index + delta
+  if (target < 0 || target >= values.length) return
+  ;[values[index], values[target]] = [values[target], values[index]]
+  airportPools.value[pool] = values
+}
+
+function removeAirportNode(pool: string, index: number) {
+  const values = [...(airportPools.value[pool] || [])]
+  if (values.length <= 1) {
+    notify('候选池至少保留一个节点')
+    return
+  }
+  values.splice(index, 1)
+  airportPools.value[pool] = values
+}
+
+async function importAirport(slot: AirportSource) {
+  const url = (airportUrls.value[slot.slot] || '').trim()
+  if (!url) {
+    notify('请先填写原生 HTTPS 订阅地址')
+    return
+  }
+  busy.value = `airport-import-${slot.slot}`
+  try {
+    await airportApi('/api/import', { method: 'POST', body: JSON.stringify({ slot: slot.slot, url }) })
+    airportUrls.value[slot.slot] = ''
+    notify(`${slot.label} 已直连导入并完成校验`)
+    await loadAirportState()
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '订阅导入失败')
+  } finally {
+    busy.value = ''
+  }
+}
+
+async function clearAirportSource(slot: AirportSource) {
+  if (!window.confirm(`清空「${slot.label}」？当前生效候选池仍需保持可用。`)) return
+  try {
+    await airportApi('/api/remove', { method: 'POST', body: JSON.stringify({ slot: slot.slot }) })
+    notify(`${slot.label} 已清空`)
+    await loadAirportState()
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '机场来源清理失败')
+  }
+}
+
+async function addAirportSource() {
+  try {
+    const source = await airportApi<AirportSource>('/api/sources', { method: 'POST', body: '{}' })
+    airportUrls.value[source.slot] = ''
+    notify('已新增备用机场来源')
+    await loadAirportState()
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '新增机场来源失败')
+  }
+}
+
+async function removeAirportSource(slot: AirportSource) {
+  if (!window.confirm(`删除「${slot.label}」？若候选池仍引用它，系统会拒绝删除。`)) return
+  try {
+    await airportApi('/api/source-remove', { method: 'POST', body: JSON.stringify({ slot: slot.slot }) })
+    notify(`${slot.label} 已删除`)
+    await loadAirportState()
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '删除机场来源失败')
+  }
+}
+
+async function testAirportAll() {
+  busy.value = 'airport-test'
+  try {
+    const result = await airportApi<JsonRecord>('/api/test-all', { method: 'POST', body: '{}' })
+    notify(result.message || '稳定性测速已启动')
+    await loadAirportState()
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '稳定性测速失败')
+  } finally {
+    busy.value = ''
+  }
+}
+
+async function saveAirportPools() {
+  busy.value = 'airport-pools'
+  try {
+    await airportApi('/api/pools', { method: 'POST', body: JSON.stringify({ pools: airportPools.value }) })
+    notify('候选池已校验并生效')
+    await loadAirportState()
+    await loadAirportRuntime()
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '候选池应用失败')
+  } finally {
+    busy.value = ''
+  }
+}
+
+async function retestAirportPools() {
+  busy.value = 'airport-retest'
+  try {
+    await airportApi('/api/retest-apply', { method: 'POST', body: JSON.stringify({ pools: airportPools.value }) })
+    notify('候选池已复测并生效')
+    await loadAirportState()
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '候选池复测失败')
+  } finally {
+    busy.value = ''
+  }
+}
+
+async function rollbackAirportPools() {
+  if (!window.confirm('回退到上一版候选池并重新验证？')) return
+  try {
+    await airportApi('/api/rollback', { method: 'POST', body: '{}' })
+    notify('已验证并恢复上一版候选池')
+    await loadAirportState()
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '候选池回退失败')
+  }
+}
+
+function openAirportPoolEditor(pool: string) {
+  airportPoolEditor.value = pool
+  airportPoolMode.value = airportSettings.value[pool]?.type || 'fallback'
+}
+
+async function saveAirportPoolMode() {
+  const pool = airportPoolEditor.value
+  if (!pool) return
+  busy.value = 'airport-mode'
+  try {
+    const settings = { ...airportSettings.value, [pool]: { type: airportPoolMode.value } }
+    const result = await airportApi<JsonRecord>('/api/pool-settings', { method: 'POST', body: JSON.stringify({ settings }) })
+    airportSettings.value = result.settings || settings
+    airportPools.value = result.pools || airportPools.value
+    airportPoolEditor.value = ''
+    notify(`${pool} 已切换为${airportPoolMode.value === 'url-test' ? '自动测速' : airportPoolMode.value === 'select' ? '手动选择' : '故障切换'}`)
+    await loadAirportState()
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '候选池模式保存失败')
+  } finally {
+    busy.value = ''
+  }
+}
+
+async function loadRules() {
+  try {
+    const data = await api<RulePayload>('/api/rules')
+    rulesPayload.value = data
+    ruleDraft.value = [...(data.rules || [])]
+    ruleDirty.value = false
+  } catch (error) {
+    notify(error instanceof Error ? `规则读取失败：${error.message}` : '规则读取失败')
+  }
+}
+
+function ruleIsProtected(rule: string) {
+  return Boolean((rulesPayload.value.protected || []).includes(rule) || rule.toUpperCase().startsWith('MATCH,'))
+}
+
+function ruleParts(rule: string) {
+  const parts = rule.split(',')
+  return { type: parts[0] || 'DOMAIN-SUFFIX', value: parts[1] || '', policy: parts[2] || 'Others' }
+}
+
+function setRule(index: number, key: string, value: string) {
+  const parts = ruleParts(ruleDraft.value[index])
+  if (key === 'type') parts.type = value
+  if (key === 'value') parts.value = value
+  if (key === 'policy') parts.policy = value
+  ruleDraft.value[index] = `${parts.type},${parts.value},${parts.policy}`
+  ruleDirty.value = true
+}
+
+function setRuleFromEvent(index: number, key: string, event: Event) {
+  const target = event.target as HTMLInputElement | HTMLSelectElement
+  setRule(index, key, target.value)
+}
+
+function addRule(policy = 'Others') {
+  const matchIndex = ruleDraft.value.findIndex((rule) => rule.toUpperCase().startsWith('MATCH,'))
+  const index = matchIndex < 0 ? ruleDraft.value.length : matchIndex
+  ruleDraft.value.splice(index, 0, `DOMAIN-SUFFIX,example.com,${policy}`)
+  ruleDirty.value = true
+}
+
+function moveRule(index: number, delta: number) {
+  const target = index + delta
+  if (target < 0 || target >= ruleDraft.value.length || ruleIsProtected(ruleDraft.value[index]) || ruleDraft.value[target].toUpperCase().startsWith('MATCH,')) return
+  ;[ruleDraft.value[index], ruleDraft.value[target]] = [ruleDraft.value[target], ruleDraft.value[index]]
+  ruleDirty.value = true
+}
+
+function removeRule(index: number) {
+  if (ruleIsProtected(ruleDraft.value[index])) return
+  ruleDraft.value.splice(index, 1)
+  ruleDirty.value = true
+}
+
+function setRawRule(index: number, event: Event) {
+  ruleDraft.value[index] = (event.target as HTMLInputElement).value
+  ruleDirty.value = true
+}
+
+async function saveRules() {
+  if (!ruleDirty.value) return
+  if (!window.confirm(`应用当前 ${ruleDraft.value.length} 条代理规则和 ${(rulesPayload.value.rule_sets || []).length} 个规则集合？`)) return
+  busy.value = 'rules-save'
+  try {
+    const data = await api<RulePayload & { message?: string }>('/api/rules', {
+      method: 'POST',
+      body: JSON.stringify({
+        rules: ruleDraft.value,
+        version: rulesPayload.value.version,
+        rule_sets: rulesPayload.value.rule_sets,
+        rule_sets_version: rulesPayload.value.rule_sets_version,
+        rule_card_labels: rulesPayload.value.rule_card_labels,
+        rule_card_labels_version: rulesPayload.value.rule_card_labels_version,
+      }),
+    })
+    rulesPayload.value = data
+    ruleDraft.value = [...(data.rules || [])]
+    ruleDirty.value = false
+    notify(data.message || '规则已通过校验并生效')
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '规则应用失败')
+  } finally {
+    busy.value = ''
+  }
+}
+
+function openRuleSetEditor(index = -1) {
+  const current = index >= 0 ? rulesPayload.value.rule_sets?.[index] : undefined
+  const source = current?.sources?.[0] || {}
+  ruleSetEditorIndex.value = index
+  ruleSetName.value = current?.name || ''
+  ruleSetUrls.value = arrayFrom(current?.sources).map((item: JsonRecord) => item.url).join('\n')
+  ruleSetPolicy.value = current?.policy || rulesPayload.value.policies?.find((item) => item.includes('Proxy')) || 'Proxy-Auto'
+  ruleSetPriority.value = current?.priority || 'normal'
+  ruleSetInterval.value = String(current?.interval || 86400)
+  ruleSetBehavior.value = source.behavior || 'domain'
+  ruleSetFormat.value = source.format || 'mrs'
+  ruleSetEditorOpen.value = true
+}
+
+function addRuleSet() {
+  const name = ruleSetName.value.trim()
+  const urls = [...new Set(ruleSetUrls.value.split(/\n/).map((value) => value.trim()).filter(Boolean))]
+  if (!name || !urls.length || urls.some((url) => !/^https:\/\//i.test(url))) {
+    notify('规则集合需要名称和至少一条 HTTPS 地址')
+    return
+  }
+  const key = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || `set-${Date.now()}`
+  if (ruleSetBehavior.value === 'classical' && ruleSetFormat.value === 'mrs') {
+    notify('复合规则不能使用 MRS 格式')
+    return
+  }
+  const current = [...(rulesPayload.value.rule_sets || [])]
+  const existing = ruleSetEditorIndex.value >= 0 ? current[ruleSetEditorIndex.value] : undefined
+  const stableKey = existing?.key || key
+  const sources = urls.map((url, index) => ({ key: `${stableKey}-${index + 1}`, url, behavior: ruleSetBehavior.value, format: ruleSetFormat.value }))
+  const candidate = { key: stableKey, name, sources, policy: ruleSetPolicy.value, priority: ruleSetPriority.value, interval: Number(ruleSetInterval.value) }
+  if (ruleSetEditorIndex.value >= 0) current[ruleSetEditorIndex.value] = candidate
+  else current.push(candidate)
+  rulesPayload.value.rule_sets = current
+  ruleDirty.value = true
+  ruleSetEditorOpen.value = false
+  ruleSetEditorIndex.value = -1
+  notify(`${existing ? '规则集合已更新' : '规则集合已加入草稿'}，点击“校验并应用”后才会生效`)
+}
+
+function removeRuleSet(index: number) {
+  const sets = [...(rulesPayload.value.rule_sets || [])]
+  if (!window.confirm(`删除规则集合「${sets[index]?.name || '未命名'}」？`)) return
+  sets.splice(index, 1)
+  rulesPayload.value.rule_sets = sets
+  ruleDirty.value = true
+}
+
+function moveRuleSet(index: number, delta: number) {
+  const sets = [...(rulesPayload.value.rule_sets || [])]
+  const target = index + delta
+  if (target < 0 || target >= sets.length) return
+  ;[sets[index], sets[target]] = [sets[target], sets[index]]
+  rulesPayload.value.rule_sets = sets
+  ruleDirty.value = true
+}
+
+function ruleSetUrlsText(set: JsonRecord) {
+  return arrayFrom(set.sources).map((source: JsonRecord) => source.url).join(' · ')
+}
+
+function platformItem(key: string) {
+  return ((platformStatus.value as JsonRecord)[key] || {}) as UpdatePayload
+}
+
+function previewRule() {
+  const target = rulePreviewTarget.value.trim().replace(/^https?:\/\//i, '').split('/')[0].split(':')[0].toLowerCase()
+  if (!target) {
+    rulePreview.value = { tone: 'error', title: '无法预览', detail: '请输入域名或网址' }
+    return
+  }
+  let runtimeRules = 0
+  for (let index = 0; index < ruleDraft.value.length; index += 1) {
+    const raw = ruleDraft.value[index]
+    const model = ruleParts(raw)
+    const type = model.type.toUpperCase()
+    if (type === 'MATCH') {
+      rulePreview.value = { tone: runtimeRules ? 'runtime' : 'known', title: runtimeRules ? '需要 Mihomo 运行时判断' : '确定命中兜底规则', detail: `${target} 最终使用「${model.policy}」`, rule: `第 ${index + 1} 条：${raw}` }
+      return
+    }
+    const value = model.value.toLowerCase().replace(/^\*\./, '')
+    const matched = type === 'DOMAIN' ? target === value : type === 'DOMAIN-SUFFIX' ? (target === value || target.endsWith(`.${value}`)) : type === 'DOMAIN-KEYWORD' ? target.includes(value) : false
+    if (matched) {
+      rulePreview.value = { tone: runtimeRules ? 'runtime' : 'known', title: runtimeRules ? '可能命中此规则' : '确定命中此规则', detail: `${target} 将使用「${model.policy}」`, rule: `第 ${index + 1} 条：${raw}` }
+      return
+    }
+    if (['GEOSITE', 'GEOIP', 'IP-CIDR', 'IP-CIDR6'].includes(type)) runtimeRules += 1
+  }
+  rulePreview.value = { tone: 'runtime', title: '需要 Mihomo 运行时判断', detail: `${target} 未发现可由页面直接判断的域名规则`, rule: `共扫描 ${ruleDraft.value.length} 条规则` }
+}
+
+async function loadOpsFeature() {
+  const results = await Promise.allSettled([
+    dnsMaintenanceApi<JsonRecord>('/status'),
+    api<JsonRecord>('/api/alerts'),
+  ])
+  if (results[0].status === 'fulfilled') mosdnsStatus.value = results[0].value
+  if (results[1].status === 'fulfilled') alertConfig.value = results[1].value
+}
+
+async function saveAlerts() {
+  busy.value = 'alerts-save'
+  try {
+    await api('/api/alerts', {
+      method: 'POST',
+      body: JSON.stringify({
+        enabled: Boolean(alertConfig.value.enabled),
+        notify_recovery: alertConfig.value.notify_recovery !== false,
+        source_slots: alertConfig.value.source_slots || [],
+        token: alertToken.value.trim(),
+        chat_id: alertChat.value.trim(),
+      }),
+    })
+    alertToken.value = ''
+    alertChat.value = ''
+    notify('Telegram 告警设置已保存')
+    await loadOpsFeature()
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '告警设置保存失败')
+  } finally {
+    busy.value = ''
+  }
+}
+
+async function testAlerts() {
+  try {
+    const result = await api<JsonRecord>('/api/alerts/test', { method: 'POST', body: '{}' })
+    notify(result.message || '测试通知已发送')
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '测试通知发送失败')
+  }
+}
+
+function toggleAlertSource(slot: string) {
+  const selected = new Set((alertConfig.value.source_slots || []) as string[])
+  if (selected.has(slot)) selected.delete(slot)
+  else selected.add(slot)
+  alertConfig.value.source_slots = [...selected]
+}
+
+async function checkMosdns() {
+  try {
+    await dnsMaintenanceApi('/check', { method: 'POST', body: '{}' })
+    notify('MosDNS 更新检查已启动')
+    await loadOpsFeature()
+  } catch (error) {
+    notify(error instanceof Error ? error.message : 'MosDNS 检查失败')
+  }
+}
+
+async function applyMosdns() {
+  if (!window.confirm('升级将短暂重启 MosDNS，失败时自动回退。继续吗？')) return
+  try {
+    await dnsMaintenanceApi('/update', { method: 'POST', body: '{}' })
+    notify('MosDNS 升级已启动')
+    await loadOpsFeature()
+  } catch (error) {
+    notify(error instanceof Error ? error.message : 'MosDNS 升级失败')
+  }
+}
+
+async function applyMihomo() {
+  if (!window.confirm('升级将短暂重建 Mihomo 容器，失败时自动回退。继续吗？')) return
+  await action('mihomo-apply', '/api/mihomo/upgrade/apply', {}, 'Mihomo 升级已启动')
+}
+
+async function loadFeatureView(view: string) {
+  if (view === 'dns') {
+    await Promise.all([loadDnsOverview(), loadDnsData()])
+    if (dnsTab.value === 'logs' && !dnsLogs.value.length) await loadDnsLogs()
+  } else if (view === 'airport') {
+    await loadAirportState()
+    if (airportTab.value === 'runtime') await loadAirportRuntime()
+  } else if (view === 'rules') {
+    await loadRules()
+  } else if (view === 'ops') {
+    await loadOpsFeature()
+  }
+}
+
 const devices = computed(() => devicePayload.value.devices || [])
 const summary = computed(() => devicePayload.value.summary || {})
 const checks = computed(() => (summary.value.checks || {}) as Record<string, unknown>)
@@ -301,18 +1087,41 @@ const currentTemp = computed(() => number(system.value.temperature?.cpu_c, NaN))
 const z4proUpdate = computed(() => platformStatus.value.z4pro || {})
 const mihomoState = computed(() => updateStatus.value.state || 'unknown')
 const z4proState = computed(() => z4proUpdate.value.state || 'unknown')
+const dnsTotal = computed(() => dnsFirst(dnsStats.value, 'total') || dnsFirst(dnsStats.value, 'total_queries') || dnsFirst(dnsStats.value, 'request_count'))
+const dnsAverage = computed(() => dnsFirst(dnsStats.value, 'average_duration_ms') || dnsFirst(dnsStats.value, 'average_ms'))
+const dnsRuleCount = computed(() => Object.values(dnsRuleData.value).filter((value) => value && typeof value === 'object' && !Array.isArray(value)).reduce((sum, value) => sum + number((value as JsonRecord).rule_count), 0))
+const dnsFilteredLogs = computed(() => dnsLogs.value.filter((log) => {
+  const query = dnsLogQuery.value.toLowerCase()
+  if (query && !`${log.query_name || ''} ${log.client_ip || ''}`.toLowerCase().includes(query)) return false
+  if (dnsLogFilter.value === 'direct') return dnsRouteName(log) === '直连'
+  if (dnsLogFilter.value === 'proxy') return dnsRouteName(log) === '代理'
+  if (dnsLogFilter.value === 'slow') return number(log.duration_ms) >= 100
+  if (dnsLogFilter.value === 'error') return String(log.response_code || '').toUpperCase() !== 'NOERROR'
+  return true
+}))
+const airportSources = computed(() => airportState.value.slots || [])
+const airportPoolNames = computed(() => Object.keys(airportPools.value))
+const airportTestedAt = computed(() => airportState.value.tests?.tested_at)
+const airportRuntimeGroups = computed(() => Object.entries((airportStatus.value.groups || {}) as Record<string, JsonRecord>))
+const airportFailsafeEntries = computed(() => Object.entries((airportStatus.value.failsafes || {}) as Record<string, JsonRecord>))
+const rulePolicies = computed(() => rulesPayload.value.policies || ['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'Others'])
+const ruleSets = computed(() => rulesPayload.value.rule_sets || [])
 function updateLabel(state: string) {
-  return ({ current: '已是最新', update_available: '有可用更新', check_failed: '检查失败', unknown: '待检查' } as Record<string, string>)[state] || state
+  return ({ current: '已是最新', checked: '检查完成', available: '有可用更新', update_available: '有可用更新', check_failed: '检查失败', preview_ignored: '已忽略预发布', applying: '升级中', updating: '升级中', updated: '升级完成', success: '升级完成', rolled_back: '已自动回退', failed: '维护失败', unknown: '待检查' } as Record<string, string>)[state] || state
 }
 function updateTone(state: string) {
-  return ['current', 'checked'].includes(state) ? 'good' : ['update_available', 'applying', 'busy'].includes(state) ? 'warn' : ''
+  return ['current', 'checked', 'updated', 'success'].includes(state) ? 'good' : ['available', 'update_available', 'applying', 'updating', 'busy'].includes(state) ? 'warn' : ''
 }
 const setupUrl = computed(() => setupState.value.url || '/setup')
 
 watch(isDark, (value) => setTheme(value), { immediate: true })
 onMounted(() => {
-  window.addEventListener('hashchange', () => { activeView.value = normalizeView(window.location.hash.slice(1)) })
+  window.addEventListener('hashchange', () => {
+    activeView.value = normalizeView(window.location.hash.slice(1))
+    void loadFeatureView(activeView.value)
+  })
   load()
+  void loadFeatureView(activeView.value)
   poller = window.setInterval(load, 30000)
 })
 onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeout(toastTimer) })
@@ -330,9 +1139,6 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
         <button v-for="item in views" :key="item.id" class="nav-item" :class="{ active: activeView === item.id }" @click="selectView(item.id)">
           <component :is="item.icon" :size="18" :stroke-width="1.9" /><span><b>{{ item.label }}</b><small>{{ item.caption }}</small></span><ChevronRight v-if="activeView === item.id" :size="15" />
         </button>
-        <a class="nav-item nav-link" href="/rules">
-          <SlidersHorizontal :size="18" :stroke-width="1.9" /><span><b>规则配置</b><small>分流与策略</small></span><ArrowUpRight :size="15" />
-        </a>
       </nav>
       <div class="sidebar-bottom">
         <div class="mini-availability"><HeartPulse :size="16" /><span>系统可用性</span><strong>{{ ready ? '99.9%' : '检查中' }}</strong></div>
@@ -348,7 +1154,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
         <div class="top-actions">
           <a class="secondary-button console-switch" href="/legacy" title="回到旧版入口" aria-label="回到旧版入口"><ArrowUpRight :size="15" /><span>回到旧版入口</span></a>
           <button class="icon-button" title="刷新状态" aria-label="刷新状态" :disabled="loading" @click="load"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
-          <a class="icon-button mobile-rules-link" href="/rules" title="规则配置" aria-label="规则配置"><SlidersHorizontal :size="17" /></a>
+          <button class="icon-button mobile-rules-link" title="规则配置" aria-label="规则配置" @click="selectView('rules')"><SlidersHorizontal :size="17" /></button>
           <button class="icon-button" :title="isDark ? '切换浅色模式' : '切换深色模式'" :aria-label="isDark ? '切换浅色模式' : '切换深色模式'" @click="setTheme(!isDark)"><Sun v-if="isDark" :size="17" /><Moon v-else :size="17" /></button>
           <div class="profile-dot">家</div>
         </div>
@@ -369,7 +1175,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
             <section class="surface-card status-card"><div class="card-heading"><div><span class="eyebrow">SYSTEM HEALTH</span><h2>运行状态</h2></div><span class="soft-badge" :class="{ good: ready }">{{ ready ? '全部正常' : '需检查' }}</span></div><div class="health-list"><div v-for="item in healthChecks" :key="item.label" class="health-row"><div class="health-icon"><component :is="item.icon" :size="17" /></div><div><strong>{{ item.label }}</strong><small>{{ item.detail }}</small></div><CheckCircle2 v-if="item.ok" class="health-check good" :size="18" /><AlertTriangle v-else class="health-check warning" :size="18" /></div></div><button class="card-link" @click="selectView('ops')">查看系统维护 <ChevronRight :size="15" /></button></section>
             <section class="surface-card insight-card"><div class="card-heading"><div><span class="eyebrow">NETWORK OVERVIEW</span><h2>家庭网络概况</h2></div><MoreHorizontal :size="19" class="muted-icon" /></div><div class="network-visual"><div class="network-node router-node"><Router :size="24" /><span>RB5009</span><small>{{ summary.router === 'connected' ? '已连接' : '未连接' }}</small></div><div class="network-line"><span /><span /><span /></div><div class="network-node proxy-node"><div class="node-pulse" /><ShieldCheck :size="24" /><span>旁路控制面</span><small>{{ checks.mihomo ? 'Mihomo 在线' : '控制接口不可用' }}</small></div></div><div class="insight-footer"><div><small>自动回退</small><strong>{{ summary.netwatch === 'up' ? '已启用' : '未就绪' }}</strong></div><div><small>远程互联</small><strong>{{ wireguardPeers }} 个 Peer</strong></div><div><small>CPU</small><strong>{{ number(system.cpu?.percent).toFixed(1) }}%</strong></div></div></section>
           </div>
-          <section class="surface-card capability-card"><div class="card-heading"><div><span class="eyebrow">QUICK ACCESS</span><h2>常用入口</h2></div></div><div class="capability-grid"><button class="capability" @click="selectView('members')"><div class="capability-icon blue"><Users :size="20" /></div><span><strong>接管设备</strong><small>设备、名称、图标与接管状态</small></span><ChevronRight :size="17" /></button><button class="capability" @click="selectView('traffic')"><div class="capability-icon green"><Activity :size="20" /></div><span><strong>流量观察</strong><small>查看当前设备流量快照</small></span><ChevronRight :size="17" /></button><a class="capability" href="/rules"><div class="capability-icon orange"><SlidersHorizontal :size="20" /></div><span><strong>规则配置</strong><small>打开分流规则管理</small></span><ArrowUpRight :size="17" /></a></div></section>
+          <section class="surface-card capability-card"><div class="card-heading"><div><span class="eyebrow">QUICK ACCESS</span><h2>常用入口</h2></div></div><div class="capability-grid"><button class="capability" @click="selectView('members')"><div class="capability-icon blue"><Users :size="20" /></div><span><strong>接管设备</strong><small>设备、名称、图标与接管状态</small></span><ChevronRight :size="17" /></button><button class="capability" @click="selectView('traffic')"><div class="capability-icon green"><Activity :size="20" /></div><span><strong>流量观察</strong><small>查看当前设备流量快照</small></span><ChevronRight :size="17" /></button><button class="capability" @click="selectView('dns')"><div class="capability-icon orange"><Globe2 :size="20" /></div><span><strong>DNS 管理</strong><small>解析状态、日志与数据维护</small></span><ChevronRight :size="17" /></button><button class="capability" @click="selectView('airport')"><div class="capability-icon blue"><Server :size="20" /></div><span><strong>机场候选池</strong><small>订阅、测速与自动切换</small></span><ChevronRight :size="17" /></button><button class="capability" @click="selectView('rules')"><div class="capability-icon orange"><SlidersHorizontal :size="20" /></div><span><strong>规则配置</strong><small>打开分流规则管理</small></span><ChevronRight :size="17" /></button></div></section>
         </section>
 
         <section v-else-if="activeView === 'members'" class="view-panel">
@@ -409,6 +1215,57 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
           <section class="section-grid traffic-grid"><section class="surface-card traffic-card"><div class="card-heading"><div><span class="eyebrow">BY DEVICE</span><h2>设备活动</h2></div><span class="muted-caption">按数据包排序</span></div><div v-if="trafficDevices.length" class="traffic-list"><div v-for="device in trafficDevices" :key="device.mac" class="traffic-row"><div class="traffic-label"><div class="device-avatar"><Activity :size="15" /></div><span>{{ device.custom_name || device.name || device.ip }}</span></div><div class="traffic-bar"><span :style="{ width: `${Math.max(4, (number(device.packets) / maxPackets) * 100)}%` }" /></div><strong>{{ number(device.packets).toLocaleString() }}</strong><small>包</small></div></div><div v-else class="empty-state"><Activity :size="28" /><strong>暂无流量快照</strong><span>设备接管后，这里会显示当前观测到的数据包。</span></div></section><section class="surface-card observation-card"><div class="card-heading"><div><span class="eyebrow">OBSERVATION</span><h2>观测指标</h2></div><Gauge :size="19" class="muted-icon" /></div><div class="observation-stat"><span>连接活跃度</span><strong>{{ totalConnections ? '有活动' : '暂无活动' }}</strong><small>来源：RouterOS 连接表</small></div><div class="observation-stat"><span>出口路径</span><strong>{{ checks.mihomo ? 'Mihomo' : '不可用' }}</strong><small>{{ summaryDetail || '当前接口未提供策略详情' }}</small></div><div class="observation-stat"><span>历史数据</span><strong>未启用</strong><small>当前版本仅展示实时快照</small></div></section></section>
         </section>
 
+        <section v-else-if="activeView === 'dns'" class="view-panel feature-view">
+          <div class="page-heading"><div><span class="eyebrow">DNS CONTROL</span><h1>DNS 管理</h1><p>查看解析路径、查询日志和规则数据；日常维护不会改变现有设备接管与分流边界。</p></div><span class="soft-badge" :class="{ good: Boolean(checks.dns) }"><span class="status-dot" />{{ checks.dns ? '运行正常' : '需要检查' }}</span></div>
+          <div class="feature-tabs"><button :class="{ active: dnsTab === 'overview' }" @click="dnsTab = 'overview'; loadDnsOverview()">概览</button><button :class="{ active: dnsTab === 'logs' }" @click="dnsTab = 'logs'; loadDnsLogs()">查询日志</button><button :class="{ active: dnsTab === 'data' }" @click="dnsTab = 'data'; loadDnsData()">数据管理</button></div>
+
+          <template v-if="dnsTab === 'overview'">
+            <div class="metric-grid feature-metrics"><article class="metric-card accent-blue"><span class="metric-label">累计查询</span><strong>{{ dnsTotal.toLocaleString() }}</strong><small>审计记录总量</small></article><article class="metric-card accent-green"><span class="metric-label">平均处理时间</span><strong>{{ msValue(dnsAverage) }}</strong><small>当前查询平均值</small></article><article class="metric-card accent-orange"><span class="metric-label">最近 1 小时</span><strong>{{ Number(dnsWindow('1h').request_count || 0).toLocaleString() }}</strong><small>平均 {{ msValue(dnsWindow('1h').average_duration_ms) }}</small></article><article class="metric-card accent-purple"><span class="metric-label">规则数量</span><strong>{{ dnsRuleCount.toLocaleString() }}</strong><small>国内、国外与国内 IP</small></article></div>
+            <div class="section-grid feature-grid-two"><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">RESOLUTION PATH</span><h2>解析路径</h2></div><button class="icon-button small" title="编辑解析服务器" aria-label="编辑解析服务器" @click="openDnsUpstreams"><Pencil :size="15" /></button></div><div class="route-summary"><div><span>国内解析</span><strong>{{ dnsUpstreamText(dnsDomestic) }}</strong><small>本地网络直连</small></div><div><span>国外解析</span><strong>{{ dnsUpstreamText(dnsForeign) }}</strong><small>经 Mihomo SOCKS</small></div></div><div class="info-strip">这里只影响主动使用 Z4Pro MosDNS 的查询，不修改 RouterOS、DHCP DNS 或设备接管状态。</div></section><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">RECENT RANKING</span><h2>常用域名与活跃设备</h2></div><Globe2 :size="18" class="muted-icon" /></div><div class="rank-columns"><div><span class="muted-caption">常用域名</span><div v-for="item in dnsDomains" :key="String(item.key)" class="rank-row"><span>{{ item.key || '未知' }}</span><strong>{{ Number(item.count || 0).toLocaleString() }}</strong></div><div v-if="!dnsDomains.length" class="empty-inline">暂无数据</div></div><div><span class="muted-caption">活跃设备</span><div v-for="item in dnsClients" :key="String(item.key)" class="rank-row"><span>{{ String(item.key || '--').replace(/^::ffff:/, '') }}</span><strong>{{ Number(item.count || 0).toLocaleString() }}</strong></div><div v-if="!dnsClients.length" class="empty-inline">暂无数据</div></div></div></section></div>
+            <div class="section-grid feature-grid-two"><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">EFFECTIVE ROUTE</span><h2>实际分流结果</h2></div></div><div v-for="item in dnsEffective" :key="String(item.key)" class="rank-row"><span>{{ item.key || '默认' }}</span><strong>{{ Number(item.count || 0).toLocaleString() }}</strong></div><div v-if="!dnsEffective.length" class="empty-inline">暂无数据</div></section><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">SLOW QUERIES</span><h2>较慢查询</h2></div><Gauge :size="18" class="muted-icon" /></div><div v-for="item in dnsSlowest" :key="String(item.query_name || item.key)" class="rank-row"><span>{{ item.query_name || item.key || '未知' }}</span><strong>{{ msValue(item.duration_ms || item.value) }}</strong></div><div v-if="!dnsSlowest.length" class="empty-inline">暂无数据</div></section></div>
+          </template>
+
+          <template v-else-if="dnsTab === 'logs'">
+            <div class="toolbar feature-toolbar"><div class="search-field"><Search :size="17" /><input v-model="dnsLogQuery" placeholder="搜索域名或设备 IP" /></div><div class="segmented"><button v-for="item in [{ id: 'all', label: '全部' }, { id: 'direct', label: '直连' }, { id: 'proxy', label: '代理' }, { id: 'slow', label: '慢查询' }, { id: 'error', label: '错误' }]" :key="item.id" :class="{ active: dnsLogFilter === item.id }" @click="dnsLogFilter = item.id">{{ item.label }}</button></div><button class="secondary-button" @click="loadDnsLogs"><RefreshCw :size="15" />重新载入</button></div>
+            <section class="surface-card log-card"><div class="table-head log-head"><span>时间</span><span>域名</span><span>设备</span><span>类型</span><span>分流</span><span>上游</span><span>耗时</span><span>结果</span></div><div v-for="(log, index) in dnsFilteredLogs" :key="`${log.query_time}-${index}`" class="log-row"><span>{{ log.query_time ? new Date(log.query_time).toLocaleTimeString('zh-CN', { hour12: false }) : '--' }}</span><strong>{{ log.query_name || '--' }}</strong><span>{{ String(log.client_ip || '--').replace(/^::ffff:/, '') }}</span><span>{{ log.query_type || '--' }}</span><span class="soft-badge mini" :class="{ good: dnsRouteName(log) === '直连' }">{{ dnsRouteName(log) }}</span><span class="log-upstream">{{ log.final_upstream || log.selected_upstream || '--' }}</span><span>{{ msValue(log.duration_ms) }}</span><span>{{ log.response_code || '--' }}</span></div><div v-if="!dnsFilteredLogs.length" class="empty-state compact-empty"><Activity :size="26" /><strong>没有符合条件的查询记录</strong><span>可重新载入或调整筛选条件。</span></div><div class="table-foot"><span>显示 {{ dnsFilteredLogs.length }} 条，共读取 {{ dnsLogs.length }} 条</span><span>慢查询：≥ 100 ms</span></div></section>
+          </template>
+
+          <template v-else>
+            <div class="section-grid data-layout"><div class="data-stack"><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">RULE DATA</span><h2>规则数据</h2></div><span class="soft-badge">{{ Number(dnsCapacity.capacity || 0).toLocaleString() }} 条日志容量</span></div><div class="data-list"><div v-for="item in [{ label: '国内域名', value: dnsRuleData.domestic?.rule_count }, { label: '国外域名', value: dnsRuleData.foreign?.rule_count }, { label: '国内 IP', value: dnsRuleData.ip?.rule_count }]" :key="item.label" class="data-line"><span>{{ item.label }}</span><strong>{{ Number(item.value || 0).toLocaleString() }} 条</strong></div><div v-for="item in (dnsRuleData.extras || [])" :key="item.tag || item.name" class="data-line"><span>{{ item.name || item.tag || '附加规则' }}</span><strong>{{ Number(item.rule_count || 0).toLocaleString() }} 条</strong></div></div></section><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">CONTENT FILTER</span><h2>精简内容过滤</h2></div><span class="soft-badge" :class="{ good: dnsAdblock.mode === 'block' }">{{ dnsAdblock.mode === 'block' ? '正在拦截' : dnsAdblock.mode === 'observe' ? '观察中' : '已关闭' }}</span></div><div class="segmented wide-segment"><button v-for="mode in [{ id: 'off', label: '关闭' }, { id: 'observe', label: '观察' }, { id: 'block', label: '拦截' }]" :key="mode.id" :class="{ active: dnsAdblock.mode === mode.id }" @click="setDnsAdblockMode(mode.id)">{{ mode.label }}</button></div><div class="filter-summary"><div><span>近期命中</span><strong>{{ Number(dnsAdblock.hits?.total || 0).toLocaleString() }} 次</strong></div><div><span>放行域名</span><strong>{{ Number(dnsAdblock.allowlist_count || 0) }} 个</strong></div><div><span>自动更新</span><strong>{{ dnsAdblock.auto_enabled ? `每 ${Number(dnsAdblock.interval_hours || 24)} 小时` : '已关闭' }}</strong></div></div><div class="data-note-line">{{ dnsAdblock.message || '尚未准备精简过滤规则' }} · 国内广告 {{ Number(dnsAdblock.hits?.cn_ads || 0) }} 次，成人内容 {{ Number(dnsAdblock.hits?.adult || 0) }} 次</div><div class="inline-actions"><button class="primary-button" @click="updateDnsAdblock">更新并校验</button><button class="secondary-button" @click="toggleDnsAdblockAuto">{{ dnsAdblock.auto_enabled ? '关闭自动更新' : '开启自动更新' }}</button><button class="secondary-button" @click="openDnsAllowlist">编辑放行名单</button></div><div v-if="dnsAllowlistOpen" class="inline-editor"><textarea v-model="dnsAllowlistDraft" placeholder="每行一个域名" /><div class="inline-actions"><button class="secondary-button" @click="dnsAllowlistOpen = false">取消</button><button class="primary-button" @click="saveDnsAllowlist">保存并校验</button></div></div></section><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">RULE UPDATES</span><h2>规则自动更新</h2></div><span class="soft-badge" :class="{ good: dnsRuleUpdate.phase === 'updated' }">{{ dnsRuleUpdate.phase === 'updated' ? '更新完成' : dnsRuleUpdate.phase || '尚未执行' }}</span></div><div class="filter-summary"><div><span>更新范围</span><strong>官方国内/国外/国内 IP</strong></div><div><span>更新周期</span><strong>{{ dnsRuleUpdate.config?.rule_auto_enabled ? `每 ${dnsRuleUpdate.config?.rule_interval_hours || 24} 小时` : '已关闭' }}</strong></div><div><span>最近结果</span><strong>{{ timeValue(dnsRuleUpdate.completed_at || dnsRuleUpdate.updated_at) }}</strong></div></div><div class="data-note-line">{{ dnsRuleUpdate.message || '更新前备份，数量或探针异常时自动回滚。' }}</div><div class="inline-actions"><button class="primary-button" @click="updateDnsRules">立即检查并更新</button><button class="secondary-button" @click="toggleDnsRuleAuto">{{ dnsRuleUpdate.config?.rule_auto_enabled ? '关闭自动更新' : '开启自动更新' }}</button></div></section></div><aside class="surface-card maintenance-card dns-actions"><div class="card-heading"><div><span class="eyebrow">MAINTENANCE</span><h2>维护操作</h2></div><Settings2 :size="18" class="muted-icon" /></div><div class="action-block"><strong>刷新页面数据</strong><small>重新读取状态、规则数量与上游配置。</small><button class="secondary-button" @click="loadDnsData"><RefreshCw :size="14" />重新载入</button></div><div class="action-block"><strong>DNS 回归检查</strong><small>{{ dnsVerify.message || '快速检查保留缓存；完整回归会清理路由缓存。' }}</small><div class="inline-actions"><button class="secondary-button" @click="runDnsVerify('quick')">快速检查</button><button class="secondary-button" @click="runDnsVerify('full')">完整回归</button></div></div><div class="action-block"><strong>清空 DNS 缓存</strong><small>用于排查旧解析结果，清空后首次访问可能稍慢。</small><button class="secondary-button" @click="flushDnsCaches">清空缓存</button></div><div class="action-block"><strong>查询记录采集</strong><small>{{ dnsCapture.capturing ? '当前正在采集查询记录。' : '当前已暂停采集，解析服务仍然正常。' }}</small><button class="secondary-button" @click="toggleDnsCapture">{{ dnsCapture.capturing ? '暂停采集' : '开始采集' }}</button></div><div class="action-block"><strong>清空查询日志</strong><small>删除当前审计记录，不影响 DNS 解析。</small><button class="compact-button danger" @click="clearDnsLogs">清空日志</button></div></aside></div>
+          </template>
+        </section>
+
+        <section v-else-if="activeView === 'airport'" class="view-panel feature-view">
+          <div class="page-heading"><div><span class="eyebrow">PROXY SOURCES</span><h1>机场与候选池</h1><p>订阅只负责导入节点；业务流量仅使用经过筛选的候选池。订阅链接不会保存在页面配置中。</p></div><span class="soft-badge" :class="{ good: airportSources.some((source) => source.imported) }">{{ airportSources.filter((source) => source.imported).length }} 个来源已导入</span></div>
+          <div class="feature-tabs"><button :class="{ active: airportTab === 'sources' }" @click="airportTab = 'sources'">订阅来源</button><button :class="{ active: airportTab === 'pools' }" @click="airportTab = 'pools'">候选池</button><button :class="{ active: airportTab === 'runtime' }" @click="airportTab = 'runtime'; loadAirportRuntime()">切换状态</button></div>
+
+          <section v-if="airportTab === 'runtime'" class="surface-card failsafe-card"><div class="card-heading"><div><span class="eyebrow">FAILSAFE STATUS</span><h2>故障回退</h2></div><span class="muted-caption">连续异常后按需启用应急节点</span></div><div class="failsafe-grid"><div v-for="entry in airportFailsafeEntries" :key="entry[0]" class="failsafe-row"><div><strong>{{ entry[0] }}</strong><small>主力 {{ entry[1].primary || '未配置' }} · 应急 {{ entry[1].emergency || '未配置' }}</small></div><span :class="{ good: entry[1].phase === 'normal', warning: entry[1].phase !== 'normal' }">{{ entry[1].phase === 'emergency' ? `应急：${entry[1].emergency_node || '待确认'}` : entry[1].phase === 'exhausted' ? '候选耗尽' : entry[1].phase === 'manual-direct' ? '人工直连' : '常态运行' }}</span><small>{{ entry[1].last_error || (entry[1].checked_at ? timeValue(entry[1].checked_at) : '尚无检查记录') }}</small></div></div><div v-if="!airportFailsafeEntries.length" class="empty-inline">尚无故障回退状态</div></section>
+          <template v-if="airportTab === 'sources'">
+            <section class="surface-card feature-note"><div class="card-heading"><div><span class="eyebrow">DIRECT IMPORT</span><h2>订阅来源</h2></div><button class="secondary-button" @click="addAirportSource"><Plus :size="15" />新增备用机场</button></div><p>由 Z4Pro 直连拉取，不经过代理、Fake-IP 或第三方转换；导入和应用失败时保留当前可用配置。</p></section>
+            <div class="source-grid"><article v-for="source in airportSources" :key="source.slot" class="surface-card source-card"><div class="card-heading"><div><h2>{{ source.label }}</h2><span class="source-state" :class="{ empty: !source.imported }">{{ source.imported ? `已导入 ${source.nodes || 0} 个有效节点` : '尚未导入' }}</span></div><button v-if="source.slot !== 'primary'" class="icon-button small" title="删除机场来源" aria-label="删除机场来源" @click="removeAirportSource(source)"><X :size="15" /></button></div><small class="source-updated">{{ source.imported ? source.updated_at : '导入后可在候选池中选择节点' }}</small><input v-model="airportUrls[source.slot]" type="url" autocomplete="off" placeholder="HTTPS 原生 Clash/Mihomo 订阅链接" /><div class="inline-actions"><button class="primary-button" :disabled="busy === `airport-import-${source.slot}`" @click="importAirport(source)"><ArrowUpRight :size="15" />直连导入或替换</button><button class="secondary-button" @click="clearAirportSource(source)">清空</button></div></article></div>
+          </template>
+
+          <template v-else-if="airportTab === 'pools'">
+            <section class="surface-card"><div class="toolbar feature-toolbar"><div class="search-field"><Search :size="17" /><input v-model="airportFilter" placeholder="筛选节点名称" /></div><button class="primary-button" :disabled="busy === 'airport-test'" @click="testAirportAll"><Activity :size="15" />三次稳定性测速</button><button class="secondary-button" :disabled="busy === 'airport-retest'" @click="retestAirportPools">复测并生效</button><button class="secondary-button" @click="saveAirportPools">校验并应用</button><button class="compact-button danger" @click="rollbackAirportPools">回退上一版</button></div><div class="data-note-line">{{ airportTestedAt ? `上次稳定性测速：${timeValue(airportTestedAt)}` : '尚未执行稳定性测速；每次只在人工操作时测试节点。' }}</div></section><div class="pool-grid"><article v-for="pool in airportPoolNames" :key="pool" class="surface-card pool-card"><div class="card-heading"><div><h2>{{ pool }}</h2><span class="muted-caption">{{ (airportPools[pool] || []).length }}/5 个候选</span></div><button class="icon-button small" title="编辑候选池模式" aria-label="编辑候选池模式" @click="openAirportPoolEditor(pool)"><Pencil :size="15" /></button></div><div class="pool-mode"><span class="soft-badge mini">{{ airportSettings[pool]?.type === 'url-test' ? '自动测速' : airportSettings[pool]?.type === 'select' ? '手动选择' : '故障切换' }}</span><span class="muted-caption">按业务专项探针排序</span></div><div v-for="(node, index) in airportPools[pool] || []" :key="node" class="pool-node"><div><strong>{{ node }}</strong><small v-if="airportMetric(node).delay !== undefined">{{ airportMetric(node).delay }} ms · 抖动 {{ airportMetric(node).jitter }} · {{ airportMetric(node).success }}/3</small></div><div class="pool-node-actions"><button class="icon-button small" title="上移" aria-label="上移" @click="moveAirportNode(pool, index, -1)">↑</button><button class="icon-button small" title="下移" aria-label="下移" @click="moveAirportNode(pool, index, 1)">↓</button><button class="icon-button small" title="移除节点" aria-label="移除节点" @click="removeAirportNode(pool, index)"><X :size="14" /></button></div></div><div class="pool-add"><select @change="selectAirportNode(pool, $event)"><option value="">添加候选节点</option><option v-for="node in airportFilteredNodes(pool)" :key="node.name" :value="node.name">{{ node.name }}</option></select></div></article></div>
+          </template>
+
+          <template v-else>
+            <section class="surface-card feature-note"><div class="card-heading"><div><span class="eyebrow">RUNTIME FAILOVER</span><h2>当前出口</h2></div><button class="secondary-button" @click="loadAirportRuntime"><RefreshCw :size="15" />刷新状态</button></div><p>显示 fallback 当前策略、实际叶子节点和最近自动切换，不主动触发冷备扫描。</p></section><div class="runtime-grid"><article v-for="entry in airportRuntimeGroups" :key="entry[0]" class="surface-card runtime-card"><div class="card-heading"><h2>{{ entry[0] }}</h2><span class="soft-badge" :class="{ good: entry[1].type !== 'unavailable' }">{{ entry[1].phase || entry[1].type || '不可用' }}</span></div><div class="runtime-facts"><div><span>策略</span><strong>{{ entry[1].now || '未选择' }}</strong></div><div><span>实际节点</span><strong>{{ entry[1].leaf || '未选择' }}</strong></div><div><span>来源</span><strong>{{ entry[1].source || '不可用' }}</strong></div><div><span>最近探测</span><strong>{{ historyText(entry[1].history) }}</strong></div></div></article></div><section class="surface-card event-card"><div class="card-heading"><div><span class="eyebrow">RECENT EVENTS</span><h2>最近自动切换</h2></div></div><div v-for="(event, index) in ((airportStatus.events || []).slice().reverse())" :key="`${event.time}-${index}`" class="event-row"><strong>{{ event.group }}</strong><span>{{ event.from }} → {{ event.to }}</span><small>{{ timeValue(event.time) }} · {{ event.reason }}</small></div><div v-if="!airportStatus.events?.length" class="empty-inline">尚无自动切换记录</div></section><section class="surface-card probe-card"><div class="card-heading"><div><span class="eyebrow">BUSINESS REACHABILITY</span><h2>业务可达性报告</h2></div></div><div class="probe-grid"><div v-for="(report, name) in (airportProbes.pools || {})" :key="String(name)"><span>{{ name }}</span><strong>{{ report.success || 0 }}/{{ report.candidate_count || 0 }} 通过</strong><small>{{ report.median_ms ? `中位 ${report.median_ms} ms · 抖动 ${report.max_jitter_ms || 0} ms` : '尚无专项复测' }}</small><button class="compact-button" @click="probeAirportPool(String(name))">复测此业务池</button></div></div></section>
+          </template>
+        </section>
+
+        <section v-else-if="activeView === 'rules'" class="view-panel feature-view">
+          <div class="page-heading"><div><span class="eyebrow">ROUTING RULES</span><h1>规则配置</h1><p>按从上到下的顺序匹配分流规则；规则集合优先级和自定义规则都会在校验后一次生效。</p></div><span class="soft-badge" :class="{ good: !ruleDirty }">{{ ruleDirty ? '有未应用修改' : `${ruleDraft.length} 条规则已生效` }}</span></div>
+          <div class="toolbar rules-toolbar"><div class="toolbar-left"><h2>规则顺序</h2><label class="toggle-control"><input v-model="ruleAdvanced" type="checkbox" /><span>高级模式</span></label></div><div class="toolbar-right"><button class="secondary-button" @click="loadRules"><RefreshCw :size="15" />重新载入</button><button class="secondary-button" @click="addRule()"><Plus :size="15" />新增规则</button><button class="primary-button" :disabled="!ruleDirty || busy === 'rules-save'" @click="saveRules"><Check :size="15" />校验并应用</button></div></div>
+          <p class="feature-hint"><strong>系统保护规则会锁定国内直连和默认兜底；高级模式适合编辑原始 Mihomo 语法，复杂规则不会被页面拆写。</strong></p>
+
+          <section class="surface-card route-preview-card"><div class="card-heading"><div><span class="eyebrow">ROUTE PREVIEW</span><h2>规则命中预览</h2><p>输入域名或网址，查看当前规则中可确定的第一条命中。Geosite、GEOIP 和 IP 网段会明确标注为运行时判断。</p></div><SlidersHorizontal :size="18" class="muted-icon" /></div><div class="route-preview-form"><input v-model="rulePreviewTarget" inputmode="url" autocomplete="off" placeholder="例如 chatgpt.com 或 https://www.youtube.com" @keyup.enter="previewRule" /><button class="primary-button" @click="previewRule">查看路径</button></div><div v-if="rulePreview" class="route-preview-result" :class="rulePreview.tone"><strong>{{ rulePreview.title }}</strong><span>{{ rulePreview.detail }}</span><code>{{ rulePreview.rule }}</code></div></section>
+
+          <section class="surface-card rule-set-section"><div class="card-heading"><div><span class="eyebrow">RULE SETS</span><h2>规则集合</h2><p>一张集合卡片可管理多条 HTTPS 来源；更新失败时保留上一份本地缓存。</p></div><button class="secondary-button" @click="openRuleSetEditor()"><Plus :size="15" />新增集合</button></div><div v-if="ruleSets.length" class="rule-set-grid"><article v-for="(set, index) in ruleSets" :key="set.key || index" class="rule-set-card"><div class="rule-set-head"><div><h3>{{ set.name }}</h3><small>{{ set.priority === 'high' ? '高优先级：业务分类前匹配' : '普通优先级：国内直连前匹配' }}</small></div><span class="soft-badge mini">{{ set.policy || 'Others' }}</span></div><div class="rule-set-facts"><span>{{ (set.sources || []).length }} 条来源</span><span>每 {{ Math.round(Number(set.interval || 86400) / 3600) }} 小时</span><span>{{ set.sources?.[0]?.behavior || 'domain' }} · {{ set.sources?.[0]?.format || 'mrs' }}</span></div><p class="rule-set-urls">{{ ruleSetUrlsText(set) }}</p><div class="rule-set-actions"><button class="icon-button small" title="上移规则集合" aria-label="上移规则集合" :disabled="index === 0" @click="moveRuleSet(index, -1)"><ArrowUp :size="14" /></button><button class="icon-button small" title="下移规则集合" aria-label="下移规则集合" :disabled="index === ruleSets.length - 1" @click="moveRuleSet(index, 1)"><ArrowDown :size="14" /></button><button class="icon-button small" title="编辑规则集合" aria-label="编辑规则集合" @click="openRuleSetEditor(index)"><Pencil :size="14" /></button><button class="icon-button small danger" title="删除规则集合" aria-label="删除规则集合" @click="removeRuleSet(index)"><Trash2 :size="14" /></button></div></article></div><div v-else class="empty-inline">尚未配置规则集合</div></section>
+
+          <section class="surface-card rule-list-card"><div class="card-heading"><div><span class="eyebrow">MATCH IN ORDER</span><h2>手动规则</h2></div><span class="muted-caption">{{ ruleDraft.length }} 条，顶部优先</span></div><div v-if="ruleDraft.length" class="rule-list"><div v-for="(rule, index) in ruleDraft" :key="`${index}-${rule}`" class="rule-row" :class="{ protected: ruleIsProtected(rule) }"><span class="rule-index">{{ index + 1 }}</span><template v-if="ruleAdvanced"><input class="control raw-control" :value="rule" :readonly="ruleIsProtected(rule)" @input="setRawRule(index, $event)" /><span v-if="ruleIsProtected(rule)" class="system-badge">系统保护</span></template><template v-else><label><span>匹配方式</span><select class="control" :value="ruleParts(rule).type" :disabled="ruleIsProtected(rule)" @change="setRuleFromEvent(index, 'type', $event)"><option value="DOMAIN">域名</option><option value="DOMAIN-SUFFIX">域名及子域名</option><option value="DOMAIN-KEYWORD">域名关键词</option><option value="GEOSITE">网站分类</option><option value="GEOIP">地区 IP</option><option value="IP-CIDR">IPv4 网段</option><option value="IP-CIDR6">IPv6 网段</option><option value="MATCH">兜底</option></select></label><label><span>匹配内容</span><input class="control" :value="ruleParts(rule).value" :readonly="ruleIsProtected(rule) || ruleParts(rule).type === 'MATCH'" placeholder="例如 example.com" @input="setRuleFromEvent(index, 'value', $event)" /></label><label><span>出口</span><select class="control" :value="ruleParts(rule).policy" :disabled="ruleIsProtected(rule)" @change="setRuleFromEvent(index, 'policy', $event)"><option v-for="policy in rulePolicies" :key="policy" :value="policy">{{ policy }}</option></select></label></template><div class="rule-actions"><button class="icon-button small" title="上移" aria-label="上移" :disabled="index === 0 || ruleIsProtected(rule)" @click="moveRule(index, -1)"><ArrowUp :size="14" /></button><button class="icon-button small" title="下移" aria-label="下移" :disabled="index === ruleDraft.length - 1 || ruleIsProtected(rule)" @click="moveRule(index, 1)"><ArrowDown :size="14" /></button><button class="icon-button small danger" title="删除规则" aria-label="删除规则" :disabled="ruleIsProtected(rule)" @click="removeRule(index)"><Trash2 :size="14" /></button></div><span v-if="ruleIsProtected(rule)" class="system-badge">系统保护</span></div></div><div v-else class="empty-state"><SlidersHorizontal :size="28" /><strong>暂无代理规则</strong><span>点击“新增规则”开始配置。</span></div></section>
+        </section>
+
         <section v-else-if="activeView === 'setup'" class="view-panel">
           <div class="page-heading"><div><span class="eyebrow">GETTING STARTED</span><h1>首次配置</h1><p>确认关键服务是否就绪。安装向导只在首次配置尚未完成时开放。</p></div><a v-if="setupState.pending" class="primary-button" :href="setupUrl" target="_blank" rel="noreferrer"><ArrowUpRight :size="16" />打开安装向导</a><span v-else class="soft-badge good">首次配置已完成</span></div>
           <section class="surface-card setup-card"><div class="setup-progress"><div class="progress-ring" :class="{ warning: !ready }"><Check :size="22" /></div><div><span class="eyebrow">CURRENT INSTANCE</span><h2>{{ ready ? '基础配置已就绪' : '配置仍需检查' }}</h2><p>{{ ready ? '控制面已连接 RouterOS，并能读取旁路状态。' : '请先检查 RouterOS、DNS 或 Mihomo 服务。' }}</p></div></div><div class="setup-steps"><div v-for="(item, index) in healthChecks" :key="item.label" class="setup-step"><div class="step-number" :class="{ done: item.ok }">{{ item.ok ? '✓' : index + 1 }}</div><div><strong>{{ item.label }}</strong><small>{{ item.detail }}</small></div><span class="step-state" :class="{ done: item.ok }">{{ item.ok ? '已完成' : '待检查' }}</span></div></div></section>
@@ -418,7 +1275,8 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
         <section v-else class="view-panel">
           <div class="page-heading"><div><span class="eyebrow">OPERATIONS</span><h1>系统维护</h1><p>这里显示 Z4Pro NAS 主机、Mihomo 旁路服务、RB5009 路由器和 WireGuard 互联状态。</p></div><span class="soft-badge" :class="{ good: system.healthy }">{{ system.healthy ? '系统正常' : '实时状态' }}</span></div>
           <div class="resource-grid"><article class="resource-card"><div class="resource-head"><Cpu :size="18" /><span>Z4Pro NAS · CPU</span><strong>{{ number(system.cpu?.percent).toFixed(1) }}%</strong></div><div class="resource-track"><span :style="{ width: `${Math.min(100, number(system.cpu?.percent))}%` }" /></div><small>{{ system.cpu?.cores || '—' }} 核 · 负载 {{ system.cpu?.load_1m ?? '—' }}</small></article><article class="resource-card"><div class="resource-head"><HardDrive :size="18" /><span>Z4Pro NAS · 内存</span><strong>{{ number(system.memory?.percent).toFixed(1) }}%</strong></div><div class="resource-track green"><span :style="{ width: `${Math.min(100, number(system.memory?.percent))}%` }" /></div><small>{{ formatBytes(system.memory?.used) }} / {{ formatBytes(system.memory?.total) }}</small></article><article class="resource-card"><div class="resource-head"><Thermometer :size="18" /><span>Z4Pro NAS · 温度</span><strong>{{ Number.isFinite(currentTemp) ? `${currentTemp.toFixed(0)}°C` : '不可用' }}</strong></div><div class="resource-track orange"><span :style="{ width: `${Math.min(100, number(system.temperature?.cpu_c))}%` }" /></div><small>NAS CPU 温度 · 传感器状态</small></article></div>
-          <div class="section-grid ops-grid"><section class="surface-card maintenance-card"><div class="card-heading"><div><span class="eyebrow">COMPONENTS</span><h2>核心组件与设备</h2></div><RefreshCw :size="18" class="muted-icon" /></div><div class="component-row"><div class="component-icon"><Zap :size="17" /></div><div><strong>Mihomo 旁路代理</strong><small>Z4Pro NAS Docker 旁路服务 · {{ updateStatus.current_version || '尚无版本记录' }}{{ updateStatus.latest_version ? ` · 最新 ${updateStatus.latest_version}` : '' }}</small></div><span class="component-state" :class="updateTone(mihomoState)">{{ updateLabel(mihomoState) }}</span><button class="compact-button" :disabled="busy === 'mihomo-check'" @click="checkMihomo">检查更新</button></div><div class="component-row"><div class="component-icon"><Server :size="17" /></div><div><strong>Z4Pro NAS 系统</strong><small>当前运行的 NAS 主机系统 · {{ z4proUpdate.current_version || '尚无版本记录' }}{{ z4proUpdate.latest_version ? ` · 最新 ${z4proUpdate.latest_version}` : '' }}</small></div><span class="component-state" :class="updateTone(z4proState)">{{ updateLabel(z4proState) }}</span><button class="compact-button" :disabled="busy === 'platform-check'" @click="checkPlatform">检查更新</button></div><div class="component-row"><div class="component-icon"><Router :size="17" /></div><div><strong>RB5009 路由器</strong><small>{{ summary.router === 'connected' ? '家庭网关 API 管理连接正常' : '家庭网关 API 管理连接不可用' }}</small></div><span class="component-state" :class="{ good: summary.router === 'connected' }">{{ summary.router === 'connected' ? '在线' : '检查' }}</span><button class="compact-button" @click="load">重新读取</button></div></section><section class="surface-card maintenance-card"><div class="card-heading"><div><span class="eyebrow">RUNTIME</span><h2>Z4Pro NAS 运行详情</h2></div><MoreHorizontal :size="19" class="muted-icon" /></div><div class="runtime-list"><div><span>NAS 运行时间</span><strong>{{ formatUptime(system.uptime_seconds) }}</strong></div><div><span>Docker 容器</span><strong>{{ system.docker?.running ?? '—' }} / {{ system.docker?.total ?? '—' }}</strong></div><div><span>NAS 系统盘</span><strong>{{ number(system.disk?.percent).toFixed(1) }}%</strong></div><div><span>WireGuard 远程互联</span><strong>{{ wireguardPeers }} 个 Peer</strong></div></div><a class="card-link" href="/mihomo-maintenance">打开 Mihomo 详细维护页 <ArrowUpRight :size="15" /></a></section></div>
+          <div class="section-grid ops-grid"><section class="surface-card maintenance-card"><div class="card-heading"><div><span class="eyebrow">COMPONENTS</span><h2>核心组件与设备</h2></div><RefreshCw :size="18" class="muted-icon" /></div><div class="component-row"><div class="component-icon"><Zap :size="17" /></div><div><strong>Mihomo 旁路代理</strong><small>Z4Pro NAS Docker 旁路服务 · {{ updateStatus.current_version || '尚无版本记录' }}{{ updateStatus.latest_version ? ` · 最新 ${updateStatus.latest_version}` : '' }}</small></div><span class="component-state" :class="updateTone(mihomoState)">{{ updateLabel(mihomoState) }}</span><button class="compact-button" :disabled="busy === 'mihomo-check'" @click="checkMihomo">检查更新</button><button v-if="mihomoState === 'update_available'" class="compact-button" @click="applyMihomo">升级并应用</button></div><div class="component-row"><div class="component-icon"><Server :size="17" /></div><div><strong>Z4Pro NAS 系统</strong><small>当前运行的 NAS 主机系统 · {{ z4proUpdate.current_version || '尚无版本记录' }}{{ z4proUpdate.latest_version ? ` · 最新 ${z4proUpdate.latest_version}` : '' }}</small></div><span class="component-state" :class="updateTone(z4proState)">{{ updateLabel(z4proState) }}</span><button class="compact-button" :disabled="busy === 'platform-check'" @click="checkPlatform">检查更新</button></div><div class="component-row"><div class="component-icon"><Globe2 :size="17" /></div><div><strong>MosDNS 解析服务</strong><small>规则、广告过滤与 DNS 回归检查 · {{ mosdnsStatus.phase || '待检查' }}</small></div><span class="component-state" :class="{ good: mosdnsStatus.phase === 'idle' || mosdnsStatus.phase === 'updated' }">{{ mosdnsStatus.phase === 'updated' ? '已更新' : mosdnsStatus.phase || '在线' }}</span><button class="compact-button" @click="checkMosdns">检查更新</button><button v-if="mosdnsStatus.phase === 'update_available'" class="compact-button" @click="applyMosdns">升级并应用</button></div><div class="component-row"><div class="component-icon"><Router :size="17" /></div><div><strong>RB5009 路由器</strong><small>{{ summary.router === 'connected' ? '家庭网关 API 管理连接正常' : '家庭网关 API 管理连接不可用' }}</small></div><span class="component-state" :class="{ good: summary.router === 'connected' }">{{ summary.router === 'connected' ? '在线' : '检查' }}</span><button class="compact-button" @click="load">重新读取</button></div></section><section class="surface-card maintenance-card"><div class="card-heading"><div><span class="eyebrow">RUNTIME</span><h2>Z4Pro NAS 运行详情</h2></div><MoreHorizontal :size="19" class="muted-icon" /></div><div class="runtime-list"><div><span>NAS 运行时间</span><strong>{{ formatUptime(system.uptime_seconds) }}</strong></div><div><span>Docker 容器</span><strong>{{ system.docker?.running ?? '—' }} / {{ system.docker?.total ?? '—' }}</strong></div><div><span>NAS 系统盘</span><strong>{{ number(system.disk?.percent).toFixed(1) }}%</strong></div><div><span>WireGuard 远程互联</span><strong>{{ wireguardPeers }} 个 Peer</strong></div></div><button class="card-link" @click="loadOpsFeature"><RefreshCw :size="15" />刷新详细维护状态</button></section></div>
+          <div class="section-grid ops-extra-grid"><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">PLATFORM UPDATES</span><h2>平台更新状态</h2></div><button class="icon-button small" title="检查平台更新" aria-label="检查平台更新" :disabled="busy === 'platform-check'" @click="checkPlatform"><RefreshCw :size="15" /></button></div><div v-for="item in [{ key: 'routeros', label: 'RouterOS' }, { key: 'z4pro', label: 'Z4Pro NAS' }, { key: 'mihomo', label: 'Mihomo' }, { key: 'mosdns', label: 'MosDNS' }]" :key="item.key" class="update-row"><div><strong>{{ item.label }}</strong><small>{{ platformItem(item.key).current_version || platformItem(item.key).current || '当前版本未记录' }}</small></div><span class="component-state" :class="updateTone(platformItem(item.key).state || 'unknown')">{{ updateLabel(platformItem(item.key).state || 'unknown') }}</span><small v-if="platformItem(item.key).latest_version">最新 {{ platformItem(item.key).latest_version }}</small></div><div class="data-note-line">{{ platformStatus.checked_at ? `上次检查：${timeValue(platformStatus.checked_at)}` : '尚未执行平台更新检查。' }}</div></section><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">FAILOVER ALERTS</span><h2>故障告警</h2></div><span class="soft-badge" :class="{ good: alertConfig.enabled && alertConfig.configured }">{{ alertConfig.enabled && alertConfig.configured ? '已启用' : alertConfig.configured ? '已配置' : '未配置' }}</span></div><div class="alert-options"><label class="toggle-control"><input v-model="alertConfig.enabled" type="checkbox" /><span>启用机场出口故障告警</span></label><label class="toggle-control"><input v-model="alertConfig.notify_recovery" type="checkbox" /><span>恢复后发送通知</span></label><label v-for="source in (alertConfig.available_sources || [])" :key="source.slot" class="source-option"><input type="checkbox" :checked="(alertConfig.source_slots || []).includes(source.slot)" @change="toggleAlertSource(source.slot)" /><span>{{ source.label }}</span></label></div><div class="alert-fields"><input v-model="alertToken" type="password" autocomplete="off" placeholder="Bot Token（留空保持不变）" /><input v-model="alertChat" autocomplete="off" placeholder="Chat ID（留空保持不变）" /></div><div class="inline-actions"><button class="primary-button" @click="saveAlerts">保存告警设置</button><button class="secondary-button" @click="testAlerts">发送测试通知</button></div><div class="data-note-line">{{ alertConfig.enabled && alertConfig.configured ? '所选机场来源的候选节点全部不可用时推送；同一故障只通知一次。' : alertConfig.configured ? '凭据已保存，选择机场来源并启用后开始监控。' : '请填写 Bot Token 与 Chat ID 后保存。' }}</div></section><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">WIREGUARD</span><h2>远程互联</h2></div><Network :size="18" class="muted-icon" /></div><div v-for="item in wireguard.interfaces || []" :key="item.name" class="wg-interface"><div class="wg-heading"><strong>{{ item.name || '未命名接口' }}</strong><span>{{ item.peers?.length || 0 }} 个 Peer</span></div><div v-for="peer in item.peers || []" :key="peer.public_key || peer.name" class="wg-peer"><div><strong>{{ peer.name || peer.public_key?.slice(0, 12) || '未命名 Peer' }}</strong><small>{{ peer.endpoint || '未公布端点' }}</small></div><span>{{ peer.latest_handshake ? timeValue(peer.latest_handshake * 1000) : '尚无握手' }}</span></div></div><div v-if="!wireguard.interfaces?.length" class="empty-inline">尚无 WireGuard 接口</div></section></div>
         </section>
       </div>
 
@@ -426,5 +1284,8 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
     </main>
     <div v-if="toastMessage" class="toast"><CheckCircle2 :size="16" />{{ toastMessage }}</div>
     <div v-if="renameTarget" class="modal-backdrop" @click.self="renameTarget = null"><form class="modal-card device-editor" @submit.prevent="saveRename"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="renameTarget = null"><X :size="17" /></button><span class="eyebrow">DEVICE PROFILE</span><h2>编辑设备</h2><p>{{ renameTarget.ip }} · {{ renameTarget.mac }}</p><label>显示名称<input v-model="renameDraft" autofocus maxlength="40" /></label><fieldset class="icon-picker"><legend>显示图标</legend><div class="icon-options"><button v-for="item in deviceIconOptions" :key="item.key" type="button" class="icon-choice" :class="{ selected: iconDraft === item.key }" :title="item.label" :aria-label="item.label" @click="iconDraft = item.key"><component :is="item.icon" :size="19" /><span>{{ item.label }}</span></button></div></fieldset><div class="modal-actions"><button type="button" class="secondary-button" @click="renameTarget = null">取消</button><button class="primary-button" type="submit" :disabled="busy === 'rename'">保存</button></div></form></div>
+    <div v-if="dnsUpstreamsOpen" class="modal-backdrop" @click.self="dnsUpstreamsOpen = false"><form class="modal-card wide-editor" @submit.prevent="saveDnsUpstreams"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="dnsUpstreamsOpen = false"><X :size="17" /></button><span class="eyebrow">DNS UPSTREAMS</span><h2>编辑解析服务器</h2><p>一行一个地址；带有 `|` 的内容会作为拨号地址保留。保存时会先做健康检查，失败不会替换当前配置。</p><label>国内上游<textarea v-model="dnsDomesticDraft" spellcheck="false" placeholder="223.5.5.5&#10;https://dns.alidns.com/dns-query" /></label><label>国外上游<textarea v-model="dnsForeignDraft" spellcheck="false" placeholder="https://1.1.1.1/dns-query" /></label><div class="modal-actions"><button type="button" class="secondary-button" @click="dnsUpstreamsOpen = false">取消</button><button class="primary-button" type="submit" :disabled="busy === 'dns-upstreams'">校验并应用</button></div></form></div>
+    <div v-if="airportPoolEditor" class="modal-backdrop" @click.self="airportPoolEditor = ''"><form class="modal-card" @submit.prevent="saveAirportPoolMode"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="airportPoolEditor = ''"><X :size="17" /></button><span class="eyebrow">POOL MODE</span><h2>编辑 {{ airportPoolEditor }}</h2><p>模式只改变当前候选池的选择方式，不会修改订阅内容。</p><label>候选池模式<select v-model="airportPoolMode"><option value="fallback">故障切换：按顺序使用候选</option><option value="url-test">自动测速：按延迟和健康度选择</option><option value="select">手动选择：保持当前节点</option></select></label><div class="modal-actions"><button type="button" class="secondary-button" @click="airportPoolEditor = ''">取消</button><button class="primary-button" type="submit" :disabled="busy === 'airport-mode'">保存模式</button></div></form></div>
+    <div v-if="ruleSetEditorOpen" class="modal-backdrop" @click.self="ruleSetEditorOpen = false"><form class="modal-card rule-set-editor" @submit.prevent="addRuleSet"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="ruleSetEditorOpen = false"><X :size="17" /></button><span class="eyebrow">RULE SET</span><h2>{{ ruleSetEditorIndex >= 0 ? '编辑规则集合' : '新增规则集合' }}</h2><p>支持多条 HTTPS 来源；由现有 Proxy 候选池下载，失败时保留上一份本地缓存。</p><label>集合名称<input v-model="ruleSetName" maxlength="40" placeholder="例如 我的 AI 规则" /></label><label>出口<select v-model="ruleSetPolicy"><option v-if="!rulePolicies.includes(ruleSetPolicy)" :value="ruleSetPolicy">{{ ruleSetPolicy }}</option><option v-for="policy in rulePolicies" :key="policy" :value="policy">{{ policy }}</option></select></label><label>规则集 HTTPS 地址<textarea v-model="ruleSetUrls" spellcheck="false" placeholder="https://raw.githubusercontent.com/.../rules.mrs&#10;一行一条" /></label><div class="editor-two-column"><label>匹配类型<select v-model="ruleSetBehavior"><option value="domain">域名</option><option value="ipcidr">IP 网段</option><option value="classical">复合规则</option></select></label><label>文件格式<select v-model="ruleSetFormat"><option value="mrs">MRS（二进制）</option><option value="yaml">YAML</option><option value="text">文本</option></select></label><label>匹配优先级<select v-model="ruleSetPriority"><option value="normal">普通优先级</option><option value="high">高优先级</option></select></label><label>更新周期<select v-model="ruleSetInterval"><option value="21600">每 6 小时</option><option value="86400">每天</option><option value="604800">每周</option></select></label></div><div class="modal-actions"><button type="button" class="secondary-button" @click="ruleSetEditorOpen = false">取消</button><button class="primary-button" type="submit">保存到草稿</button></div></form></div>
   </div>
 </template>
