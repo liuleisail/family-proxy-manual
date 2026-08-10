@@ -5,8 +5,7 @@
 ## 0. 前置条件
 
 - Debian/Ubuntu 或兼容 `systemd` 的主机，已安装 Docker Engine 与 Docker Compose 插件。Debian/Ubuntu 安装器会按需补齐 `python3-yaml`、`lm-sensors`、`tcpdump` 和 `util-linux`；其它发行版需自行安装。缺少 `lm-sensors` 时仅温度卡片不可用，缺少后两项则不能使用设备抓包诊断。
-- 旁路主机有固定 IPv4 地址，并与 RouterOS 位于同一 LAN。
-- RouterOS API 已仅向旁路主机开放；不得把 API 暴露到 WAN。
+- 旁路主机有固定 IPv4 地址，并接入家庭 LAN。若选择 RouterOS 集成，RouterOS API 只应向旁路主机开放，不得暴露到 WAN。
 - 旁路主机的 SSD 路径可用于 `/var/lib/family-proxy/docker`，或在配置中改成另一个持久目录。
 - 先确认当前家庭没有让同一设备同时进入 Surge 和 Mihomo 两套代理平面。
 
@@ -22,7 +21,7 @@ cd family-proxy-manual
 sudo ./scripts/bootstrap-interactive.sh
 ```
 
-引导脚本会询问 LAN、旁路主机 IP、LAN 桥接口、SSD 数据目录、RouterOS API 与管理页凭据，生成仅本机可读的 `router.env`，然后执行控制平面安装、基础 Mihomo 容器创建、服务启动及 `verify-server.sh`。它拒绝覆盖已有 `router.env` 或同名 Mihomo 容器；已有部署请使用升级流程。
+引导脚本会询问 LAN、旁路主机 IP、LAN 桥接口、SSD 数据目录、路由集成模式、可选 RouterOS API 与管理页凭据，生成仅本机可读的 `router.env`，然后执行控制平面安装、基础 Mihomo 容器创建、服务启动及 `verify-server.sh`。自动模式会在凭据齐全时验证 RouterOS API；没有 RouterOS 时应选择独立旁路。它拒绝覆盖已有 `router.env` 或同名 Mihomo 容器；已有部署请使用升级流程。
 
 如果希望像系统初始设置一样在浏览器中填写敏感配置，可使用一键安装入口：
 
@@ -30,9 +29,9 @@ sudo ./scripts/bootstrap-interactive.sh
 sudo ./scripts/install-one-click.sh
 ```
 
-它先在终端收集 LAN、旁路 IP、接口和持久化目录，随后安装基础服务并打印一次性向导地址。向导只允许 LAN 客户端访问，令牌完成一次提交后立即失效；RouterOS API 密码只写入权限为 `600` 的本机配置，管理页密码直接转换为 PBKDF2 哈希。完成页面向导后运行 `sudo ./scripts/verify-server.sh` 做完整核查。旧的 `bootstrap-interactive.sh` 仍保留为全量终端安装方式。
+它先在终端收集 LAN、旁路 IP、接口和持久化目录，随后安装基础服务并打印一次性向导地址。向导只允许 LAN 客户端访问，令牌完成一次提交后立即失效；选择 RouterOS 集成时会先验证 API 登录，选择独立旁路时不会保存或调用 RouterOS 凭据。管理页密码直接转换为 PBKDF2 哈希。完成页面向导后运行 `sudo ./scripts/verify-server.sh` 做完整核查。旧的 `bootstrap-interactive.sh` 仍保留为全量终端安装方式。
 
-该脚本不会自动写 RouterOS、占用 53 端口、覆盖已有 MosDNS、导入订阅或接管客户端。完成后仍应按本文第 4 节审阅 RouterOS 模板，并按实际情况对接既有 MosDNS。这些网络边界不应被封装进通用 Docker 镜像。
+该脚本不会自动写 RouterOS、占用 53 端口、覆盖已有 MosDNS、导入订阅或接管客户端。独立旁路安装完成后，维护页只展示本机 Linux、Mihomo 和 MosDNS；设备通过 `7890` HTTP/SOCKS5 手动代理，或由家庭网关将指定流量送入 `7893`。RouterOS 集成模式才需要按本文第 4 节审阅 RouterOS 模板。
 
 ### 手工填写配置
 

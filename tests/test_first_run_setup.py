@@ -45,6 +45,7 @@ class FirstRunSetupTests(unittest.TestCase):
     def form(self, **overrides):
         values = {
             "token": ["setup-token"],
+            "router_mode": ["auto"],
             "router_host": ["192.168.10.1"],
             "router_user": ["family_proxy"],
             "router_password": ["router-secret"],
@@ -62,7 +63,8 @@ class FirstRunSetupTests(unittest.TestCase):
         return values
 
     def test_setup_updates_hash_password_and_encodes_dns_auth(self):
-        updates = GATEWAY.setup_updates(self.form())
+        with patch.object(GATEWAY, "probe_routeros"):
+            updates = GATEWAY.setup_updates(self.form())
         self.assertNotIn("UI_PASSWORD", updates)
         self.assertEqual(updates["ROUTER_PASSWORD"], "router-secret")
         self.assertEqual(updates["DNS_UPSTREAM_AUTH_B64"], "ZG5zLXVzZXI6ZG5zLXNlY3JldA==")
@@ -70,13 +72,30 @@ class FirstRunSetupTests(unittest.TestCase):
         self.assertEqual(len(updates["UI_PASSWORD_HASH"]), 64)
         self.assertEqual(updates["SETUP_PENDING"], "false")
 
+    def test_auto_mode_without_routeros_credentials_resolves_standalone(self):
+        updates = GATEWAY.setup_updates(self.form(router_user="", router_password=""))
+        self.assertEqual(updates["ROUTER_MODE"], "standalone")
+        self.assertEqual(updates["ROUTER_HOST"], "")
+        self.assertEqual(updates["ROUTER_CN_AUTO_SYNC"], "false")
+
+    def test_explicit_standalone_mode_does_not_probe_routeros(self):
+        with patch.object(GATEWAY, "probe_routeros") as probe:
+            updates = GATEWAY.setup_updates(self.form(router_mode="standalone", router_user="", router_password=""))
+        probe.assert_not_called()
+        self.assertEqual(updates["ROUTER_MODE"], "standalone")
+
+    def test_auto_mode_requires_all_routeros_credentials_once_started(self):
+        with self.assertRaisesRegex(ValueError, "必须同时填写"):
+            GATEWAY.setup_updates(self.form(router_user="family_proxy", router_password=""))
+
     def test_setup_rejects_weak_or_inconsistent_credentials(self):
-        with self.assertRaisesRegex(ValueError, "至少需要 12"):
-            GATEWAY.setup_updates(self.form(ui_password="short", ui_password_confirm="short"))
-        with self.assertRaisesRegex(ValueError, "不一致"):
-            GATEWAY.setup_updates(self.form(ui_password_confirm="different-password"))
-        with self.assertRaisesRegex(ValueError, "服务地址"):
-            GATEWAY.setup_updates(self.form(mosdns_api_url="not-a-url"))
+        with patch.object(GATEWAY, "probe_routeros"):
+            with self.assertRaisesRegex(ValueError, "至少需要 12"):
+                GATEWAY.setup_updates(self.form(ui_password="short", ui_password_confirm="short"))
+            with self.assertRaisesRegex(ValueError, "不一致"):
+                GATEWAY.setup_updates(self.form(ui_password_confirm="different-password"))
+            with self.assertRaisesRegex(ValueError, "服务地址"):
+                GATEWAY.setup_updates(self.form(mosdns_api_url="not-a-url"))
 
     def test_merge_env_removes_plaintext_password_and_preserves_other_values(self):
         source = "# keep this\nUI_USERNAME=setup\nUI_PASSWORD=temporary\nOTHER=value\n"
@@ -113,6 +132,7 @@ class FirstRunSetupTests(unittest.TestCase):
                     "FAMILY_PROXY_IP=192.168.10.10",
                     "FAMILY_ROUTER_IP=192.168.10.1",
                     "FAMILY_DOCKER_ROOT=/var/lib/family-proxy/docker",
+                    "ROUTER_MODE=auto",
                     "ROUTER_HOST=192.168.10.1",
                     "ROUTER_USER=setup",
                     "ROUTER_PASSWORD=",
@@ -126,6 +146,30 @@ class FirstRunSetupTests(unittest.TestCase):
             content = path.read_text()
             self.assertNotIn("UI_PASSWORD=", content)
             self.assertIn("UI_PASSWORD_HASH=", content)
+
+    def test_prepare_config_rejects_unresolved_auto_mode_after_setup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "router.env"
+            path.write_text(
+                "\n".join([
+                    "FAMILY_LAN_CIDR=192.168.10.0/24",
+                    "FAMILY_LAN_PREFIX=192.168.10.",
+                    "FAMILY_PROXY_IP=192.168.10.10",
+                    "FAMILY_ROUTER_IP=192.168.10.1",
+                    "FAMILY_DOCKER_ROOT=/var/lib/family-proxy/docker",
+                    "ROUTER_MODE=auto",
+                    "ROUTER_HOST=192.168.10.1",
+                    "ROUTER_USER=setup",
+                    "ROUTER_PASSWORD=secret",
+                    "UI_USERNAME=admin",
+                    "UI_PASSWORD_SALT=00",
+                    "UI_PASSWORD_HASH=00",
+                    "SETUP_PENDING=false",
+                ]) + "\n"
+            )
+            with patch.object(sys, "argv", ["prepare-config.py", str(path)]):
+                with self.assertRaisesRegex(SystemExit, "must be resolved"):
+                    PREPARE.main()
 
 
 if __name__ == "__main__":

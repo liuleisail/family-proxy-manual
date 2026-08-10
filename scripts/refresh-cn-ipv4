@@ -45,6 +45,8 @@ fi
 if [[ ${1:-} != --no-sync && -x /usr/local/sbin/sync-routeros-cn-ipv4 ]]; then
   config=/etc/family-proxy-ui/router.env
   if [[ -r $config ]]; then
-    grep -qx 'ROUTER_CN_AUTO_SYNC=true' "$config" && /usr/local/sbin/sync-routeros-cn-ipv4
+    router_mode=$(awk -F= '$1 == "ROUTER_MODE" { print tolower($2); exit }' "$config")
+    [[ $router_mode == routeros ]] && grep -qx 'ROUTER_CN_AUTO_SYNC=true' "$config" \
+      && /usr/local/sbin/sync-routeros-cn-ipv4
   fi
 fi

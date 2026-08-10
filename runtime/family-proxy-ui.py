@@ -57,7 +57,7 @@ FIXED_MANAGED_IPS = set()
 RESERVED_IPS = {"__FAMILY_ROUTER_IP__", "__FAMILY_RESERVED_GATEWAY_IP__", PROXY_IP}
 AUDIT_PATH = Path("/var/log/family-proxy-ui-audit.jsonl")
 CSRF_TOKEN_PATH = Path("/etc/family-proxy-ui/csrf-token")
-BUILD_VERSION = "2026.07.29-wireguard-peer-filter"
+BUILD_VERSION = "2026.08.10-standalone-routing"
 SHARED_LIST = "family_mihomo_devices"
 SHARED_TABLE = "family_mihomo_shared"
 SHARED_CONN_MARK = "family_mihomo_conn"
@@ -189,10 +189,16 @@ def load_config():
         if "=" in line and not line.lstrip().startswith("#"):
             key, value = line.strip().split("=", 1)
             config[key] = value
-    required = {"ROUTER_HOST", "ROUTER_USER", "ROUTER_PASSWORD"}
-    if required - config.keys():
+    mode = config.get("ROUTER_MODE", "routeros").lower()
+    if mode not in {"routeros", "standalone"}:
+        raise RouterError("Router integration mode is unresolved; complete the first-run setup")
+    if mode == "routeros" and {"ROUTER_HOST", "ROUTER_USER", "ROUTER_PASSWORD"} - config.keys():
         raise RouterError("Router automation credentials are incomplete")
     return config
+
+
+def standalone_mode():
+    return load_config().get("ROUTER_MODE", "routeros").lower() == "standalone"
 
 
 def valid_basic_auth(header):
@@ -603,7 +609,8 @@ def read_platform_update_status():
     try:
         payload = json.loads(PLATFORM_UPDATE_STATUS_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {"checked_at": 0, "routeros": {"state": "unknown"}, "z4pro": {"state": "unknown"}}
+        return {"checked_at": 0, "mode": "standalone" if standalone_mode() else "routeros",
+                "routeros": {"state": "not_applicable"}, "z4pro": {"state": "not_applicable"}}
     except (OSError, json.JSONDecodeError) as exc:
         raise RouterError("系统更新状态读取失败") from exc
     return payload if isinstance(payload, dict) else {"checked_at": 0}
@@ -667,6 +674,12 @@ def zos_upgrade_status():
 
 
 def routeros_upgrade_status():
+    if standalone_mode():
+        return {
+            "state": "not_applicable", "available": False, "current_version": "未接入",
+            "latest_version": "不适用", "channel": "独立旁路", "detail": "独立旁路模式未连接 RouterOS",
+            "checked_at": int(time.time()),
+        }
     try:
         with RouterOS() as api:
             records = api.print("/system/package/update")
@@ -755,6 +768,24 @@ def mosdns_component_update_status(check=False):
     }
 
 
+def host_platform_status():
+    values = {}
+    try:
+        for raw in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+            if "=" in raw:
+                key, value = raw.split("=", 1)
+                values[key] = value.strip().strip('"')
+    except OSError:
+        pass
+    name = values.get("PRETTY_NAME") or values.get("NAME") or "Linux 主机"
+    version = values.get("VERSION_ID") or "未知版本"
+    return {
+        "state": "current", "available": False, "current_version": version,
+        "latest_version": version, "detail": f"独立旁路运行于 {name}；系统更新请使用主机官方方式",
+        "checked_at": int(time.time()),
+    }
+
+
 def send_platform_update_alert(updates):
     try:
         data = json.loads(ALERT_CONFIG_PATH.read_text(encoding="utf-8"))
@@ -782,8 +813,15 @@ def send_platform_update_alert(updates):
 
 def check_platform_updates():
     previous = read_platform_update_status()
-    routeros, z4pro = routeros_upgrade_status(), zos_upgrade_status()
+    standalone = standalone_mode()
+    routeros = routeros_upgrade_status()
+    z4pro = ({
+        "state": "not_applicable", "available": False, "current_version": "未接入",
+        "latest_version": "不适用", "detail": "独立旁路模式未运行 Z4Pro ZOS 官方升级服务",
+        "checked_at": int(time.time()),
+    } if standalone else zos_upgrade_status())
     mihomo, mosdns = mihomo_component_update_status(check=True), mosdns_component_update_status(check=True)
+    host = host_platform_status() if standalone else None
     updates = []
     if routeros.get("available"):
         updates.append({"name": "RouterOS", **routeros})
@@ -804,10 +842,13 @@ def check_platform_updates():
     elif updates:
         notification = {"state": "already_sent", "message": "当前可用版本已经提醒，不重复推送"}
     result = {
-        "checked_at": int(time.time()), "routeros": routeros, "z4pro": z4pro,
+        "checked_at": int(time.time()), "mode": "standalone" if standalone else "routeros",
+        "routeros": routeros, "z4pro": z4pro,
         "mihomo": mihomo, "mosdns": mosdns,
         "notification": notification, "notified_fingerprint": notified_fingerprint,
     }
+    if host is not None:
+        result["host"] = host
     atomic_json(PLATFORM_UPDATE_STATUS_PATH, result)
     audit("platform_update_check", "checked", notification["state"])
     return result
@@ -1821,6 +1862,8 @@ def homekit_direct_route_sync():
     TPROXY replies keep their RouterOS return route; only traffic whose source
     is the Z4Pro itself uses the direct LAN table.
     """
+    if standalone_mode():
+        return {"selected": 0, "active": 0, "missing": [], "addresses": {}, "updated_at": 0}
     route_interface = load_config().get("FAMILY_HOMEKIT_ROUTE_INTERFACE", HOMEKIT_ROUTE_INTERFACE).strip()
     if not re.fullmatch(r"[A-Za-z0-9_.:-]+", route_interface):
         raise RouterError("HomeKit 直连接口名称无效")
@@ -1922,6 +1965,8 @@ def homekit_direct_route_sync():
 
 
 def update_device_preference(mac, alias=None, favorite=None, homekit_direct=None, icon=None):
+    if standalone_mode():
+        raise RouterError("独立旁路模式不读取家庭网关设备，也不提供设备接管配置")
     mac = normalize_mac(mac)
     with RouterOS() as api:
         lease = next((item for item in api.print("/ip/dhcp-server/lease")
@@ -1988,16 +2033,21 @@ def update_device_preference(mac, alias=None, favorite=None, homekit_direct=None
 
 def setup_status():
     try:
+        mode = load_config().get("ROUTER_MODE", "routeros")
+    except RouterError:
+        mode = "auto"
+    try:
         state = json.loads(SETUP_STATE_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {"pending": False}
+        return {"pending": False, "mode": mode}
     except (OSError, json.JSONDecodeError) as exc:
         raise RouterError("首次配置状态读取失败") from exc
     if state.get("pending") is not True:
-        return {"pending": False}
+        return {"pending": False, "mode": mode}
     token = str(state.get("token") or "").strip()
     return {
         "pending": bool(token),
+        "mode": mode,
         "url": "/setup?" + urlencode({"token": token}) if token else "/setup",
     }
 
@@ -2133,6 +2183,8 @@ def wireguard_probe(api, target, source):
 
 def wireguard_status():
     config = load_config()
+    if config.get("ROUTER_MODE", "routeros").lower() == "standalone":
+        return {"updated_at": int(time.time()), "interfaces": [], "events": [], "mode": "standalone"}
     mobile_name = config.get("WIREGUARD_MOBILE_INTERFACE") or "back-to-home-vpn"
     site_name = config.get("WIREGUARD_SITE_INTERFACE") or "wg-home"
     mobile_label = config.get("WIREGUARD_MOBILE_LABEL") or "手机按需回家"
@@ -2318,6 +2370,28 @@ def router_summary(api):
     return summary
 
 
+def standalone_summary():
+    summary = local_health()
+    summary.update({
+        "mode": "standalone",
+        "mode_label": "独立旁路",
+        "proxy_ip": PROXY_IP,
+        "router": "not_configured",
+        "router_label": "家庭网关未接入 RouterOS",
+        "netwatch": "not_applicable",
+        "router_resource": {"available": False},
+        "ipv6_policy": "由家庭网关或客户端自行配置",
+        "drift": [],
+        "upnp_mappings": None,
+        "upnp_enabled": None,
+        "last_change": last_audit_event(),
+        "backup": latest_backup(load_config()),
+        "homekit_direct": {"selected": 0, "active": 0, "updated_at": 0},
+        "standalone_notice": "未接入 RouterOS；默认不接管设备。请手动设置 7890 代理，或在家庭网关配置策略路由。",
+    })
+    return summary
+
+
 def last_audit_event():
     try:
         lines = AUDIT_PATH.read_text(encoding="utf-8").splitlines()
@@ -2434,6 +2508,8 @@ def configuration_drift(api, leases, router_managed, file_managed):
 
 
 def list_devices():
+    if standalone_mode():
+        return {"summary": standalone_summary(), "devices": [], "mode": "standalone"}
     with DEVICE_PREFS_LOCK:
         preferences = load_device_preferences()
     favorite_macs = set(preferences["favorites"])
@@ -2763,6 +2839,8 @@ def ensure_static_dhcp_lease(api, lease, ip):
 
 
 def enable_device(ip):
+    if standalone_mode():
+        raise RouterError("独立旁路模式不会自动接管设备；请在客户端设置 7890 代理或在家庭网关配置策略路由")
     ip = validate_ip(ip)
     tag = managed_tag(ip)
     health = local_health()
@@ -2813,6 +2891,8 @@ def enable_device(ip):
 
 
 def remove_device(ip):
+    if standalone_mode():
+        raise RouterError("独立旁路模式没有 RouterOS 接管规则")
     ip = validate_ip(ip)
     with RouterOS() as api:
         removed = remove_shared_membership(api, ip)
@@ -2958,6 +3038,7 @@ def system_status():
         )
         value = {
             "healthy": healthy,
+            "mode": "standalone" if standalone_mode() else "routeros",
             "cpu": {"percent": cpu_percent, "cores": os.cpu_count() or 0,
                     "load_1m": round(load_1m, 2), "load_5m": round(load_5m, 2), "load_15m": round(load_15m, 2)},
             "memory": {"used": memory_used, "total": memory_total, "percent": memory_percent,
@@ -3516,6 +3597,38 @@ PAGE = PAGE.replace(
     1,
 )
 
+
+def legacy_page():
+    if not standalone_mode():
+        return PAGE
+    page = PAGE.replace(
+        '</style>',
+        '.standalone-banner{margin-bottom:20px;padding:14px 16px;border:1px solid rgba(10,132,255,.35);border-radius:8px;background:#151c29;color:#d6e7ff;font-size:13px;line-height:1.55}.standalone-banner strong{display:block;margin-bottom:4px;color:#fff}.standalone-hidden{display:none!important}</style>',
+        1,
+    )
+    page = page.replace(
+        '<main class="wrap">',
+        '<main class="wrap"><div class="standalone-banner"><strong>独立旁路模式</strong>本机不连接 RouterOS，也不会自动接管家庭设备。请使用 7890 HTTP/SOCKS5 代理，或由家庭网关将指定流量送入 7893。</div>',
+        1,
+    )
+    page = page.replace('<div class="eyebrow">SELECTIVE ROUTING</div>', '<div class="eyebrow">STANDALONE ROUTING</div>', 1)
+    page = page.replace('<h1>设备管理</h1>', '<h1>代理设备</h1>', 1)
+    page = page.replace('只接管需要旁路的设备，其余家庭网络保持原样。', '不连接家庭网关，不自动接管设备；按需使用本机代理入口。', 1)
+    page = page.replace(
+        '<section class="section"><div class="section-title"><h2>加入旁路</h2>',
+        '<section class="section standalone-hidden"><div class="section-title"><h2>加入旁路</h2>',
+        1,
+    )
+    page = page.replace('<div class="section-title"><h2>设备</h2>', '<div class="section-title"><h2>代理设备</h2>', 1)
+    page = page.replace("ready=summary.ready&&summary.netwatch==='up'", "ready=summary.ready&&(summary.mode==='standalone'||summary.netwatch==='up')", 1)
+    page = page.replace(
+        "healthItem('RB5009',summary.router==='connected','管理连接')+healthItem('DNS',checks.dns,'国内解析')+healthItem('Mihomo',checks.mihomo,'控制接口')+healthItem('当前策略',checks.policy,summary.detail?.proxy||'未就绪')+healthItem('自动回退',summary.netwatch==='up',summary.netwatch==='up'?'已启用':'未就绪')",
+        "healthItem(summary.mode==='standalone'?'运行模式':'RB5009',summary.mode==='standalone'||summary.router==='connected',summary.mode==='standalone'?'独立旁路':'管理连接')+healthItem('DNS',checks.dns,'本机解析')+healthItem('Mihomo',checks.mihomo,'代理入口')+healthItem(summary.mode==='standalone'?'设备接管':'当前策略',summary.mode==='standalone'||checks.policy,summary.mode==='standalone'?'未启用':summary.detail?.proxy||'未就绪')+healthItem(summary.mode==='standalone'?'路由策略':'自动回退',summary.mode==='standalone'||summary.netwatch==='up',summary.mode==='standalone'?'由家庭网关或客户端配置':summary.netwatch==='up'?'已启用':'未就绪')",
+        1,
+    )
+    page = page.replace("managed:'尚无已接管设备'", "managed:'独立模式不读取家庭网关设备'", 1)
+    return page
+
 RULES_PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>代理规则</title><style>
 :root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC","Segoe UI",sans-serif;background:#000;color:#f5f5f7;letter-spacing:0}*{box-sizing:border-box}body{margin:0;background:#000;color:#f5f5f7}.topbar{position:sticky;top:0;z-index:10;border-bottom:1px solid rgba(255,255,255,.1);background:rgba(18,18,20,.88);backdrop-filter:saturate(180%) blur(22px);-webkit-backdrop-filter:saturate(180%) blur(22px)}.topbar-inner{max-width:1040px;min-height:58px;margin:auto;padding:0 22px;display:flex;align-items:center;justify-content:space-between;gap:18px}.brand{font-size:17px;font-weight:650;color:#fff;white-space:nowrap}.nav{display:flex;align-items:center;gap:4px;padding:3px;background:#2c2c2e;border-radius:8px}.nav a{padding:7px 11px;border-radius:6px;color:#aeaeb2;text-decoration:none;font-size:13px;white-space:nowrap}.nav a.active{background:#636366;color:#fff}.wrap{max-width:1040px;margin:auto;padding:38px 22px 64px}.intro{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:25px}.intro h1{font-size:30px;line-height:1.15;margin:0;font-weight:700}.intro p{margin:9px 0 0;color:#98989d;font-size:14px}.count{padding:8px 11px;border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;color:#30d158;font-size:13px;white-space:nowrap}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:9px}.toolbar h2{font-size:13px;color:#8e8e93;font-weight:600;margin:0}.actions{display:flex;gap:7px}.group{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.rule-row{display:grid;grid-template-columns:34px minmax(0,1fr) auto;align-items:center;gap:9px;padding:9px 12px;border-top:1px solid #38383a}.rule-row:first-child{border-top:0}.rule-index{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#636366;text-align:right}.rule-input{min-width:0;width:100%;height:38px;border:1px solid transparent;border-radius:7px;background:#2c2c2e;color:#f5f5f7;padding:0 10px;font:13px ui-monospace,SFMono-Regular,Menlo,monospace;outline:none}.rule-input:focus{border-color:#0a84ff;box-shadow:0 0 0 3px rgba(10,132,255,.18)}.rule-input.protected{color:#aeaeb2}.icon-set{display:flex;gap:3px}.icon{width:34px;height:34px;border:0;border-radius:6px;background:transparent;color:#0a84ff;font-size:17px;cursor:pointer}.icon:hover{background:rgba(10,132,255,.12)}.icon.danger{color:#ff453a}.icon:disabled{color:#48484a;cursor:default;background:transparent}.button{height:36px;border:0;border-radius:7px;padding:0 13px;font:600 13px inherit;cursor:pointer}.primary{background:#0a84ff;color:#fff}.secondary{background:#2c2c2e;color:#f5f5f7}.button:disabled{opacity:.5;cursor:default}.footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px}.status{min-height:20px;color:#30d158;font-size:13px}.status.error{color:#ff6961}.empty{padding:28px;text-align:center;color:#8e8e93}.dirty .count{color:#ffd60a}@media(max-width:760px){.topbar-inner{height:auto;padding:10px 14px;align-items:flex-start;flex-direction:column;gap:8px}.nav{width:100%;display:grid;grid-template-columns:repeat(4,1fr)}.nav a{text-align:center;padding:7px 5px;white-space:normal}.wrap{padding:28px 14px 50px}.intro{align-items:flex-start;flex-direction:column}.rule-row{grid-template-columns:28px minmax(0,1fr);padding:9px}.icon-set{grid-column:2;justify-content:flex-end}.footer{align-items:stretch;flex-direction:column}.footer .button{width:100%}.actions{width:100%}.actions .button{flex:1}}
 </style></head><body><header class="topbar"><div class="topbar-inner"><div class="brand">家庭网络控制台</div><nav class="nav"><a href="/">设备</a><a class="active" href="/rules">规则</a><a href="/airport/">机场与候选池</a><a href="http://__FAMILY_PROXY_IP__:18091/">DNS</a></nav></div></header><main class="wrap" id="app"><div class="intro"><div><h1>代理规则</h1><p>按顺序匹配流量，国内直连与最终兜底受到保护。</p></div><div class="count" id="count">正在载入</div></div><div class="toolbar"><h2>规则顺序</h2><div class="actions"><button class="button secondary" onclick="reloadRules()">重新载入</button><button class="button primary" id="save" onclick="saveRules()" disabled>应用更改</button></div></div><div class="group" id="rules"><div class="empty">正在读取 Mihomo 配置</div></div><div class="footer"><div class="status" id="status"></div><button class="button secondary" onclick="addRule()">添加规则</button></div></main><script>
@@ -3756,7 +3869,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
         if path in {"/", "/legacy"}:
-            data = PAGE.replace("__CSRF__", CSRF_TOKEN).encode()
+            data = legacy_page().replace("__CSRF__", CSRF_TOKEN).encode()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
