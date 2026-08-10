@@ -459,6 +459,11 @@ class Handler(BaseHTTPRequestHandler):
                     html = html.replace(f'href="http://{proxy_ip}:18088/rules"', 'href="/rules"')
                     html = html.replace(f'href="http://{proxy_ip}:18090/"', 'href="/airport/"')
                     html = html.replace('<a class="active" href="/">DNS</a>', '<a class="active" href="/dns/">DNS</a>')
+                    html = html.replace(
+                        "</head>",
+                        '<style>@media(min-width:761px){.topbar-inner{position:relative}.topbar-inner .nav{position:absolute;left:50%;transform:translateX(-50%)}}@media(max-width:760px){.topbar-inner{position:static}.topbar-inner .nav{position:static;transform:none}}@media(min-width:901px){.header-inner{position:relative}.header-inner .global-nav{position:absolute;left:50%;transform:translateX(-50%)}}@media(max-width:900px){.header-inner{position:static}.header-inner .global-nav{position:static;transform:none}}</style></head>',
+                        1,
+                    )
                 page = None
                 if parsed.path == "/":
                     page = "devices"
