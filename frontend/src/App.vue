@@ -154,6 +154,12 @@ const rulesPayload = ref<RulePayload>({ rules: [] })
 const ruleDraft = ref<string[]>([])
 const ruleDirty = ref(false)
 const ruleAdvanced = ref(false)
+const ruleCardLabels = ref<Record<string, string>>({})
+const ruleCardLabelsVersion = ref('')
+const draggingRuleItem = ref('')
+const dropTargetRuleItem = ref('')
+const ruleCardEditorOpen = ref(false)
+const ruleCardEditorKey = ref('')
 const rulePreviewTarget = ref('')
 const rulePreview = ref<JsonRecord | null>(null)
 const ruleSetEditorOpen = ref(false)
@@ -837,6 +843,8 @@ async function loadRules() {
     const data = await api<RulePayload>('/api/rules')
     rulesPayload.value = data
     ruleDraft.value = [...(data.rules || [])]
+    ruleCardLabels.value = { ...(data.rule_card_labels || {}) }
+    ruleCardLabelsVersion.value = data.rule_card_labels_version || ''
     ruleDirty.value = false
   } catch (error) {
     notify(error instanceof Error ? `规则读取失败：${error.message}` : '规则读取失败')
@@ -849,15 +857,113 @@ function ruleIsProtected(rule: string) {
 
 function ruleParts(rule: string) {
   const parts = rule.split(',')
-  return { type: parts[0] || 'DOMAIN-SUFFIX', value: parts[1] || '', policy: parts[2] || 'Others' }
+  const type = (parts[0] || 'DOMAIN-SUFFIX').toUpperCase()
+  if (type === 'MATCH') return { type, value: '', policy: parts[1] || 'Others' }
+  return { type, value: parts[1] || '', policy: parts[2] || 'Others' }
+}
+
+const ruleCardCategories: Record<string, string> = {
+  apple: 'Apple',
+  microsoft: 'Microsoft',
+  openai: 'AI',
+  gemini: 'Gemini',
+  telegram: 'Telegram',
+  tiktok: 'TikTok',
+  youtube: 'YouTube',
+  google: 'Google',
+}
+
+function isGithubRule(model: ReturnType<typeof ruleParts>) {
+  return ['DOMAIN', 'DOMAIN-SUFFIX'].includes(model.type) && new Set(['github.com', 'githubusercontent.com', 'githubassets.com', 'githubapp.com']).has(model.value.toLowerCase().replace(/^\./, ''))
+}
+
+function ruleCardKey(rule: string) {
+  const model = ruleParts(rule)
+  if (model.type === 'MATCH') return '__default__'
+  if (isGithubRule(model)) return '__github__'
+  if (model.policy === 'DIRECT') return '__direct__'
+  if (model.type === 'GEOSITE' && ruleCardCategories[model.value.toLowerCase()]) return `__category__${model.value.toLowerCase()}`
+  return `__custom__${encodeURIComponent(rule)}`
+}
+
+function ruleSetIndexForRule(raw: string) {
+  const provider = raw.split(',')[1] || ''
+  return ruleSets.value.findIndex((set) => arrayFrom(set.sources).some((source: JsonRecord) => provider === `family-${set.key}-${source.key}`))
+}
+
+function managedRulesForSet(set: JsonRecord) {
+  return arrayFrom(set.sources).map((source: JsonRecord) => `RULE-SET,family-${set.key}-${source.key},${set.policy || 'Others'}${source.behavior === 'ipcidr' ? ',no-resolve' : ''}`)
+}
+
+function ruleCardEntries(key: string) {
+  return ruleDraft.value.map((raw, index) => ({ raw, index, model: ruleParts(raw) })).filter((entry) => {
+    if (entry.raw.startsWith('RULE-SET,family-') && ruleSetIndexForRule(entry.raw) >= 0) return false
+    return ruleCardKey(entry.raw) === key
+  })
+}
+
+function ruleItemEntries(item: string) {
+  if (!item.startsWith('set:')) return ruleCardEntries(item.slice(5))
+  const set = ruleSets.value.find((value) => value.key === item.slice(4))
+  if (!set) return []
+  return ruleDraft.value.map((raw, index) => ({ raw, index, model: ruleParts(raw) })).filter((entry) => {
+    const provider = entry.raw.split(',')[1] || ''
+    return arrayFrom(set.sources).some((source: JsonRecord) => provider === `family-${set.key}-${source.key}`)
+  })
+}
+
+function itemMatchesRule(item: string, raw: string) {
+  if (item.startsWith('set:')) {
+    const set = ruleSets.value.find((value) => value.key === item.slice(4))
+    const provider = raw.split(',')[1] || ''
+    return Boolean(set && arrayFrom(set.sources).some((source: JsonRecord) => provider === `family-${set.key}-${source.key}`))
+  }
+  return !raw.startsWith('RULE-SET,family-') && ruleCardKey(raw) === item.slice(5)
+}
+
+function ruleCardTitle(key: string, entries: Array<{ raw: string; model: ReturnType<typeof ruleParts> }>) {
+  if (key === '__default__') return '默认兜底'
+  if (key === '__direct__') return '直连与国内服务'
+  if (key === '__github__') return 'GitHub'
+  if (key.startsWith('__category__')) return ruleCardCategories[key.slice('__category__'.length)] || '网站分类'
+  const first = entries[0]
+  return (first && ruleCardLabels.value[first.raw]) || (first ? `${first.model.type === 'DOMAIN-SUFFIX' ? '域名后缀' : first.model.type === 'DOMAIN' ? '域名' : first.model.type === 'GEOSITE' ? '网站分类' : first.model.type === 'GEOIP' ? 'IP 地区' : first.model.type.startsWith('IP-') ? 'IP 网段' : '规则'}：${first.model.value || '未命名规则'}` : '未命名规则')
+}
+
+function ruleCardLabel(key: string) {
+  return ruleCardEntries(key)[0] ? ruleCardLabels.value[ruleCardEntries(key)[0].raw] || '' : ''
+}
+
+function ruleCardSourceCount(item: JsonRecord) {
+  return item.entries?.length || arrayFrom(item.set?.sources).length
+}
+
+function ruleCardSummary(entries: Array<{ model: ReturnType<typeof ruleParts> }>) {
+  return entries.slice(0, 2).map((entry) => entry.model.type === 'MATCH' ? '未被前面规则匹配的流量' : `${entry.model.type} ${entry.model.value || '未填写'}`).join('；') || '尚未添加规则'
+}
+
+function ruleCardSubtitle(key: string, entries: Array<{ model: ReturnType<typeof ruleParts> }>) {
+  if (key === '__default__') return '未被前面规则匹配的流量'
+  if (key === '__direct__') return '不经过机场，使用本地网络'
+  const routes = [...new Set(entries.map((entry) => entry.model.policy))]
+  return routes.length === 1 ? `出口：${routes[0]}` : `出口：${routes.length} 个出口`
+}
+
+function moveRuleCardLabel(previous: string, next: string) {
+  if (ruleCardLabels.value[previous]) {
+    ruleCardLabels.value[next] = ruleCardLabels.value[previous]
+    delete ruleCardLabels.value[previous]
+  }
 }
 
 function setRule(index: number, key: string, value: string) {
+  const previous = ruleDraft.value[index]
   const parts = ruleParts(ruleDraft.value[index])
   if (key === 'type') parts.type = value
   if (key === 'value') parts.value = value
   if (key === 'policy') parts.policy = value
   ruleDraft.value[index] = `${parts.type},${parts.value},${parts.policy}`
+  moveRuleCardLabel(previous, ruleDraft.value[index])
   ruleDirty.value = true
 }
 
@@ -882,12 +988,15 @@ function moveRule(index: number, delta: number) {
 
 function removeRule(index: number) {
   if (ruleIsProtected(ruleDraft.value[index])) return
+  delete ruleCardLabels.value[ruleDraft.value[index]]
   ruleDraft.value.splice(index, 1)
   ruleDirty.value = true
 }
 
 function setRawRule(index: number, event: Event) {
+  const previous = ruleDraft.value[index]
   ruleDraft.value[index] = (event.target as HTMLInputElement).value
+  moveRuleCardLabel(previous, ruleDraft.value[index])
   ruleDirty.value = true
 }
 
@@ -903,12 +1012,14 @@ async function saveRules() {
         version: rulesPayload.value.version,
         rule_sets: rulesPayload.value.rule_sets,
         rule_sets_version: rulesPayload.value.rule_sets_version,
-        rule_card_labels: rulesPayload.value.rule_card_labels,
-        rule_card_labels_version: rulesPayload.value.rule_card_labels_version,
+        rule_card_labels: ruleCardLabels.value,
+        rule_card_labels_version: ruleCardLabelsVersion.value,
       }),
     })
     rulesPayload.value = data
     ruleDraft.value = [...(data.rules || [])]
+    ruleCardLabels.value = { ...(data.rule_card_labels || {}) }
+    ruleCardLabelsVersion.value = data.rule_card_labels_version || ''
     ruleDirty.value = false
     notify(data.message || '规则已通过校验并生效')
   } catch (error) {
@@ -977,6 +1088,110 @@ function moveRuleSet(index: number, delta: number) {
 
 function ruleSetUrlsText(set: JsonRecord) {
   return arrayFrom(set.sources).map((source: JsonRecord) => source.url).join(' · ')
+}
+
+function ensureRuleItemInDraft(item: string) {
+  if (!item.startsWith('set:') || ruleDraft.value.some((raw) => itemMatchesRule(item, raw))) return
+  const set = ruleSets.value.find((value) => value.key === item.slice(4))
+  if (!set) return
+  const matchIndex = ruleDraft.value.findIndex((raw) => raw.toUpperCase().startsWith('MATCH,'))
+  ruleDraft.value.splice(matchIndex < 0 ? ruleDraft.value.length : matchIndex, 0, ...managedRulesForSet(set))
+}
+
+function startRuleItemDrag(event: Event, item: string) {
+  const card = ruleCardItems.value.find((value) => value.key === item)
+  if (!card?.movable) return
+  const dragEvent = event as DragEvent
+  draggingRuleItem.value = item
+  dragEvent.dataTransfer?.setData('text/plain', item)
+  if (dragEvent.dataTransfer) dragEvent.dataTransfer.effectAllowed = 'move'
+}
+
+function endRuleItemDrag() {
+  draggingRuleItem.value = ''
+  dropTargetRuleItem.value = ''
+}
+
+function dragRuleItemOver(event: Event, item: string) {
+  if (!draggingRuleItem.value || draggingRuleItem.value === item) return
+  event.preventDefault()
+  dropTargetRuleItem.value = item
+  const dragEvent = event as DragEvent
+  if (dragEvent.dataTransfer) dragEvent.dataTransfer.dropEffect = 'move'
+}
+
+function dragRuleItemLeave(item: string) {
+  if (dropTargetRuleItem.value === item) dropTargetRuleItem.value = ''
+}
+
+function dropRuleItem(event: Event, target: string) {
+  event.preventDefault()
+  const source = draggingRuleItem.value
+  endRuleItemDrag()
+  if (!source || source === target) return
+
+  const movingEntries = ruleItemEntries(source)
+  const movingRules = movingEntries.length ? movingEntries.map((entry) => entry.raw) : (() => {
+    if (!source.startsWith('set:')) return []
+    const set = ruleSets.value.find((value) => value.key === source.slice(4))
+    return set ? managedRulesForSet(set) : []
+  })()
+  if (!movingRules.length) return
+
+  const movingIndexes = new Set(movingEntries.map((entry) => entry.index))
+  ruleDraft.value = ruleDraft.value.filter((_, index) => !movingIndexes.has(index))
+  ensureRuleItemInDraft(target)
+  const insertAt = ruleDraft.value.findIndex((raw) => itemMatchesRule(target, raw))
+  if (insertAt < 0) {
+    notify('目标卡片没有可排序的规则')
+    return
+  }
+  ruleDraft.value.splice(insertAt, 0, ...movingRules)
+  ruleDirty.value = true
+  notify('规则卡片顺序已调整，点击“校验并应用”后才会生效')
+}
+
+function openRuleCardEditor(key: string) {
+  ruleCardEditorKey.value = key
+  ruleCardEditorOpen.value = true
+}
+
+function closeRuleCardEditor() {
+  ruleCardEditorOpen.value = false
+  ruleCardEditorKey.value = ''
+}
+
+function addRuleToCard(key: string) {
+  if (key === '__default__' || key.startsWith('set:')) return
+  const entries = ruleCardEntries(key)
+  const policy = key === '__direct__' ? 'DIRECT' : entries[0]?.model.policy || 'Others'
+  const matchIndex = ruleDraft.value.findIndex((raw) => raw.toUpperCase().startsWith('MATCH,'))
+  ruleDraft.value.splice(matchIndex < 0 ? ruleDraft.value.length : matchIndex, 0, `DOMAIN-SUFFIX,example.com,${policy}`)
+  ruleDirty.value = true
+}
+
+function setRuleCardLabel(key: string, event: Event) {
+  const entries = ruleCardEntries(key)
+  const first = entries[0]
+  if (!first) return
+  const value = (event.target as HTMLInputElement).value.trim()
+  if (value) ruleCardLabels.value[first.raw] = value
+  else delete ruleCardLabels.value[first.raw]
+  ruleDirty.value = true
+}
+
+function deleteRuleCard(key: string) {
+  const entries = ruleCardEntries(key).filter((entry) => !ruleIsProtected(entry.raw))
+  if (!entries.length) {
+    notify('系统保护规则不能删除')
+    return
+  }
+  if (!window.confirm(`删除「${ruleCardTitle(key, entries)}」中的 ${entries.length} 条规则？`)) return
+  const indexes = new Set(entries.map((entry) => entry.index))
+  entries.forEach((entry) => delete ruleCardLabels.value[entry.raw])
+  ruleDraft.value = ruleDraft.value.filter((_, index) => !indexes.has(index))
+  ruleDirty.value = true
+  closeRuleCardEditor()
 }
 
 function platformItem(key: string) {
@@ -1148,6 +1363,63 @@ const airportRuntimeGroups = computed(() => Object.entries((airportStatus.value.
 const airportFailsafeEntries = computed(() => Object.entries((airportStatus.value.failsafes || {}) as Record<string, JsonRecord>))
 const rulePolicies = computed(() => rulesPayload.value.policies || ['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'Others'])
 const ruleSets = computed(() => rulesPayload.value.rule_sets || [])
+const ruleCardItems = computed(() => {
+  const keys: string[] = []
+  for (const raw of ruleDraft.value) {
+    const setIndex = ruleSetIndexForRule(raw)
+    const item = setIndex >= 0 ? `set:${ruleSets.value[setIndex].key}` : `rule:${ruleCardKey(raw)}`
+    if (!keys.includes(item)) keys.push(item)
+  }
+  for (const set of ruleSets.value) {
+    const item = `set:${set.key}`
+    if (keys.includes(item)) continue
+    const index = set.priority === 'high'
+      ? keys.findIndex((value) => value !== 'rule:__direct__' && value !== 'rule:__default__')
+      : keys.findIndex((value) => value === 'rule:__direct__')
+    keys.splice(index < 0 ? keys.length : index, 0, item)
+  }
+  return keys.map((item) => {
+    if (item.startsWith('set:')) {
+      const set = ruleSets.value.find((value) => value.key === item.slice(4)) || {}
+      const entries = ruleItemEntries(item)
+      return {
+        key: item,
+        kind: 'set',
+        set,
+        entries,
+        title: set.name || '未命名规则集合',
+        subtitle: set.priority === 'high' ? '高优先级规则集合' : '普通优先规则集合',
+        policy: set.policy || 'Others',
+        summary: ruleSetUrlsText(set),
+        facts: `${arrayFrom(set.sources).length} 条来源 · 每 ${Math.round(Number(set.interval || 86400) / 3600)} 小时更新`,
+        movable: true,
+        editable: true,
+        priority: set.priority || 'normal',
+        ruleSetIndex: ruleSets.value.findIndex((value) => value.key === set.key),
+      }
+    }
+    const key = item.slice(5)
+    const entries = ruleCardEntries(key)
+    const editable = entries.some((entry) => !ruleIsProtected(entry.raw))
+    const first = entries[0]?.index
+    const last = entries.at(-1)?.index
+    return {
+      key: item,
+      kind: 'rule',
+      set: null,
+      entries,
+      title: ruleCardTitle(key, entries),
+      subtitle: ruleCardSubtitle(key, entries),
+      policy: entries[0]?.model.policy || 'Others',
+      summary: ruleCardSummary(entries),
+      facts: `${entries.length} 条规则 · ${first === undefined ? '未排序' : `第 ${first + 1}${last !== first ? `-${(last || first) + 1}` : ''} 条`}`,
+      movable: editable && key !== '__direct__' && key !== '__default__',
+      editable,
+      protected: key === '__default__',
+      ruleKey: key,
+    }
+  })
+})
 function updateLabel(state: string) {
   return ({ current: '已是最新', checked: '检查完成', available: '有可用更新', update_available: '有可用更新', check_failed: '检查失败', preview_ignored: '已忽略预发布', applying: '升级中', updating: '升级中', updated: '升级完成', success: '升级完成', rolled_back: '已自动回退', failed: '维护失败', unknown: '待检查' } as Record<string, string>)[state] || state
 }
@@ -1299,14 +1571,14 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
 
         <section v-else-if="activeView === 'rules'" class="view-panel feature-view">
           <div class="page-heading"><div><span class="eyebrow">ROUTING RULES</span><h1>规则配置</h1><p>按从上到下的顺序匹配分流规则；规则集合优先级和自定义规则都会在校验后一次生效。</p></div><span class="soft-badge" :class="{ good: !ruleDirty }">{{ ruleDirty ? '有未应用修改' : `${ruleDraft.length} 条规则已生效` }}</span></div>
-          <div class="toolbar rules-toolbar"><div class="toolbar-left"><h2>规则顺序</h2><label class="toggle-control"><input v-model="ruleAdvanced" type="checkbox" /><span>高级模式</span></label></div><div class="toolbar-right"><button class="secondary-button" @click="loadRules"><RefreshCw :size="15" />重新载入</button><button class="secondary-button" @click="addRule()"><Plus :size="15" />新增规则</button><button class="primary-button" :disabled="!ruleDirty || busy === 'rules-save'" @click="saveRules"><Check :size="15" />校验并应用</button></div></div>
-          <p class="feature-hint"><strong>系统保护规则会锁定国内直连和默认兜底；高级模式适合编辑原始 Mihomo 语法，复杂规则不会被页面拆写。</strong></p>
+          <div class="toolbar rules-toolbar"><div class="toolbar-left"><h2>规则卡片顺序</h2><label class="toggle-control"><input v-model="ruleAdvanced" type="checkbox" /><span>详细编辑</span></label></div><div class="toolbar-right"><button class="secondary-button" @click="loadRules"><RefreshCw :size="15" />重新载入</button><button class="secondary-button" @click="addRule()"><Plus :size="15" />新增规则</button><button class="primary-button" :disabled="!ruleDirty || busy === 'rules-save'" @click="saveRules"><Check :size="15" />校验并应用</button></div></div>
+          <p class="feature-hint"><strong>规则按卡片展示，可直接拖动卡片调整匹配顺序；系统保护的直连锚点和最后的 MATCH 兜底会保持安全位置。需要逐条修改时打开“详细编辑”。</strong></p>
 
           <section class="surface-card route-preview-card"><div class="card-heading"><div><span class="eyebrow">ROUTE PREVIEW</span><h2>规则命中预览</h2><p>输入域名或网址，查看当前规则中可确定的第一条命中。Geosite、GEOIP 和 IP 网段会明确标注为运行时判断。</p></div><SlidersHorizontal :size="18" class="muted-icon" /></div><div class="route-preview-form"><input v-model="rulePreviewTarget" inputmode="url" autocomplete="off" placeholder="例如 chatgpt.com 或 https://www.youtube.com" @keyup.enter="previewRule" /><button class="primary-button" @click="previewRule">查看路径</button></div><div v-if="rulePreview" class="route-preview-result" :class="rulePreview.tone"><strong>{{ rulePreview.title }}</strong><span>{{ rulePreview.detail }}</span><code>{{ rulePreview.rule }}</code></div></section>
 
-          <section class="surface-card rule-set-section"><div class="card-heading"><div><span class="eyebrow">RULE SETS</span><h2>规则集合</h2><p>一张集合卡片可管理多条 HTTPS 来源；更新失败时保留上一份本地缓存。</p></div><button class="secondary-button" @click="openRuleSetEditor()"><Plus :size="15" />新增集合</button></div><div v-if="ruleSets.length" class="rule-set-grid"><article v-for="(set, index) in ruleSets" :key="set.key || index" class="rule-set-card"><div class="rule-set-head"><div><h3>{{ set.name }}</h3><small>{{ set.priority === 'high' ? '高优先级：业务分类前匹配' : '普通优先级：国内直连前匹配' }}</small></div><span class="soft-badge mini">{{ set.policy || 'Others' }}</span></div><div class="rule-set-facts"><span>{{ (set.sources || []).length }} 条来源</span><span>每 {{ Math.round(Number(set.interval || 86400) / 3600) }} 小时</span><span>{{ set.sources?.[0]?.behavior || 'domain' }} · {{ set.sources?.[0]?.format || 'mrs' }}</span></div><p class="rule-set-urls">{{ ruleSetUrlsText(set) }}</p><div class="rule-set-actions"><button class="icon-button small" title="上移规则集合" aria-label="上移规则集合" :disabled="index === 0" @click="moveRuleSet(index, -1)"><ArrowUp :size="14" /></button><button class="icon-button small" title="下移规则集合" aria-label="下移规则集合" :disabled="index === ruleSets.length - 1" @click="moveRuleSet(index, 1)"><ArrowDown :size="14" /></button><button class="icon-button small" title="编辑规则集合" aria-label="编辑规则集合" @click="openRuleSetEditor(index)"><Pencil :size="14" /></button><button class="icon-button small danger" title="删除规则集合" aria-label="删除规则集合" @click="removeRuleSet(index)"><Trash2 :size="14" /></button></div></article></div><div v-else class="empty-inline">尚未配置规则集合</div></section>
+          <section class="surface-card rule-set-section rule-card-section"><div class="card-heading"><div><span class="eyebrow">RULE CARDS</span><h2>规则卡片</h2><p>规则集合和普通规则共用一条匹配顺序；一张集合卡片可管理多条 HTTPS 来源。</p></div><button class="secondary-button" @click="openRuleSetEditor()"><Plus :size="15" />新增集合</button></div><div v-if="ruleCardItems.length" class="rule-card-grid"><article v-for="item in ruleCardItems" :key="item.key" class="rule-card" :class="{ direct: item.ruleKey === '__direct__', default: item.ruleKey === '__default__', high: item.kind === 'set' && item.priority === 'high', dragging: draggingRuleItem === item.key, 'drop-target': dropTargetRuleItem === item.key }" :draggable="item.movable" @dragstart="startRuleItemDrag($event, item.key)" @dragend="endRuleItemDrag" @dragover="dragRuleItemOver($event, item.key)" @dragleave="dragRuleItemLeave(item.key)" @drop="dropRuleItem($event, item.key)"><div class="rule-card-head"><div><h3>{{ item.title }}</h3><p>{{ item.subtitle }}</p></div><span class="soft-badge mini">{{ item.policy }}</span></div><div class="card-facts"><div class="card-fact"><span>{{ item.kind === 'set' ? '来源' : '规则' }}</span><strong>{{ item.kind === 'set' ? ruleCardSourceCount(item) : item.entries.length }} 条</strong></div><div class="card-fact"><span>顺序</span><strong>{{ item.facts }}</strong></div></div><p class="card-rules" :title="item.summary">{{ item.summary }}</p><div v-if="item.kind === 'set'" class="rule-card-meta"><span class="rule-set-pill" :class="{ high: item.priority === 'high' }">{{ item.priority === 'high' ? '高优先级' : '普通优先级' }}</span><span class="rule-set-pill">拖动集合与规则一起排序</span></div><div class="card-footer"><span class="card-order">{{ item.movable ? '拖动调整顺序' : item.ruleKey === '__default__' ? '固定在末尾' : '系统锚点' }}</span><div class="card-actions"><template v-if="item.kind === 'set'"><button class="icon-button small" title="编辑规则集合" aria-label="编辑规则集合" @click.stop="openRuleSetEditor(Number(item.ruleSetIndex))"><Pencil :size="14" /></button><button class="icon-button small danger" title="删除规则集合" aria-label="删除规则集合" @click.stop="removeRuleSet(Number(item.ruleSetIndex))"><Trash2 :size="14" /></button></template><template v-else><button class="icon-button small" title="编辑规则卡片" aria-label="编辑规则卡片" @click.stop="openRuleCardEditor(String(item.ruleKey || ''))"><Pencil :size="14" /></button><button class="icon-button small danger" title="删除规则卡片" aria-label="删除规则卡片" :disabled="!item.editable" @click.stop="deleteRuleCard(String(item.ruleKey || ''))"><Trash2 :size="14" /></button></template></div></div></article></div><div v-else class="empty-inline">尚未配置规则</div></section>
 
-          <section class="surface-card rule-list-card"><div class="card-heading"><div><span class="eyebrow">MATCH IN ORDER</span><h2>手动规则</h2></div><span class="muted-caption">{{ ruleDraft.length }} 条，顶部优先</span></div><div v-if="ruleDraft.length" class="rule-list"><div v-for="(rule, index) in ruleDraft" :key="`${index}-${rule}`" class="rule-row" :class="{ protected: ruleIsProtected(rule) }"><span class="rule-index">{{ index + 1 }}</span><template v-if="ruleAdvanced"><input class="control raw-control" :value="rule" :readonly="ruleIsProtected(rule)" @input="setRawRule(index, $event)" /><span v-if="ruleIsProtected(rule)" class="system-badge">系统保护</span></template><template v-else><label><span>匹配方式</span><select class="control" :value="ruleParts(rule).type" :disabled="ruleIsProtected(rule)" @change="setRuleFromEvent(index, 'type', $event)"><option value="DOMAIN">域名</option><option value="DOMAIN-SUFFIX">域名及子域名</option><option value="DOMAIN-KEYWORD">域名关键词</option><option value="GEOSITE">网站分类</option><option value="GEOIP">地区 IP</option><option value="IP-CIDR">IPv4 网段</option><option value="IP-CIDR6">IPv6 网段</option><option value="MATCH">兜底</option></select></label><label><span>匹配内容</span><input class="control" :value="ruleParts(rule).value" :readonly="ruleIsProtected(rule) || ruleParts(rule).type === 'MATCH'" placeholder="例如 example.com" @input="setRuleFromEvent(index, 'value', $event)" /></label><label><span>出口</span><select class="control" :value="ruleParts(rule).policy" :disabled="ruleIsProtected(rule)" @change="setRuleFromEvent(index, 'policy', $event)"><option v-for="policy in rulePolicies" :key="policy" :value="policy">{{ policy }}</option></select></label></template><div class="rule-actions"><button class="icon-button small" title="上移" aria-label="上移" :disabled="index === 0 || ruleIsProtected(rule)" @click="moveRule(index, -1)"><ArrowUp :size="14" /></button><button class="icon-button small" title="下移" aria-label="下移" :disabled="index === ruleDraft.length - 1 || ruleIsProtected(rule)" @click="moveRule(index, 1)"><ArrowDown :size="14" /></button><button class="icon-button small danger" title="删除规则" aria-label="删除规则" :disabled="ruleIsProtected(rule)" @click="removeRule(index)"><Trash2 :size="14" /></button></div><span v-if="ruleIsProtected(rule)" class="system-badge">系统保护</span></div></div><div v-else class="empty-state"><SlidersHorizontal :size="28" /><strong>暂无代理规则</strong><span>点击“新增规则”开始配置。</span></div></section>
+          <section v-if="ruleAdvanced" class="surface-card rule-list-card"><div class="card-heading"><div><span class="eyebrow">DETAILED EDITOR</span><h2>逐条编辑规则</h2><p>卡片用于排序；这里保留逐条表单和原始 Mihomo 语法编辑。</p></div><span class="muted-caption">{{ ruleDraft.length }} 条，顶部优先</span></div><div v-if="ruleDraft.length" class="rule-list"><div v-for="(rule, index) in ruleDraft" :key="`${index}-${rule}`" class="rule-row" :class="{ protected: ruleIsProtected(rule) }"><span class="rule-index">{{ index + 1 }}</span><template v-if="ruleAdvanced"><input class="control raw-control" :value="rule" :readonly="ruleIsProtected(rule)" @input="setRawRule(index, $event)" /><span v-if="ruleIsProtected(rule)" class="system-badge">系统保护</span></template><template v-else><label><span>匹配方式</span><select class="control" :value="ruleParts(rule).type" :disabled="ruleIsProtected(rule)" @change="setRuleFromEvent(index, 'type', $event)"><option value="DOMAIN">域名</option><option value="DOMAIN-SUFFIX">域名及子域名</option><option value="DOMAIN-KEYWORD">域名关键词</option><option value="GEOSITE">网站分类</option><option value="GEOIP">地区 IP</option><option value="IP-CIDR">IPv4 网段</option><option value="IP-CIDR6">IPv6 网段</option><option value="MATCH">兜底</option></select></label><label><span>匹配内容</span><input class="control" :value="ruleParts(rule).value" :readonly="ruleIsProtected(rule) || ruleParts(rule).type === 'MATCH'" placeholder="例如 example.com" @input="setRuleFromEvent(index, 'value', $event)" /></label><label><span>出口</span><select class="control" :value="ruleParts(rule).policy" :disabled="ruleIsProtected(rule)" @change="setRuleFromEvent(index, 'policy', $event)"><option v-for="policy in rulePolicies" :key="policy" :value="policy">{{ policy }}</option></select></label></template><div class="rule-actions"><button class="icon-button small" title="上移" aria-label="上移" :disabled="index === 0 || ruleIsProtected(rule)" @click="moveRule(index, -1)"><ArrowUp :size="14" /></button><button class="icon-button small" title="下移" aria-label="下移" :disabled="index === ruleDraft.length - 1 || ruleIsProtected(rule)" @click="moveRule(index, 1)"><ArrowDown :size="14" /></button><button class="icon-button small danger" title="删除规则" aria-label="删除规则" :disabled="ruleIsProtected(rule)" @click="removeRule(index)"><Trash2 :size="14" /></button></div><span v-if="ruleIsProtected(rule)" class="system-badge">系统保护</span></div></div><div v-else class="empty-state"><SlidersHorizontal :size="28" /><strong>暂无代理规则</strong><span>点击“新增规则”开始配置。</span></div></section>
         </section>
 
         <section v-else-if="activeView === 'setup'" class="view-panel">
@@ -1329,6 +1601,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
     <div v-if="renameTarget" class="modal-backdrop" @click.self="renameTarget = null"><form class="modal-card device-editor" @submit.prevent="saveRename"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="renameTarget = null"><X :size="17" /></button><span class="eyebrow">DEVICE PROFILE</span><h2>编辑设备</h2><p>{{ renameTarget.ip }} · {{ renameTarget.mac }}</p><label>显示名称<input v-model="renameDraft" autofocus maxlength="40" /></label><fieldset class="icon-picker"><legend>显示图标</legend><div class="icon-options"><button v-for="item in deviceIconOptions" :key="item.key" type="button" class="icon-choice" :class="{ selected: iconDraft === item.key }" :title="item.label" :aria-label="item.label" @click="iconDraft = item.key"><component :is="item.icon" :size="19" /><span>{{ item.label }}</span></button></div></fieldset><div class="modal-actions"><button type="button" class="secondary-button" @click="renameTarget = null">取消</button><button class="primary-button" type="submit" :disabled="busy === 'rename'">保存</button></div></form></div>
     <div v-if="dnsUpstreamsOpen" class="modal-backdrop" @click.self="dnsUpstreamsOpen = false"><form class="modal-card wide-editor" @submit.prevent="saveDnsUpstreams"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="dnsUpstreamsOpen = false"><X :size="17" /></button><span class="eyebrow">DNS UPSTREAMS</span><h2>编辑解析服务器</h2><p>一行一个地址；带有 `|` 的内容会作为拨号地址保留。保存时会先做健康检查，失败不会替换当前配置。</p><label>国内上游<textarea v-model="dnsDomesticDraft" spellcheck="false" placeholder="223.5.5.5&#10;https://dns.alidns.com/dns-query" /></label><label>国外上游<textarea v-model="dnsForeignDraft" spellcheck="false" placeholder="https://1.1.1.1/dns-query" /></label><div class="modal-actions"><button type="button" class="secondary-button" @click="dnsUpstreamsOpen = false">取消</button><button class="primary-button" type="submit" :disabled="busy === 'dns-upstreams'">校验并应用</button></div></form></div>
     <div v-if="airportPoolEditor" class="modal-backdrop" @click.self="airportPoolEditor = ''"><form class="modal-card" @submit.prevent="saveAirportPoolMode"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="airportPoolEditor = ''"><X :size="17" /></button><span class="eyebrow">POOL MODE</span><h2>编辑 {{ airportPoolEditor }}</h2><p>模式只改变当前候选池的选择方式，不会修改订阅内容。</p><label>候选池模式<select v-model="airportPoolMode"><option value="fallback">故障切换：按顺序使用候选</option><option value="url-test">自动测速：按延迟和健康度选择</option><option value="select">手动选择：保持当前节点</option></select></label><div class="modal-actions"><button type="button" class="secondary-button" @click="airportPoolEditor = ''">取消</button><button class="primary-button" type="submit" :disabled="busy === 'airport-mode'">保存模式</button></div></form></div>
+    <div v-if="ruleCardEditorOpen" class="modal-backdrop" @click.self="closeRuleCardEditor"><form class="modal-card wide-editor rule-card-editor" @submit.prevent="closeRuleCardEditor"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="closeRuleCardEditor"><X :size="17" /></button><span class="eyebrow">RULE CARD</span><h2>{{ ruleCardTitle(ruleCardEditorKey, ruleCardEntries(ruleCardEditorKey)) }}</h2><p>修改会直接写入当前草稿；跨卡片的优先级请回到卡片网格拖动调整。</p><label v-if="ruleCardEditorKey.startsWith('__custom__')">卡片名称<input :value="ruleCardLabel(ruleCardEditorKey)" maxlength="40" placeholder="留空则显示匹配内容" @input="setRuleCardLabel(ruleCardEditorKey, $event)" /></label><div v-if="ruleCardEntries(ruleCardEditorKey).length" class="rule-card-editor-list"><div v-for="entry in ruleCardEntries(ruleCardEditorKey)" :key="`${entry.index}-${entry.raw}`" class="rule-card-editor-row"><div class="editor-rule-top"><span>第 {{ entry.index + 1 }} 条</span><span v-if="ruleIsProtected(entry.raw)" class="system-badge">系统保护</span></div><template v-if="ruleAdvanced"><input class="control raw-control" :value="entry.raw" :readonly="ruleIsProtected(entry.raw)" @input="setRawRule(entry.index, $event)" /></template><template v-else><div class="editor-two-column"><label>匹配方式<select class="control" :value="entry.model.type" :disabled="ruleIsProtected(entry.raw)" @change="setRuleFromEvent(entry.index, 'type', $event)"><option value="DOMAIN">域名</option><option value="DOMAIN-SUFFIX">域名及子域名</option><option value="DOMAIN-KEYWORD">域名关键词</option><option value="GEOSITE">网站分类</option><option value="GEOIP">地区 IP</option><option value="IP-CIDR">IPv4 网段</option><option value="IP-CIDR6">IPv6 网段</option><option value="MATCH">兜底</option></select></label><label>匹配内容<input class="control" :value="entry.model.value" :readonly="ruleIsProtected(entry.raw) || entry.model.type === 'MATCH'" placeholder="例如 example.com" @input="setRuleFromEvent(entry.index, 'value', $event)" /></label><label>出口<select class="control" :value="entry.model.policy" :disabled="ruleIsProtected(entry.raw)" @change="setRuleFromEvent(entry.index, 'policy', $event)"><option v-for="policy in rulePolicies" :key="policy" :value="policy">{{ policy }}</option></select></label></div></template><div class="modal-actions editor-row-actions"><span v-if="ruleIsProtected(entry.raw)" class="muted-caption">系统规则不可改写</span><button v-else type="button" class="compact-button danger" @click="removeRule(entry.index)"><Trash2 :size="14" />删除此规则</button></div></div></div><div v-else class="empty-inline">此卡片暂时没有可编辑规则</div><div class="modal-actions"><button v-if="ruleCardEditorKey !== '__default__' && !ruleCardEditorKey.startsWith('set:')" type="button" class="secondary-button" @click="addRuleToCard(ruleCardEditorKey)"><Plus :size="15" />新增到此卡片</button><button type="submit" class="primary-button">完成</button></div></form></div>
     <div v-if="ruleSetEditorOpen" class="modal-backdrop" @click.self="ruleSetEditorOpen = false"><form class="modal-card rule-set-editor" @submit.prevent="addRuleSet"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="ruleSetEditorOpen = false"><X :size="17" /></button><span class="eyebrow">RULE SET</span><h2>{{ ruleSetEditorIndex >= 0 ? '编辑规则集合' : '新增规则集合' }}</h2><p>支持多条 HTTPS 来源；由现有 Proxy 候选池下载，失败时保留上一份本地缓存。</p><label>集合名称<input v-model="ruleSetName" maxlength="40" placeholder="例如 我的 AI 规则" /></label><label>出口<select v-model="ruleSetPolicy"><option v-if="!rulePolicies.includes(ruleSetPolicy)" :value="ruleSetPolicy">{{ ruleSetPolicy }}</option><option v-for="policy in rulePolicies" :key="policy" :value="policy">{{ policy }}</option></select></label><label>规则集 HTTPS 地址<textarea v-model="ruleSetUrls" spellcheck="false" placeholder="https://raw.githubusercontent.com/.../rules.mrs&#10;一行一条" /></label><div class="editor-two-column"><label>匹配类型<select v-model="ruleSetBehavior"><option value="domain">域名</option><option value="ipcidr">IP 网段</option><option value="classical">复合规则</option></select></label><label>文件格式<select v-model="ruleSetFormat"><option value="mrs">MRS（二进制）</option><option value="yaml">YAML</option><option value="text">文本</option></select></label><label>匹配优先级<select v-model="ruleSetPriority"><option value="normal">普通优先级</option><option value="high">高优先级</option></select></label><label>更新周期<select v-model="ruleSetInterval"><option value="21600">每 6 小时</option><option value="86400">每天</option><option value="604800">每周</option></select></label></div><div class="modal-actions"><button type="button" class="secondary-button" @click="ruleSetEditorOpen = false">取消</button><button class="primary-button" type="submit">保存到草稿</button></div></form></div>
   </div>
 </template>
