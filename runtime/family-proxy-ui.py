@@ -3545,7 +3545,7 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     '<nav class="nav"><a class="active" href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav>',
-    '<nav class="nav"><a class="active" href="/legacy">原管理界面</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav><a class="topbar-console-switch" href="/console">新版控制台</a>',
+    '<nav class="nav"><a class="active" href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav><a class="topbar-console-switch" href="/console">新版控制台</a>',
     1,
 )
 PAGE = PAGE.replace(
