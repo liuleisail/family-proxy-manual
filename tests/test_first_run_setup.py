@@ -31,6 +31,17 @@ class FirstRunSetupTests(unittest.TestCase):
     def test_gateway_keeps_http_handler_lifecycle_setup_method(self):
         self.assertIs(GATEWAY.Handler.setup, BaseHTTPRequestHandler.setup)
 
+    def test_legacy_entry_uses_the_devices_layout(self):
+        self.assertEqual(GATEWAY.layout_page_for_path("/"), "devices")
+        self.assertEqual(GATEWAY.layout_page_for_path("/legacy"), "devices")
+
+    def test_layout_settings_button_uses_inline_icon(self):
+        html = '<html><head></head><body><header><div class="topbar-inner"><nav></nav></div></header></body></html>'
+        rendered = GATEWAY.inject_page_layout(html, "devices")
+        self.assertIn('class="family-layout-settings"', rendered)
+        self.assertIn("<svg ", rendered)
+        self.assertNotIn("⚙", rendered)
+
     def form(self, **overrides):
         values = {
             "token": ["setup-token"],
