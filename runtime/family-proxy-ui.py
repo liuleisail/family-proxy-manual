@@ -3545,7 +3545,7 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     '<nav class="nav"><a class="active" href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav>',
-    '<nav class="nav"><a class="active" href="/legacy">原管理界面</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav><a class="topbar-console-switch" href="/">新版控制台</a>',
+    '<nav class="nav"><a class="active" href="/legacy">原管理界面</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav><a class="topbar-console-switch" href="/console">新版控制台</a>',
     1,
 )
 PAGE = PAGE.replace(
@@ -3743,7 +3743,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/assets/"):
             self.send_frontend_file("assets/" + path[len("/assets/"):], cache=True)
             return
-        if path == "/":
+        if path == "/console":
             if FRONTEND_INDEX_PATH.is_file():
                 self.send_frontend_file("index.html")
                 return
@@ -3755,7 +3755,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
-        if path == "/legacy":
+        if path in {"/", "/legacy"}:
             data = PAGE.replace("__CSRF__", CSRF_TOKEN).encode()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
