@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Enable only the host services that are valid for the selected router mode.
+set -Eeuo pipefail
+
+CONFIG=/etc/family-proxy-ui/router.env
+mode=routeros
+if [[ -r $CONFIG ]]; then
+  mode=$(awk -F= '$1 == "ROUTER_MODE" { print tolower($2); exit }' "$CONFIG")
+fi
+
+case "$mode" in
+  routeros)
+    systemctl enable --now homekit-direct-routes.timer
+    systemctl enable --now family-platform-update-check.timer
+    ;;
+  standalone)
+    systemctl disable --now homekit-direct-routes.timer >/dev/null 2>&1 || true
+    systemctl disable --now homekit-direct-routes.service >/dev/null 2>&1 || true
+    systemctl enable --now family-platform-update-check.timer
+    ;;
+  auto)
+    # auto is only present while the web wizard is pending. It must not start
+    # RouterOS-dependent work before the wizard resolves the mode.
+    systemctl disable --now homekit-direct-routes.timer >/dev/null 2>&1 || true
+    systemctl disable --now homekit-direct-routes.service >/dev/null 2>&1 || true
+    systemctl disable --now family-platform-update-check.timer >/dev/null 2>&1 || true
+    ;;
+  *)
+    echo "unsupported ROUTER_MODE: $mode" >&2
+    exit 1
+    ;;
+esac
+
+# These services are host-local and remain useful in both modes. The CN list
+# updater only touches RouterOS when ROUTER_CN_AUTO_SYNC=true.
+systemctl enable --now family-cn-ipv4-refresh.timer
+systemctl enable family-mihomo-tproxy-auto

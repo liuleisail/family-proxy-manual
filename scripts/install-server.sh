@@ -66,6 +66,7 @@ install -m 755 "$REPO_DIR/scripts/refresh-mihomo-geodata.py" /usr/local/sbin/ref
 install -m 755 "$REPO_DIR/scripts/family-mihomo-upgrade" /usr/local/sbin/family-mihomo-upgrade
 install -m 755 "$REPO_DIR/scripts/homekit-direct-routes" /usr/local/sbin/homekit-direct-routes
 install -m 755 "$REPO_DIR/scripts/homekit-direct-routes" /usr/local/sbin/homekit-direct-routes.sh
+install -m 755 "$REPO_DIR/scripts/apply-runtime-mode" /usr/local/sbin/apply-family-proxy-mode
 install -d -m 700 /etc/family-proxy-ui /var/lib/family-proxy/docker/family-mihomo-sub-import/providers
 family_docker_root=$(awk -F= '$1 == "FAMILY_DOCKER_ROOT" { print $2; exit }' "$CONFIG")
 [[ -n $family_docker_root && $family_docker_root == /* ]] || { echo "FAMILY_DOCKER_ROOT is required" >&2; exit 1; }
@@ -79,9 +80,7 @@ for unit in "$REPO_DIR"/systemd/*.service; do install -m 644 "$unit" /etc/system
 for unit in "$REPO_DIR"/systemd/*.timer; do install -m 644 "$unit" /etc/systemd/system/; done
 systemctl daemon-reload
 systemctl enable family-proxy-ui family-mihomo-sub-import family-proxy-gateway family-mihomo-tproxy-auto
-systemctl enable --now family-cn-ipv4-refresh.timer
-systemctl enable --now family-platform-update-check.timer
-systemctl enable --now homekit-direct-routes.timer
+ /usr/local/sbin/apply-family-proxy-mode
 if grep -qx 'MIHOMO_GEODATA_AUTO_UPDATE=true' "$CONFIG" && docker inspect family-mihomo-fallback >/dev/null 2>&1; then
   systemctl enable --now family-mihomo-geodata-refresh.timer
 else

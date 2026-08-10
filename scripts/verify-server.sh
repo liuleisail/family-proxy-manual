@@ -3,12 +3,18 @@ set -Eeuo pipefail
 for unit in family-proxy-ui family-mihomo-sub-import family-proxy-gateway; do
   systemctl is-active --quiet "$unit" || { echo "$unit is not active" >&2; exit 1; }
 done
-for executable in /usr/local/sbin/sync-routeros-cn-ipv4 /usr/local/sbin/refresh-mihomo-geodata /usr/local/sbin/family-mihomo-upgrade /usr/local/sbin/homekit-direct-routes; do
+for executable in /usr/local/sbin/sync-routeros-cn-ipv4 /usr/local/sbin/refresh-mihomo-geodata /usr/local/sbin/family-mihomo-upgrade /usr/local/sbin/homekit-direct-routes /usr/local/sbin/apply-family-proxy-mode; do
   [[ -x $executable ]] || { echo "$executable is missing" >&2; exit 1; }
 done
 systemctl is-enabled --quiet family-cn-ipv4-refresh.timer || { echo "CN refresh timer is disabled" >&2; exit 1; }
 systemctl is-enabled --quiet family-platform-update-check.timer || { echo "platform update check timer is disabled" >&2; exit 1; }
-systemctl is-enabled --quiet homekit-direct-routes.timer || { echo "HomeKit direct route timer is disabled" >&2; exit 1; }
+router_mode=$(awk -F= '$1 == "ROUTER_MODE" { print tolower($2); exit }' /etc/family-proxy-ui/router.env)
+if [[ ${router_mode:-routeros} == routeros ]]; then
+  systemctl is-enabled --quiet homekit-direct-routes.timer || { echo "HomeKit direct route timer is disabled" >&2; exit 1; }
+else
+  [[ ${router_mode:-} == standalone ]] || { echo "Router mode is unresolved: ${router_mode:-missing}" >&2; exit 1; }
+  systemctl is-enabled --quiet homekit-direct-routes.timer && { echo "HomeKit timer must be disabled in standalone mode" >&2; exit 1; } || true
+fi
 if grep -qx 'MIHOMO_GEODATA_AUTO_UPDATE=true' /etc/family-proxy-ui/router.env; then
   systemctl is-enabled --quiet family-mihomo-geodata-refresh.timer || { echo "Mihomo geodata auto-update is configured but its timer is disabled" >&2; exit 1; }
 fi

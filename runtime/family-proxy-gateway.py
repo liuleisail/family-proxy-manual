@@ -11,6 +11,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import subprocess
 import threading
 import time
@@ -36,6 +37,19 @@ SETUP_COMPLETE_PAGE = '''<!doctype html><meta charset="utf-8"><meta name="viewpo
 
 SETUP_ERROR_PAGE = '''<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>首次设置 - 家庭网络控制台</title><style>:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#0b0c0e;color:#f5f5f7}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px}.box{width:min(500px,100%);padding:28px;border:1px solid #633b3b;border-radius:10px;background:#1c1c1e}h1{font-size:22px;margin:0 0 10px}.error{color:#ff6961;font-size:14px;line-height:1.6}a{color:#fff}</style><main class="box"><h1>首次设置无法继续</h1><p class="error">__ERROR__</p><a href="__SETUP_LINK__">返回设置页</a></main>'''
 
+
+SETUP_PAGE = '''<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>首次设置 - 家庭网络控制台</title>
+<style>:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#0b0c0e;color:#f5f5f7}*{box-sizing:border-box}body{margin:0;padding:28px 16px 48px}.box{width:min(760px,100%);margin:auto;padding:28px;border:1px solid #2c2c2e;border-radius:10px;background:#1c1c1e}h1{font-size:25px;margin:0 0 8px}h2{font-size:16px;margin:26px 0 12px;padding-top:20px;border-top:1px solid #38383a}p,.hint{color:#98989d;font-size:13px;line-height:1.55}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 18px}.field{min-width:0}label{display:block;margin:0 0 6px;font-size:13px}input,select{width:100%;height:40px;border:1px solid #48484a;border-radius:7px;background:#2c2c2e;color:#fff;padding:0 11px;font:15px inherit;outline:none}input:focus,select:focus{border-color:#0a84ff;box-shadow:0 0 0 3px rgba(10,132,255,.2)}input:disabled{opacity:.45}.check{display:flex;align-items:center;gap:9px;margin-top:14px;color:#d1d1d6;font-size:13px}.check input{width:17px;height:17px;margin:0}.error{min-height:20px;margin-top:16px;color:#ff6961;font-size:13px}.actions{display:flex;justify-content:flex-end;gap:10px;margin-top:24px}button{height:40px;border:0;border-radius:7px;padding:0 18px;background:#0a84ff;color:#fff;font:600 14px inherit;cursor:pointer}button:focus{box-shadow:0 0 0 3px rgba(10,132,255,.25);outline:none}@media(max-width:620px){.box{padding:22px 18px}.grid{grid-template-columns:1fr}.actions button{width:100%}.actions{display:block}}</style>
+<main class="box"><h1>首次设置</h1><p>先完成本机控制面的基础配置。系统会根据路由器 API 能力选择 RouterOS 模式，或进入独立旁路模式；不会自动接管设备或导入订阅。</p>
+<form method="post" action="/setup"><input type="hidden" name="token" value="__TOKEN__">
+<h2>旁路运行模式</h2><div class="grid"><div class="field"><label for="router_mode">路由集成模式</label><select id="router_mode" name="router_mode"><option value="auto" __ROUTER_MODE_AUTO__>自动检测</option><option value="routeros" __ROUTER_MODE_ROUTEROS__>RouterOS 集成</option><option value="standalone" __ROUTER_MODE_STANDALONE__>独立旁路</option></select></div><div class="field"><label>判断规则</label><p class="hint">自动检测会验证 RouterOS API。留空 RouterOS 凭据将使用独立旁路；认证失败不会静默降级。</p></div></div>
+<div id="router-fields"><h2>RouterOS 控制连接</h2><div class="grid"><div class="field"><label for="router_host">API 地址</label><input id="router_host" name="router_host" value="__ROUTER_HOST__" autocomplete="off"></div><div class="field"><label for="router_user">API 用户</label><input id="router_user" name="router_user" value="__ROUTER_USER__" autocomplete="username"></div><div class="field"><label for="router_password">API 密码</label><input id="router_password" name="router_password" type="password" autocomplete="new-password"></div></div></div>
+<h2>管理页账号</h2><div class="grid"><div class="field"><label for="ui_username">用户名</label><input id="ui_username" name="ui_username" value="__UI_USERNAME__" autocomplete="username" required></div><div class="field"><label for="ui_password">新密码</label><input id="ui_password" name="ui_password" type="password" autocomplete="new-password" minlength="12" required></div><div class="field"><label for="ui_password_confirm">确认密码</label><input id="ui_password_confirm" name="ui_password_confirm" type="password" autocomplete="new-password" minlength="12" required></div></div>
+<h2>可选服务</h2><div class="grid"><div class="field"><label for="dns_username">DNS 页面用户名</label><input id="dns_username" name="dns_username" autocomplete="off"></div><div class="field"><label for="dns_password">DNS 页面密码</label><input id="dns_password" name="dns_password" type="password" autocomplete="new-password"></div><div class="field"><label for="mosdns_api_url">MosDNS API 地址</label><input id="mosdns_api_url" name="mosdns_api_url" value="__MOSDNS_API_URL__" autocomplete="off" required></div><div class="field"><label for="geodata_proxy">GEO 更新代理</label><input id="geodata_proxy" name="geodata_proxy" value="__GEODATA_PROXY__" autocomplete="off"></div></div>
+<label class="check"><input type="checkbox" name="router_cn_auto_sync" __ROUTER_CN_AUTO_SYNC__> 每周更新后同步 RouterOS 国内地址表</label><label class="check"><input type="checkbox" name="geodata_auto_update" __GEODATA_AUTO_UPDATE__> 自动更新 Mihomo GEO 数据（需服务器可直连官方源）</label><div class="error">__ERROR__</div><div class="actions"><button type="submit">保存并进入系统</button></div></form></main>
+<script>const mode=document.querySelector('#router_mode'),fields=[...document.querySelectorAll('#router-fields input')],routerSync=document.querySelector('[name="router_cn_auto_sync"]'),sync=()=>{const standalone=mode.value==='standalone';fields.forEach(input=>{input.disabled=standalone});if(routerSync)routerSync.disabled=standalone};mode.addEventListener('change',sync);sync()</script>'''
 
 PAGE_LAYOUT = {
     "devices": [("devices", "设备", "#devices", True), ("manual_add", "按 IP 手动加入", "#manualAdd", True),
@@ -194,10 +208,93 @@ def valid_url(value, allow_blank=False):
             and not any(char.isspace() for char in value) and len(value) <= 255)
 
 
+def routeros_length(value):
+    if value < 0x80:
+        return bytes([value])
+    if value < 0x4000:
+        return (value | 0x8000).to_bytes(2, "big")
+    if value < 0x200000:
+        return (value | 0xC00000).to_bytes(3, "big")
+    if value < 0x10000000:
+        return (value | 0xE0000000).to_bytes(4, "big")
+    return b"\xf0" + value.to_bytes(4, "big")
+
+
+def routeros_read_length(sock):
+    def read_exact(size):
+        chunks = []
+        remaining = size
+        while remaining:
+            chunk = sock.recv(remaining)
+            if not chunk:
+                raise OSError("RouterOS API 连接已关闭")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    first = read_exact(1)
+    if not first:
+        raise OSError("RouterOS API 连接已关闭")
+    value = first[0]
+    if value < 0x80:
+        return value
+    if value < 0xC0:
+        return ((value & 0x3F) << 8) + read_exact(1)[0]
+    if value < 0xE0:
+        return ((value & 0x1F) << 16) + int.from_bytes(read_exact(2), "big")
+    if value < 0xF0:
+        return ((value & 0x0F) << 24) + int.from_bytes(read_exact(3), "big")
+    return int.from_bytes(read_exact(4), "big")
+
+
+def probe_routeros(host, username, password):
+    """Authenticate once so auto mode never treats an arbitrary port as RouterOS."""
+    with socket.create_connection((host, 8728), timeout=5) as sock:
+        sock.settimeout(8)
+        def read_exact(size):
+            chunks = []
+            remaining = size
+            while remaining:
+                chunk = sock.recv(remaining)
+                if not chunk:
+                    raise OSError("RouterOS API 连接已关闭")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks)
+
+        words = ["/login", f"=name={username}", f"=password={password}"]
+        for word in words:
+            encoded = word.encode()
+            sock.sendall(routeros_length(len(encoded)) + encoded)
+        sock.sendall(b"\x00")
+        sentences = []
+        for _ in range(16):
+            sentence = []
+            while True:
+                length = routeros_read_length(sock)
+                if length == 0:
+                    break
+                sentence.append(read_exact(length).decode(errors="replace"))
+            sentences.append(sentence)
+            if sentence and sentence[0] in {"!done", "!trap", "!fatal"}:
+                break
+        if any(sentence and sentence[0] in {"!trap", "!fatal"} for sentence in sentences):
+            raise ValueError("RouterOS API 认证失败")
+        if not any(sentence and sentence[0] == "!done" for sentence in sentences):
+            raise ValueError("RouterOS API 未返回有效登录结果")
+
+
 def setup_updates(form):
     def get(name):
         return form.get(name, [""])[0].strip()
 
+    try:
+        configured_mode = config().get("ROUTER_MODE", "auto").lower()
+    except OSError:
+        configured_mode = "auto"
+    requested_mode = get("router_mode") or configured_mode
+    if requested_mode not in {"auto", "routeros", "standalone"}:
+        raise ValueError("路由集成模式只能是自动检测、RouterOS 集成或独立旁路")
     router_host = get("router_host")
     router_user = get("router_user")
     router_password = form.get("router_password", [""])[0]
@@ -209,12 +306,32 @@ def setup_updates(form):
     mosdns_api_url = get("mosdns_api_url")
     geodata_proxy = get("geodata_proxy")
 
-    if not valid_endpoint(router_host):
-        raise ValueError("RouterOS API 地址格式不正确")
-    if not router_user or len(router_user) > 64 or not re.fullmatch(r"[^=\r\n]+", router_user):
-        raise ValueError("RouterOS API 用户格式不正确")
-    if not router_password or "\n" in router_password or "\r" in router_password:
-        raise ValueError("RouterOS API 密码不能为空")
+    router_fields = (router_host, router_user, router_password)
+    # The web form keeps the detected gateway address as a convenience. It is
+    # not a RouterOS selection until credentials are supplied.
+    has_router_fields = any((router_user, router_password)) or requested_mode == "routeros" and bool(router_host)
+    if requested_mode == "standalone":
+        resolved_mode = "standalone"
+    elif not has_router_fields:
+        if requested_mode == "routeros":
+            raise ValueError("RouterOS 模式需要填写 API 地址、用户和密码")
+        resolved_mode = "standalone"
+    else:
+        if not all(router_fields):
+            raise ValueError("RouterOS API 地址、用户和密码必须同时填写")
+        if not valid_endpoint(router_host):
+            raise ValueError("RouterOS API 地址格式不正确")
+        if len(router_user) > 64 or not re.fullmatch(r"[^=\r\n]+", router_user):
+            raise ValueError("RouterOS API 用户格式不正确")
+        if "\n" in router_password or "\r" in router_password:
+            raise ValueError("RouterOS API 密码格式不正确")
+        try:
+            probe_routeros(router_host, router_user, router_password)
+        except (OSError, TimeoutError) as exc:
+            raise ValueError(f"RouterOS API 无法连接：{exc}；如本机没有 RouterOS，请选择独立旁路") from exc
+        except ValueError as exc:
+            raise ValueError(f"{exc}；不会自动降级为独立旁路，请检查凭据或明确选择独立旁路") from exc
+        resolved_mode = "routeros"
     if not ui_username or len(ui_username) > 64 or not re.fullmatch(r"[^=\r\n]+", ui_username):
         raise ValueError("管理页用户名格式不正确")
     if len(ui_password) < 12 or "\n" in ui_password or "\r" in ui_password:
@@ -229,16 +346,17 @@ def setup_updates(form):
     salt, digest = hash_password(ui_password)
     dns_auth = base64.b64encode(f"{dns_username}:{dns_password}".encode()).decode() if dns_username else ""
     return {
-        "ROUTER_HOST": router_host,
-        "ROUTER_USER": router_user,
-        "ROUTER_PASSWORD": router_password,
+        "ROUTER_MODE": resolved_mode,
+        "ROUTER_HOST": router_host if resolved_mode == "routeros" else "",
+        "ROUTER_USER": router_user if resolved_mode == "routeros" else "",
+        "ROUTER_PASSWORD": router_password if resolved_mode == "routeros" else "",
         "UI_USERNAME": ui_username,
         "UI_PASSWORD_SALT": salt,
         "UI_PASSWORD_HASH": digest,
         "DNS_UPSTREAM_AUTH_B64": dns_auth,
         "MOSDNS_API_URL": mosdns_api_url,
         "FAMILY_GEODATA_PROXY": geodata_proxy,
-        "ROUTER_CN_AUTO_SYNC": "true" if "router_cn_auto_sync" in form else "false",
+        "ROUTER_CN_AUTO_SYNC": "true" if resolved_mode == "routeros" and "router_cn_auto_sync" in form else "false",
         "MIHOMO_GEODATA_AUTO_UPDATE": "true" if "geodata_auto_update" in form else "false",
         "SETUP_PENDING": "false",
     }
@@ -261,10 +379,14 @@ def write_setup_state(state):
 
 def setup_page(error=""):
     values = config()
+    mode = values.get("ROUTER_MODE", "auto").lower()
     checked_router = "checked" if values.get("ROUTER_CN_AUTO_SYNC", "true").lower() == "true" else ""
     checked_geodata = "checked" if values.get("MIHOMO_GEODATA_AUTO_UPDATE", "false").lower() == "true" else ""
     replacements = {
         "__TOKEN__": html.escape(setup_state().get("token", ""), quote=True),
+        "__ROUTER_MODE_AUTO__": "selected" if mode == "auto" else "",
+        "__ROUTER_MODE_ROUTEROS__": "selected" if mode == "routeros" else "",
+        "__ROUTER_MODE_STANDALONE__": "selected" if mode == "standalone" else "",
         "__ROUTER_HOST__": html.escape(values.get("ROUTER_HOST", ""), quote=True),
         "__ROUTER_USER__": html.escape(values.get("ROUTER_USER", ""), quote=True),
         "__UI_USERNAME__": html.escape(values.get("UI_USERNAME", ""), quote=True),
@@ -292,6 +414,8 @@ def restart_after_setup():
             ["systemctl", "restart", "family-proxy-ui", "family-mihomo-sub-import"],
             check=True, capture_output=True, timeout=30,
         )
+        subprocess.run(["/usr/local/sbin/apply-family-proxy-mode"],
+                       check=True, capture_output=True, timeout=15)
         if config().get("MIHOMO_GEODATA_AUTO_UPDATE", "false").lower() == "true":
             subprocess.run(["systemctl", "enable", "--now", "family-mihomo-geodata-refresh.timer"],
                            check=True, capture_output=True, timeout=15)

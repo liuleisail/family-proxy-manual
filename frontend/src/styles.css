@@ -429,3 +429,21 @@ h1 em { color: var(--blue); font-style: normal; }
 @media (max-width: 760px) { .update-row { grid-template-columns: 1fr; gap: 6px; min-height: 0; padding: 11px 0; }.update-row-meta { grid-template-columns: auto minmax(0, 1fr); justify-content: start; }.update-row-meta > small { text-align: left; } }
 @media (max-width: 760px) { .dns-race-leading { grid-template-columns: 28px minmax(0, 1fr); }.dns-race-error { grid-column: 2; justify-self: start; margin-top: 2px; }.dns-race-metrics { grid-template-columns: 1fr; margin-left: 0; }.dns-race-note { align-items: flex-start; flex-wrap: wrap; }.dns-race-note span:last-child { margin-left: 22px; } }
 @media (max-width: 760px) { .rule-card { min-height: 132px; } }
+.standalone-guide, .standalone-ops-card { border-color: rgba(94, 168, 255, .28); }
+.standalone-guide > p { max-width: 720px; margin: 0; color: var(--text-soft); font-size: 12px; line-height: 1.6; }
+.standalone-guide-grid, .standalone-ops-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin-top: 16px; }
+.standalone-guide-grid > div, .standalone-ops-grid > div { min-width: 0; padding: 11px 12px; border: 1px solid var(--line-soft); border-radius: 7px; background: var(--surface-strong); }
+.standalone-guide-grid span, .standalone-guide-grid strong, .standalone-ops-grid span, .standalone-ops-grid strong, .standalone-ops-grid small { display: block; }
+.standalone-guide-grid span, .standalone-ops-grid span { color: var(--text-muted); font-size: 10px; }
+.standalone-guide-grid strong, .standalone-ops-grid strong { margin-top: 5px; color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
+.standalone-ops-grid small { margin-top: 4px; color: var(--text-muted); font-size: 10px; }
+.standalone-update-list { margin-top: 16px; border-top: 1px solid var(--line-soft); }
+.standalone-update-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line-soft); }
+.standalone-update-row:last-child { border-bottom: 0; }
+.standalone-update-row > div { min-width: 0; }
+.standalone-update-row strong, .standalone-update-row small { display: block; }
+.standalone-update-row small { margin-top: 3px; color: var(--text-muted); overflow-wrap: anywhere; }
+.standalone-update-state { flex: 0 0 auto; color: var(--text-soft); font-size: 11px; }
+.standalone-update-state.good { color: var(--green); }
+.standalone-guide .data-note-line, .standalone-ops-card .data-note-line { margin-top: 15px; }
+@media (max-width: 760px) { .standalone-guide-grid, .standalone-ops-grid { grid-template-columns: 1fr; } }

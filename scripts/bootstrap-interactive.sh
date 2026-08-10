@@ -56,12 +56,18 @@ derive_prefix() {
 
 if (( web_setup )); then
   echo "家庭旁路一键安装"
-  echo "先配置本机启动参数，安装后在局域网网页向导中填写 RouterOS 和管理页账号。"
+  echo "先配置本机启动参数，安装后在局域网网页向导中自动判断 RouterOS 或独立旁路模式。"
 else
   echo "家庭旁路交互式首次安装"
   echo "仅写入本机私密配置，随后调用带备份和验证的安装器。"
 fi
 echo "不会自动写入 RouterOS、导入机场订阅或接管任何客户端。"
+echo
+echo "宿主机能力检测："
+printf '  Linux: '; [[ $(uname -s) == Linux ]] && echo "是" || echo "否"
+printf '  systemd: '; command -v systemctl >/dev/null && echo "是" || echo "否"
+printf '  Docker Compose: '; docker compose version 2>/dev/null | head -1 || echo "不可用"
+printf '  CPU 架构: '; uname -m
 echo
 ip -br -4 addr || true
 echo
@@ -72,22 +78,53 @@ FAMILY_LAN_PREFIX=$(derive_prefix "$FAMILY_LAN_CIDR") || {
   exit 1
 }
 ask FAMILY_PROXY_IP "旁路主机固定 IPv4"
-ask FAMILY_ROUTER_IP "RouterOS LAN 地址" "${FAMILY_LAN_PREFIX}1"
+ask FAMILY_ROUTER_IP "家庭网关 LAN 地址" "${FAMILY_LAN_PREFIX}1"
 ask FAMILY_CAPTURE_INTERFACE "承载 LAN 流量的桥接口" "kvmbr0"
 ask FAMILY_HOMEKIT_ROUTE_INTERFACE "HomeKit 本地直连接口" "$FAMILY_CAPTURE_INTERFACE"
 ask FAMILY_DOCKER_ROOT "SSD 持久化目录" "/var/lib/family-proxy/docker"
 if (( web_setup )); then
+  ROUTER_MODE=auto
   ROUTER_HOST=$FAMILY_ROUTER_IP
-  ROUTER_USER=setup
+  ROUTER_USER=
   ROUTER_PASSWORD=
   UI_USERNAME=setup
   UI_PASSWORD=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
 else
-  ask ROUTER_HOST "RouterOS API 地址" "$FAMILY_ROUTER_IP"
-  ask ROUTER_USER "RouterOS API 用户"
-  ask_secret ROUTER_PASSWORD "RouterOS API 密码"
+  ask ROUTER_MODE "路由集成模式（auto/routeros/standalone）" "auto"
+  [[ $ROUTER_MODE == auto || $ROUTER_MODE == routeros || $ROUTER_MODE == standalone ]] || {
+    echo "路由集成模式只能是 auto、routeros 或 standalone。" >&2
+    exit 1
+  }
+  if [[ $ROUTER_MODE != standalone ]]; then
+    ask ROUTER_HOST "RouterOS API 地址" "$FAMILY_ROUTER_IP"
+    ask ROUTER_USER "RouterOS API 用户"
+    ask_secret ROUTER_PASSWORD "RouterOS API 密码"
+  else
+    ROUTER_HOST=
+    ROUTER_USER=
+    ROUTER_PASSWORD=
+  fi
   ask UI_USERNAME "管理页用户名" "admin"
   ask_secret UI_PASSWORD "管理页密码"
+fi
+
+if [[ $ROUTER_MODE == auto && $web_setup -eq 0 ]]; then
+  echo "正在从本机验证 RouterOS API..."
+  if ! FAMILY_LAN_CIDR="$FAMILY_LAN_CIDR" python3 - "$repo_dir/runtime/family-proxy-gateway.py" "$ROUTER_HOST" "$ROUTER_USER" "$ROUTER_PASSWORD" <<'PY'
+import importlib.util
+import sys
+
+module_path, host, user, password = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("family_proxy_probe", module_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.probe_routeros(host, user, password)
+PY
+  then
+    echo "RouterOS API 验证失败。请检查地址和凭据，或重新选择 standalone。" >&2
+    exit 1
+  fi
+  ROUTER_MODE=routeros
 fi
 
 install -d -m 700 /etc/family-proxy-ui
@@ -102,10 +139,11 @@ umask 077
   printf 'FAMILY_HOMEKIT_ROUTE_INTERFACE=%s\n' "$FAMILY_HOMEKIT_ROUTE_INTERFACE"
   printf 'FAMILY_DOCKER_ROOT=%s\n' "$FAMILY_DOCKER_ROOT"
   printf 'BACKUP_ROOT=/var/backups/family-proxy\n'
+  printf 'ROUTER_MODE=%s\n' "$ROUTER_MODE"
   printf 'ROUTER_HOST=%s\n' "$ROUTER_HOST"
   printf 'ROUTER_USER=%s\n' "$ROUTER_USER"
   printf 'ROUTER_PASSWORD=%s\n' "$ROUTER_PASSWORD"
-  printf 'ROUTER_CN_AUTO_SYNC=true\n'
+  printf 'ROUTER_CN_AUTO_SYNC=%s\n' "$([[ $ROUTER_MODE == routeros ]] && echo true || echo false)"
   printf 'UI_USERNAME=%s\n' "$UI_USERNAME"
   printf 'UI_PASSWORD=%s\n' "$UI_PASSWORD"
   printf 'DNS_UPSTREAM_AUTH_B64=\n'

@@ -1,6 +1,13 @@
 # 家庭网络控制台：手动运维说明
 
-当前前端控制台版本：`0.11.6`。
+当前前端控制台版本：`0.11.7`。
+
+### `v0.11.7` 发布摘要
+
+- 新增 RouterOS 自动检测：API 验证成功才进入 RouterOS 集成模式。
+- 新增适用于 Debian、Ubuntu、极空间、飞牛等 Linux 主机的独立旁路模式。
+- 独立模式不读取 DHCP、不接管设备、不调用 RouterOS；控制台改为展示 Linux 主机、Mihomo、MosDNS 和 `7890/7893` 代理入口。
+- 更新旧版入口、安装向导、配置校验、定时任务和部署文档，避免独立主机显示 RouterOS/Z4Pro 专属状态。
 
 这是一套面向家庭网络的选择性旁路代理运维说明。它的目标是：只让手工选中的设备使用旁路服务，其余设备保持原有网络行为；订阅、候选节点、DNS 和规则均可在局域网管理页面中独立维护。
 
@@ -69,11 +76,11 @@ Bot Token 与 Chat ID 已在截图中遮挡，保留告警来源、故障与恢�
 
 ## 人工部署快速开始
 
-首次部署应在一台已安装 Docker、Docker Compose 插件和 `systemd` 的旁路服务器上完成。安装器只部署控制平面，不会自动改 RouterOS、导入订阅、接管设备或覆盖已有同名 Docker 容器。
+首次部署应在一台已安装 Docker、Docker Compose 插件和 `systemd` 的旁路服务器上完成。安装器会自动判断是否能通过 RouterOS API 集成；没有 RouterOS 时进入独立旁路模式。安装器只部署控制平面，不会自动改 RouterOS、导入订阅、接管设备或覆盖已有同名 Docker 容器。
 
 ### 最短首次部署
 
-适用于已具备 Docker、systemd、固定 LAN IPv4，且 RouterOS API 已限制为只允许旁路主机访问的同类服务器：
+适用于已具备 Docker、systemd 和固定 LAN IPv4 的 Debian、Ubuntu、极空间、飞牛或其它 Linux 旁路服务器：
 
 ```bash
 git clone https://github.com/liuleisail/family-proxy-manual.git
@@ -81,9 +88,9 @@ cd family-proxy-manual
 sudo ./scripts/bootstrap-interactive.sh
 ```
 
-脚本会展示本机网卡地址，询问 LAN、旁路主机 IP、RouterOS API 凭据、管理页凭据和 SSD 数据目录；凭据仅写入权限为 `600` 的 `/etc/family-proxy-ui/router.env`。随后它自动执行控制平面安装、基础 Mihomo 容器创建、服务启动和本机验证。管理页密码会立刻转换为 PBKDF2 哈希，明文不会保留。
+脚本会展示本机网卡地址，询问 LAN、旁路主机 IP、路由集成模式、可选 RouterOS API 凭据、管理页凭据和 SSD 数据目录；凭据仅写入权限为 `600` 的 `/etc/family-proxy-ui/router.env`。随后它自动执行控制平面安装、基础 Mihomo 容器创建、服务启动和本机验证。管理页密码会立刻转换为 PBKDF2 哈希，明文不会保留。
 
-该入口**不**自动写 RouterOS、接管设备、导入订阅，或覆盖已有 Mihomo/MosDNS 容器。RouterOS 必须先在终端审阅并导入模板；现有 MosDNS 仅按兼容安装步骤对接。这是为了在不同家庭网络上仍保留可恢复边界，而不是把现网规则打包进镜像。
+该入口**不**自动写 RouterOS、接管设备、导入订阅，或覆盖已有 Mihomo/MosDNS 容器。选择 RouterOS 模式时，API 凭据会先做一次只读登录验证；选择独立旁路时不会读取 DHCP、WireGuard 或 RouterOS 规则。独立模式下通过本机 `7890` HTTP/SOCKS5 或 `7893` 透明入口使用代理，设备需要由客户端或家庭网关自行配置策略。
 
 ### 一键安装与首次启动向导
 
@@ -95,7 +102,7 @@ cd family-proxy-manual
 sudo ./scripts/install-one-click.sh
 ```
 
-脚本只在终端询问启动网关所需的 LAN、旁路 IP、接口和数据目录；安装完成后输出一个仅局域网可访问的一次性地址。用同一局域网设备打开该地址，在进入管理页前填写 RouterOS API、管理页账号、DNS 页面认证及可选 GEO 更新策略。向导提交后会原子更新 `router.env`、删除一次性令牌、重启控制面并进入正常登录页。RouterOS 规则、订阅和客户端接管仍需人工审阅，不会被一键安装自动执行。
+脚本只在终端询问启动网关所需的 LAN、旁路 IP、接口和数据目录；安装完成后输出一个仅局域网可访问的一次性地址。用同一局域网设备打开该地址，在进入管理页前选择自动检测、RouterOS 集成或独立旁路，并填写管理页账号、DNS 页面认证及可选 GEO 更新策略。向导提交后会原子更新 `router.env`、删除一次性令牌、重启控制面并进入正常登录页。RouterOS 规则、订阅和客户端接管仍需人工审阅，不会被一键安装自动执行。
 
 该入口要求服务器已经安装 Docker Engine、Compose 插件和 `systemd`；它不会替换已有 Docker、Mihomo、MosDNS 或 RouterOS 配置。安装器输出的向导地址只应在家庭局域网内打开，不要通过 Telegram、工单或公网反向代理转发。向导完成后先执行：
 
