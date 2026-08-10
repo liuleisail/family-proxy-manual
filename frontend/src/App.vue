@@ -1565,7 +1565,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
     <aside class="sidebar">
       <div class="brand-lockup">
         <div class="brand-mark"><Zap :size="18" :stroke-width="2.4" /></div>
-        <div><strong>家庭旁路</strong><span>HOME NETWORK</span></div>
+        <div><strong>家庭网络控制台</strong><span>HOME NETWORK</span></div>
       </div>
       <div class="connection-pill" :class="{ warning: !ready }"><span class="status-dot" />{{ ready ? '旁路运行正常' : '需要检查' }}</div>
       <nav class="side-nav" aria-label="主导航">
@@ -1582,7 +1582,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
 
     <main class="main-content">
       <header class="topbar">
-        <div class="mobile-brand"><div class="brand-mark"><Zap :size="16" /></div><strong>家庭旁路</strong></div>
+        <div class="mobile-brand"><div class="brand-mark"><Zap :size="16" /></div><strong>家庭网络控制台</strong></div>
         <div class="breadcrumb"><span>控制台</span><ChevronRight :size="14" /><strong>{{ views.find((item) => item.id === activeView)?.label }}</strong></div>
         <div class="top-actions">
           <button class="icon-button" title="刷新状态" aria-label="刷新状态" :disabled="loading" @click="load"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
