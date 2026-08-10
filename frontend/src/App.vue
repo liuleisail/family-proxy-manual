@@ -239,7 +239,9 @@ async function dnsApi<T>(path: string, options: RequestInit = {}) {
 }
 
 async function dnsMaintenanceApi<T>(path: string, options: RequestInit = {}) {
-  return serviceApi<T>(`/dns/maintenance-api${path}`, options)
+  const headers = new Headers(options.headers)
+  headers.set('X-Requested-With', 'family-dns')
+  return serviceApi<T>(`/dns/maintenance-api${path}`, { ...options, headers })
 }
 
 async function ensureAirportCsrf() {
@@ -468,9 +470,23 @@ function dnsRouteName(log: DnsLog) {
   return textValue(log.effective_tag, '默认')
 }
 
+function dnsUpstreamItems(data: JsonRecord): unknown[] {
+  const value = data.runtime_targets || data.targets || data.upstreams || data.items
+  if (Array.isArray(value)) return value
+  if (value && typeof value === 'object') return Object.values(value)
+  return []
+}
+
+function dnsUpstreamLine(item: unknown) {
+  if (typeof item === 'string') return item
+  if (!item || typeof item !== 'object') return ''
+  const record = item as JsonRecord
+  const address = record.addr || record.address || record.url || record.name || ''
+  return `${address}${record.dial_addr ? ` | ${record.dial_addr}` : ''}`
+}
+
 function dnsUpstreamText(data: JsonRecord) {
-  const items = arrayFrom(data, ['runtime_targets', 'targets', 'upstreams', 'items'])
-  return items.map((item) => textValue(item.addr || item.address || item.url || item.name)).join('、') || '已配置'
+  return dnsUpstreamItems(data).map(dnsUpstreamLine).filter(Boolean).join('、') || '已配置'
 }
 
 function dnsFirst(data: JsonRecord, key: string) {
@@ -484,8 +500,8 @@ function dnsWindow(key: string) {
 }
 
 async function openDnsUpstreams() {
-  if (!dnsDomesticDraft.value) dnsDomesticDraft.value = arrayFrom(dnsDomestic.value, ['runtime_targets', 'targets', 'upstreams', 'items']).map((item) => `${item.addr || item.address || item.url || ''}${item.dial_addr ? ` | ${item.dial_addr}` : ''}`).join('\n')
-  if (!dnsForeignDraft.value) dnsForeignDraft.value = arrayFrom(dnsForeign.value, ['runtime_targets', 'targets', 'upstreams', 'items']).map((item) => `${item.addr || item.address || item.url || ''}${item.dial_addr ? ` | ${item.dial_addr}` : ''}`).join('\n')
+  if (!dnsDomesticDraft.value) dnsDomesticDraft.value = dnsUpstreamItems(dnsDomestic.value).map(dnsUpstreamLine).filter(Boolean).join('\n')
+  if (!dnsForeignDraft.value) dnsForeignDraft.value = dnsUpstreamItems(dnsForeign.value).map(dnsUpstreamLine).filter(Boolean).join('\n')
   dnsUpstreamsOpen.value = true
 }
 
