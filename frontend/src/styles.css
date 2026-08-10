@@ -151,10 +151,10 @@ h1 em { color: var(--blue); font-style: normal; }
 .health-check.good { color: var(--green); }.health-check.warning { color: var(--orange); }
 .card-link { display: inline-flex; align-items: center; gap: 4px; margin-top: 19px; padding: 0; border: 0; background: transparent; color: var(--blue); font-size: 11px; font-weight: 650; }
 .network-visual { display: flex; min-height: 150px; align-items: center; justify-content: center; gap: 20px; padding: 20px 0 14px; }
-.network-node { position: relative; display: grid; min-width: 118px; justify-items: center; gap: 7px; color: var(--text-soft); text-align: center; }
+.network-node { display: grid; min-width: 118px; justify-items: center; gap: 7px; color: var(--text-soft); text-align: center; }
 .network-node svg { color: var(--blue); }.network-node span { color: var(--text); font-size: 11px; font-weight: 650; }.network-node small { color: var(--text-muted); font-size: 9px; }
-.network-node.proxy-node svg { color: var(--green); }.node-pulse { position: absolute; top: 50%; left: 50%; width: 46px; height: 46px; pointer-events: none; border: 1px solid rgba(83, 211, 156, .2); border-radius: 50%; animation: pulse 2s ease-out infinite; }
-@keyframes pulse { 0%, 100% { transform: translate(-50%, -50%) scale(.72); opacity: .8; } 60% { transform: translate(-50%, -50%) scale(1.1); opacity: 0; } }
+.network-node.proxy-node svg { color: var(--green); }.proxy-icon { position: relative; display: grid; width: 46px; height: 46px; place-items: center; }.proxy-icon svg { position: relative; z-index: 1; }.node-pulse { position: absolute; inset: 0; pointer-events: none; border: 1px solid rgba(83, 211, 156, .2); border-radius: 50%; animation: pulse 2s ease-out infinite; }
+@keyframes pulse { 0%, 100% { transform: scale(.72); opacity: .8; } 60% { transform: scale(1.1); opacity: 0; } }
 .network-line { display: flex; align-items: center; gap: 5px; width: 98px; height: 1px; background: var(--line); }.network-line span { width: 4px; height: 4px; border-radius: 50%; background: var(--blue); animation: travel 1.8s linear infinite; }.network-line span:nth-child(2) { animation-delay: .5s; }.network-line span:nth-child(3) { animation-delay: 1s; }
 @keyframes travel { from { transform: translateX(0); opacity: 0; } 25% { opacity: 1; } to { transform: translateX(88px); opacity: 0; } }
 .insight-footer { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
