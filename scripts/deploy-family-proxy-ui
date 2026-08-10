@@ -31,6 +31,7 @@ systemctl is-active --quiet family-proxy-ui.service
 
 secret=$(< /etc/family-proxy-ui/gateway.secret)
 wireguard_payload="$stage_dir/wireguard-status.json"
+remote_wireguard_payload="$stage_dir/wireguard-remote-access.json"
 for attempt in $(seq 1 20); do
     if curl --fail --silent -H "X-Family-Gateway: $secret" \
         --output "$wireguard_payload" http://127.0.0.1:18093/api/wireguard/status; then
@@ -40,4 +41,13 @@ for attempt in $(seq 1 20); do
 done
 [[ -s $wireguard_payload ]] || { echo "WireGuard API did not become ready" >&2; exit 1; }
 python3 -c 'import json, sys; payload = json.load(open(sys.argv[1])); assert {"updated_at", "interfaces", "events"} <= payload.keys(); peers = [peer for interface in payload["interfaces"] for peer in interface.get("peers", [])]; assert all("id" in peer for peer in peers); print(f"family-proxy-ui deployed and WireGuard API verified ({len(peers)} peer(s))")' "$wireguard_payload"
+for attempt in $(seq 1 20); do
+    if curl --fail --silent -H "X-Family-Gateway: $secret" \
+        --output "$remote_wireguard_payload" http://127.0.0.1:18093/api/wireguard/remote-access; then
+        break
+    fi
+    sleep 0.25
+done
+[[ -s $remote_wireguard_payload ]] || { echo "remote WireGuard API did not become ready" >&2; exit 1; }
+python3 -c 'import json, sys; payload = json.load(open(sys.argv[1])); assert {"mode", "supported", "clients"} <= payload.keys(); assert not ({"public-key", "private-key", "preshared-key", "config"} & payload.keys()); print("remote WireGuard API verified ({0} managed client(s))".format(len(payload.get("clients", []))))' "$remote_wireguard_payload"
 echo "Backup: $backup_dir"

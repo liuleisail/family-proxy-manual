@@ -99,6 +99,7 @@ WIREGUARD_EVENTS_PATH = Path("/var/lib/family-proxy/wireguard-events.json")
 WIREGUARD_EVENT_RETENTION = 7 * 24 * 60 * 60
 WIREGUARD_EVENT_LIMIT = 200
 WIREGUARD_STATE = {"interfaces": {}, "probe_timestamp": 0.0, "probe": None}
+REMOTE_WG_COMMENT_PREFIX = "family-proxy-remote-wg"
 CAPTURE_DIR = Path("/run/family-proxy-captures")
 CAPTURE_INTERFACE = os.environ.get("FAMILY_CAPTURE_INTERFACE", "kvmbr0")
 HOMEKIT_ROUTE_INTERFACE = os.environ.get("FAMILY_HOMEKIT_ROUTE_INTERFACE", "kvmbr0")
@@ -2309,6 +2310,426 @@ def wireguard_status():
         return {"updated_at": now, "interfaces": output, "events": events[-20:]}
 
 
+def remote_wireguard_defaults(config):
+    interface_name = config.get("WIREGUARD_REMOTE_INTERFACE") or "family-remote-wg"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,30}", interface_name):
+        raise RouterError("WireGuard 远程接入接口名称无效")
+    try:
+        listen_port = int(config.get("WIREGUARD_REMOTE_PORT") or "51820")
+    except ValueError as exc:
+        raise RouterError("WireGuard 远程接入端口无效") from exc
+    if not 1 <= listen_port <= 65535:
+        raise RouterError("WireGuard 远程接入端口必须在 1 至 65535 之间")
+    try:
+        address = ipaddress.ip_interface(config.get("WIREGUARD_REMOTE_ADDRESS") or "10.66.0.1/24")
+    except ValueError as exc:
+        raise RouterError("WireGuard 远程接入地址无效") from exc
+    if address.version != 4 or address.network.prefixlen > 30:
+        raise RouterError("WireGuard 远程接入地址必须是 IPv4 /30 至 /8 网段")
+    # MosDNS is the managed LAN resolver when it is available. RouterOS remains
+    # the fallback for installations that do not expose a separate DNS host.
+    dns = (config.get("WIREGUARD_REMOTE_DNS") or config.get("FAMILY_PROXY_IP")
+           or config.get("FAMILY_ROUTER_IP") or "")
+    if dns:
+        dns_values = []
+        for value in dns.split(","):
+            value = value.strip()
+            try:
+                parsed = ipaddress.ip_address(value)
+            except ValueError as exc:
+                raise RouterError("WireGuard DNS 必须填写 IPv4 或 IPv6 地址") from exc
+            if parsed.is_unspecified or parsed.is_multicast:
+                raise RouterError("WireGuard DNS 地址不可用")
+            dns_values.append(str(parsed))
+        dns = ",".join(dns_values)
+    allowed_address = config.get("WIREGUARD_REMOTE_CLIENT_ALLOWED") or "0.0.0.0/0"
+    if allowed_address.strip() != "0.0.0.0/0":
+        raise RouterError("WireGuard 远程接入必须使用 IPv4 全隧道 0.0.0.0/0")
+    try:
+        keepalive = int(config.get("WIREGUARD_REMOTE_KEEPALIVE") or "25")
+    except (TypeError, ValueError) as exc:
+        raise RouterError("WireGuard 保活间隔无效") from exc
+    if not 0 <= keepalive <= 65535:
+        raise RouterError("WireGuard 保活间隔必须在 0 至 65535 秒之间")
+    return {
+        "interface": interface_name,
+        "listen_port": listen_port,
+        "address": address,
+        "network": address.network,
+        "dns": dns,
+        "allowed_address": allowed_address,
+        "keepalive": keepalive,
+    }
+
+
+def routeros_version_number(value):
+    match = re.match(r"\s*(\d+)\.(\d+)(?:\.(\d+))?", str(value or ""))
+    if not match:
+        return None
+    return tuple(int(part or 0) for part in match.groups())
+
+
+def require_remote_wireguard_version(api):
+    resources = api.print("/system/resource")
+    version = resources[0].get("version", "") if resources else ""
+    parsed = routeros_version_number(version)
+    if parsed is None or parsed < (7, 21, 0):
+        raise RouterError(f"RouterOS {version or '未知版本'} 不支持自动生成 WireGuard 客户端配置；需要 7.21 或更高版本")
+    return str(version)
+
+
+def validate_public_endpoint(value):
+    value = str(value or "").strip().rstrip(".")
+    if not value or len(value) > 253 or any(char in value for char in "/\\ @"):
+        raise RouterError("外部访问地址必须是域名或公网 IP")
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        if not re.fullmatch(r"(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}", value):
+            raise RouterError("外部访问地址必须是域名或公网 IP")
+        return value.lower()
+    if not address.is_global:
+        raise RouterError("外部访问 IP 必须是公网地址，不能使用局域网或保留地址")
+    return str(address)
+
+
+def validate_wireguard_port(value, default):
+    try:
+        port = int(value or default)
+    except (TypeError, ValueError) as exc:
+        raise RouterError("WireGuard UDP 端口无效") from exc
+    if not 1 <= port <= 65535:
+        raise RouterError("WireGuard UDP 端口必须在 1 至 65535 之间")
+    return port
+
+
+def validate_remote_wireguard_name(value):
+    value = str(value or "").strip()
+    if not value or len(value) > 40 or any(ord(char) < 32 for char in value) or "/" in value or "\\" in value:
+        raise RouterError("客户端名称需为 1 至 40 个可见字符")
+    return value
+
+
+def remote_wireguard_peer_id(interface_name, peer):
+    identity = str(peer.get(".id") or peer.get("public-key") or peer.get("comment") or peer.get("name") or "")
+    return hashlib.sha256(f"{interface_name}\0{identity}".encode("utf-8")).hexdigest()[:16]
+
+
+def remote_wireguard_interface(api, defaults, create=False):
+    interfaces = api.print("/interface/wireguard")
+    existing = next((item for item in interfaces if item.get("name") == defaults["interface"]), None)
+    created = False
+    if existing:
+        comment = existing.get("comment", "")
+        if not comment.startswith(REMOTE_WG_COMMENT_PREFIX):
+            raise RouterError(f"WireGuard 接口 {defaults['interface']} 已存在，但不是本系统创建的接口")
+        current_port = int(existing.get("listen-port") or 0)
+        if current_port and current_port != defaults["listen_port"]:
+            raise RouterError(f"已存在的 {defaults['interface']} 使用 UDP {current_port}，请使用该端口或先在配置中调整")
+        return existing, created
+    conflicts = [item.get("name") for item in interfaces if int(item.get("listen-port") or 0) == defaults["listen_port"]]
+    if conflicts:
+        raise RouterError(f"UDP {defaults['listen_port']} 已被 WireGuard 接口占用：{', '.join(conflicts)}")
+    api.add("/interface/wireguard", name=defaults["interface"], **{
+        "listen-port": str(defaults["listen_port"]), "comment": REMOTE_WG_COMMENT_PREFIX,
+    })
+    existing = next((item for item in api.print("/interface/wireguard") if item.get("name") == defaults["interface"]), None)
+    if not existing:
+        raise RouterError("RouterOS 未返回新建的 WireGuard 接口")
+    created = True
+    return existing, created
+
+
+def remote_wireguard_network_conflicts(api, defaults):
+    network = defaults["network"]
+    if network.overlaps(LAN):
+        raise RouterError(f"WireGuard 地址池 {network} 与家庭 LAN {LAN} 冲突")
+    for item in api.print("/ip/address"):
+        if item.get("interface") == defaults["interface"]:
+            continue
+        try:
+            other = ipaddress.ip_interface(item.get("address", "")).network
+        except ValueError:
+            continue
+        if network.overlaps(other):
+            raise RouterError(f"WireGuard 地址池 {network} 与 RouterOS 地址 {other} 冲突")
+    for item in api.print("/ip/route"):
+        try:
+            destination = ipaddress.ip_network(item.get("dst-address", ""), strict=False)
+        except ValueError:
+            continue
+        if destination.prefixlen and network.overlaps(destination):
+            raise RouterError(f"WireGuard 地址池 {network} 与 RouterOS 路由 {destination} 冲突")
+
+
+def remote_wireguard_address(api, defaults):
+    addresses = api.print("/ip/address")
+    existing = next((item for item in addresses
+                     if item.get("interface") == defaults["interface"]
+                     and item.get("address", "").split("/", 1)[0] == str(defaults["address"].ip)), None)
+    if existing:
+        return False
+    other = next((item for item in addresses if item.get("interface") == defaults["interface"]), None)
+    if other:
+        raise RouterError(
+            f"WireGuard 接口 {defaults['interface']} 已使用地址 {other.get('address', '未知')}，"
+            f"与配置的 {defaults['address']} 不一致"
+        )
+    remote_wireguard_network_conflicts(api, defaults)
+    api.add("/ip/address", address=str(defaults["address"]), interface=defaults["interface"],
+            comment=REMOTE_WG_COMMENT_PREFIX + " address")
+    return True
+
+
+def remote_wireguard_used_addresses(peers, network):
+    used = {network.network_address, network.broadcast_address}
+    for peer in peers:
+        for value in str(peer.get("allowed-address", "")).split(","):
+            try:
+                address = ipaddress.ip_interface(value.strip()).ip
+            except ValueError:
+                continue
+            if address in network:
+                used.add(address)
+    return used
+
+
+def remote_wireguard_allocate_address(peers, defaults):
+    used = remote_wireguard_used_addresses(peers, defaults["network"])
+    for address in defaults["network"].hosts():
+        if address != defaults["address"].ip and address not in used:
+            return f"{address}/32"
+    raise RouterError(f"WireGuard 地址池 {defaults['network']} 已没有可用客户端地址")
+
+
+def remote_wireguard_rule(api, path, chain, action, comment, **props):
+    rules = api.print(path)
+    existing = next((item for item in rules if item.get("comment") == comment), None)
+    desired = {"chain": chain, "action": action, "comment": comment,
+               **{key.replace("_", "-"): value for key, value in props.items()}}
+    if existing:
+        api.set(path, existing[".id"], **desired)
+        return False
+    first = next((item for item in rules if item.get("chain") == chain), None)
+    if first:
+        add_before(api, path, first[".id"], **desired)
+    else:
+        api.add(path, **desired)
+    return True
+
+
+def ensure_remote_wireguard_firewall(api, defaults):
+    network = str(defaults["network"])
+    port = str(defaults["listen_port"])
+    members = api.print("/interface/list/member")
+    if not any(item.get("list") == "WAN" for item in members):
+        raise RouterError("RouterOS 未发现 WAN 接口列表，无法安全创建全流量 NAT")
+    comments = {
+        "input_port": f"{REMOTE_WG_COMMENT_PREFIX} input {port}",
+        "input_lan": REMOTE_WG_COMMENT_PREFIX + " input lan",
+        "forward_to_lan": REMOTE_WG_COMMENT_PREFIX + " forward to lan",
+        "forward_from_lan": REMOTE_WG_COMMENT_PREFIX + " forward from lan",
+        "nat": REMOTE_WG_COMMENT_PREFIX + " masquerade",
+    }
+    created = []
+    for key, chain, action, props in (
+        ("input_port", "input", "accept", {"protocol": "udp", "dst-port": port}),
+        ("input_lan", "input", "accept", {"src-address": network}),
+        ("forward_to_lan", "forward", "accept", {"src-address": network, "dst-address": str(LAN)}),
+        ("forward_from_lan", "forward", "accept", {"src-address": str(LAN), "dst-address": network}),
+    ):
+        if remote_wireguard_rule(api, "/ip/firewall/filter", chain, action, comments[key], **props):
+            created.append(("/ip/firewall/filter", comments[key]))
+
+    if remote_wireguard_rule(api, "/ip/firewall/nat", "srcnat", "masquerade", comments["nat"],
+                             src_address=network, out_interface_list="WAN"):
+        created.append(("/ip/firewall/nat", comments["nat"]))
+    return created
+
+
+def remote_wireguard_show_client_config(api, interface, peer, defaults, client_address, endpoint, dns):
+    records = api.talk("/interface/wireguard/peers/show-client-config",
+                        {".id": peer[".id"], "show-sensitive": "yes"})
+    for record in records:
+        for value in record.values():
+            if isinstance(value, str) and "[Interface]" in value:
+                return value[value.index("[Interface]"):].strip()
+
+    interfaces = api.print("/interface/wireguard")
+    server = next((item for item in interfaces if item.get("name") == interface.get("name")), interface)
+    peers = api.talk("/interface/wireguard/peers/print", {"show-sensitive": "yes"})
+    sensitive = next((item for item in peers if item.get(".id") == peer.get(".id")), {})
+    private_key = sensitive.get("private-key") or peer.get("private-key")
+    public_key = server.get("public-key")
+    if not private_key or not public_key:
+        raise RouterError("RouterOS 未返回客户端私钥或服务端公钥，请确认 API 用户拥有敏感字段读取权限")
+    address_line = f"Address = {client_address}"
+    lines = ["[Interface]", address_line, f"PrivateKey = {private_key}"]
+    if dns:
+        lines.append(f"DNS = {dns}")
+    lines.extend([
+        "",
+        "[Peer]",
+        f"PublicKey = {public_key}",
+        f"AllowedIPs = {defaults['allowed_address']}",
+        f"Endpoint = {endpoint}",
+        f"PersistentKeepalive = {defaults['keepalive']}",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def remote_wireguard_status():
+    if standalone_mode():
+        return {"mode": "standalone", "supported": False, "interface": None, "clients": [],
+                "message": "独立旁路模式未接入 RouterOS"}
+    defaults = remote_wireguard_defaults(load_config())
+    with RouterOS() as api:
+        resources = api.print("/system/resource")
+        version = resources[0].get("version", "") if resources else ""
+        supported = routeros_version_number(version) is not None and routeros_version_number(version) >= (7, 21, 0)
+        if not supported:
+            return {"mode": "routeros", "supported": False, "routeros_version": version,
+                    "interface": None, "clients": [],
+                    "message": f"需要 RouterOS 7.21 或更高版本（当前 {version or '未知'}）"}
+        interface = next((item for item in api.print("/interface/wireguard")
+                          if item.get("name") == defaults["interface"]), None)
+        if not interface:
+            return {"mode": "routeros", "supported": True, "routeros_version": version,
+                    "interface": None, "clients": [], "message": "尚未创建远程接入接口"}
+        peers = api.print("/interface/wireguard/peers")
+        clients = []
+        for peer in peers:
+            if peer.get("interface") != defaults["interface"] or not peer.get("comment", "").startswith(REMOTE_WG_COMMENT_PREFIX + " client"):
+                continue
+            age = routeros_duration_seconds(peer.get("last-handshake", "")) if peer.get("last-handshake") else None
+            clients.append({
+                "id": remote_wireguard_peer_id(defaults["interface"], peer),
+                "name": peer.get("name") or peer.get("comment", "").removeprefix(REMOTE_WG_COMMENT_PREFIX + " client "),
+                "address": peer.get("allowed-address", ""),
+                "active": age is not None and age <= 180,
+                "last_handshake_seconds": age,
+                "rx_bytes": int(peer.get("rx", 0) or 0),
+                "tx_bytes": int(peer.get("tx", 0) or 0),
+            })
+        return {
+            "mode": "routeros", "supported": True, "routeros_version": version,
+            "interface": {
+                "name": defaults["interface"], "listen_port": int(interface.get("listen-port") or defaults["listen_port"]),
+                "address": str(defaults["address"]), "network": str(defaults["network"]),
+                "running": interface.get("running") == "true", "client_count": len(clients),
+            },
+            "clients": clients,
+            "message": "全流量经家庭出口；客户端可访问家庭 LAN",
+        }
+
+
+def create_remote_wireguard_client(payload):
+    if standalone_mode():
+        raise RouterError("独立旁路模式不支持自动写入 RouterOS WireGuard")
+    if not isinstance(payload, dict):
+        raise RouterError("WireGuard 客户端参数无效")
+    name = validate_remote_wireguard_name(payload.get("name"))
+    endpoint_host = validate_public_endpoint(payload.get("endpoint"))
+    config = load_config()
+    defaults = remote_wireguard_defaults(config)
+    listen_port = validate_wireguard_port(payload.get("port"), defaults["listen_port"])
+    if listen_port != defaults["listen_port"]:
+        raise RouterError(f"当前远程接入接口固定使用 UDP {defaults['listen_port']}，请使用该端口")
+    dns = str(payload.get("dns") or defaults["dns"]).strip()
+    if dns:
+        dns = remote_wireguard_defaults({**config, "WIREGUARD_REMOTE_DNS": dns})["dns"]
+    endpoint = f"[{endpoint_host}]:{listen_port}" if ":" in endpoint_host else f"{endpoint_host}:{listen_port}"
+    created_interface = False
+    created_address = False
+    created_rules = []
+    peer = None
+    with RouterOS() as api:
+        version = require_remote_wireguard_version(api)
+        interface, created_interface = remote_wireguard_interface(api, defaults, create=True)
+        try:
+            created_address = remote_wireguard_address(api, defaults)
+            created_rules = ensure_remote_wireguard_firewall(api, defaults)
+            peers = [item for item in api.print("/interface/wireguard/peers")
+                     if item.get("interface") == defaults["interface"]]
+            client_address = remote_wireguard_allocate_address(peers, defaults)
+            comment = f"{REMOTE_WG_COMMENT_PREFIX} client {name}"
+            if any(item.get("comment") == comment for item in peers):
+                raise RouterError(f"客户端名称 {name} 已存在")
+            api.add("/interface/wireguard/peers", **{
+                "interface": defaults["interface"], "name": name, "comment": comment,
+                "allowed-address": client_address, "private-key": "auto",
+                "client-address": client_address, "client-dns": dns,
+                "client-endpoint": endpoint, "client-keepalive": str(defaults["keepalive"]),
+                "client-allowed-address": defaults["allowed_address"],
+            })
+            peer = next((item for item in api.print("/interface/wireguard/peers")
+                         if item.get("comment") == comment), None)
+            if not peer or not peer.get(".id"):
+                raise RouterError("RouterOS 未返回新建的 WireGuard 客户端")
+            client_config = remote_wireguard_show_client_config(api, interface, peer, defaults,
+                                                                client_address, endpoint, dns)
+            client_id = remote_wireguard_peer_id(defaults["interface"], peer)
+            audit("wireguard_remote_create", name, "success", f"id={client_id} address={client_address}")
+            return {
+                "message": f"已创建 {name}，请立即扫描二维码或下载配置",
+                "routeros_version": version,
+                "client": {"id": client_id, "name": name, "address": client_address},
+                "config": client_config,
+            }
+        except (RouterError, OSError, ValueError) as exc:
+            if peer and peer.get(".id"):
+                try:
+                    api.remove("/interface/wireguard/peers", peer[".id"])
+                except (RouterError, OSError):
+                    pass
+            for path, comment in created_rules:
+                for item in api.print(path):
+                    if item.get("comment") == comment:
+                        try:
+                            api.remove(path, item[".id"])
+                        except (RouterError, OSError):
+                            pass
+            if created_address:
+                for item in api.print("/ip/address"):
+                    if item.get("comment") == REMOTE_WG_COMMENT_PREFIX + " address":
+                        try:
+                            api.remove("/ip/address", item[".id"])
+                        except (RouterError, OSError):
+                            pass
+            if created_interface:
+                for item in api.print("/interface/wireguard"):
+                    if item.get("name") == defaults["interface"]:
+                        try:
+                            api.remove("/interface/wireguard", item[".id"])
+                        except (RouterError, OSError):
+                            pass
+            audit("wireguard_remote_create", name, "failed", str(exc))
+            raise
+
+
+def revoke_remote_wireguard_client(client_id):
+    if standalone_mode():
+        raise RouterError("独立旁路模式未接入 RouterOS")
+    if not re.fullmatch(r"[0-9a-f]{16}", str(client_id or "")):
+        raise RouterError("WireGuard 客户端编号无效")
+    defaults = remote_wireguard_defaults(load_config())
+    with RouterOS() as api:
+        interface = next((item for item in api.print("/interface/wireguard")
+                          if item.get("name") == defaults["interface"]), None)
+        if not interface:
+            raise RouterError("尚未创建远程接入接口")
+        peers = [item for item in api.print("/interface/wireguard/peers")
+                 if item.get("interface") == defaults["interface"]
+                 and item.get("comment", "").startswith(REMOTE_WG_COMMENT_PREFIX + " client")]
+        peer = next((item for item in peers if remote_wireguard_peer_id(defaults["interface"], item) == client_id), None)
+        if not peer:
+            raise RouterError("未找到该远程接入客户端")
+        name = peer.get("name") or peer.get("comment", "").removeprefix(REMOTE_WG_COMMENT_PREFIX + " client ")
+        api.remove("/interface/wireguard/peers", peer[".id"])
+        audit("wireguard_remote_revoke", name, "success", f"id={client_id}")
+        return {"message": f"已撤销 {name} 的 WireGuard 客户端配置"}
+
+
 def router_summary(api):
     checks = api.print("/tool/netwatch")
     health = next((item for item in checks if item.get("name") == "family-mihomo-tproxy-health"), None)
@@ -3938,6 +4359,15 @@ class Handler(BaseHTTPRequestHandler):
                     {"error": f"WireGuard 状态读取失败：{exc}"},
                 )
             return
+        if path == "/api/wireguard/remote-access":
+            try:
+                self.reply(HTTPStatus.OK, remote_wireguard_status())
+            except (RouterError, OSError, ValueError) as exc:
+                self.reply(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": f"WireGuard 远程接入状态读取失败：{exc}"},
+                )
+            return
         if path == "/api/captures":
             try:
                 query = parse_qs(parsed.query)
@@ -4035,6 +4465,10 @@ class Handler(BaseHTTPRequestHandler):
                 ))
             elif path == "/api/wireguard/preference":
                 self.reply(HTTPStatus.OK, update_wireguard_alias(body.get("key", ""), body.get("alias", "")))
+            elif path == "/api/wireguard/remote-access/generate":
+                self.reply(HTTPStatus.OK, create_remote_wireguard_client(body))
+            elif path == "/api/wireguard/remote-access/revoke":
+                self.reply(HTTPStatus.OK, revoke_remote_wireguard_client(body.get("id", "")))
             elif path == "/api/page-layout":
                 self.reply(HTTPStatus.OK, update_page_layout_preferences(
                     body.get("page", ""), body.get("hidden", []), body.get("order"), body.get("expanded")))

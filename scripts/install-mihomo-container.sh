@@ -13,9 +13,18 @@ fi
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 dir="$root/family-mihomo-fallback"
 install -d -m 700 "$dir"
-install -m 640 "$repo/deploy/mihomo-config.base.yaml" "$dir/config.yaml"
-install -m 640 "$repo/deploy/mihomo-compose.yml" "$dir/docker-compose.yml"
+if [[ ! -s "$dir/config.yaml" ]]; then
+  install -m 640 "$repo/deploy/mihomo-config.base.yaml" "$dir/config.yaml"
+  echo "Initialized Mihomo baseline configuration."
+else
+  echo "Preserving existing Mihomo config.yaml and its current rule state."
+fi
+if [[ ! -s "$dir/docker-compose.yml" ]]; then
+  install -m 640 "$repo/deploy/mihomo-compose.yml" "$dir/docker-compose.yml"
+else
+  echo "Preserving existing Mihomo Compose configuration."
+fi
 docker compose -f "$dir/docker-compose.yml" up -d
 for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:9091/version >/dev/null && break; sleep 2; done
 curl -fsS http://127.0.0.1:9091/version >/dev/null || { echo "Mihomo controller did not become ready" >&2; exit 1; }
-echo "Mihomo is ready. Import subscriptions in the management UI before adding a client device."
+echo "Mihomo is ready. Import one native subscription in the management UI; the first import creates a usable bootstrap pool before any optional speed test."

@@ -8,6 +8,7 @@ import {
   SlidersHorizontal, Smartphone, Sparkles, Speaker, Sun, Tablet, Thermometer,
   Trash2, Tv, Users, Watch, Wifi, X, Zap,
 } from '@lucide/vue'
+import { toDataURL as qrToDataURL } from 'qrcode'
 
 type JsonRecord = Record<string, any>
 
@@ -74,6 +75,8 @@ type StatusPayload = {
 type WireGuardPeer = { id?: string; name?: string; display_name?: string; default_label?: string; alias?: string; alias_key?: string; endpoint?: string; last_handshake_seconds?: number; active?: boolean; state?: string; state_text?: string; allowed_address?: string; rx_bytes?: number; tx_bytes?: number }
 type WireGuardInterface = { name?: string; label?: string; default_label?: string; alias?: string; alias_key?: string; kind?: string; running?: boolean; probe?: { reachable?: boolean; latency_ms?: number }; peers?: WireGuardPeer[]; state?: string; state_text?: string; listen_port?: string; peer_total?: number; peer_active?: number; last_handshake_seconds?: number; rx_bytes?: number; tx_bytes?: number }
 type WireGuardPayload = { interfaces?: WireGuardInterface[] }
+type RemoteWireGuardClient = { id?: string; name?: string; address?: string; active?: boolean; last_handshake_seconds?: number; rx_bytes?: number; tx_bytes?: number }
+type RemoteWireGuardPayload = { mode?: string; supported?: boolean; routeros_version?: string; message?: string; interface?: { name?: string; listen_port?: number; address?: string; network?: string; running?: boolean; client_count?: number } | null; clients?: RemoteWireGuardClient[] }
 type UpdatePayload = { state?: string; status?: string; current?: string; latest?: string; current_version?: string; latest_version?: string; checked_at?: number; message?: string }
 type PlatformPayload = { mode?: string; checked_at?: number; host?: UpdatePayload; routeros?: UpdatePayload; z4pro?: UpdatePayload; mihomo?: UpdatePayload; mosdns?: UpdatePayload }
 type DnsLog = JsonRecord & { query_name?: string; client_ip?: string; query_type?: string; duration_ms?: number; response_code?: string; query_time?: string }
@@ -106,6 +109,12 @@ const wireguard = ref<WireGuardPayload>({})
 const mihomo = ref<Record<string, unknown>>({})
 const updateStatus = ref<UpdatePayload>({})
 const platformStatus = ref<PlatformPayload>({})
+const remoteWireguard = ref<RemoteWireGuardPayload>({})
+const remoteWireguardName = ref('')
+const remoteWireguardEndpoint = ref('')
+const remoteWireguardPort = ref('51820')
+const remoteWireguardDns = ref('')
+const remoteWireguardConfig = ref<{ name: string; address: string; config: string; qr: string } | null>(null)
 const mosdnsStatus = ref<JsonRecord>({})
 const alertConfig = ref<JsonRecord>({})
 const alertToken = ref('')
@@ -452,6 +461,72 @@ async function saveWireguardRename() {
     await load()
   } catch (error) {
     notify(error instanceof Error ? error.message : 'WireGuard 名称保存失败')
+  } finally {
+    busy.value = ''
+  }
+}
+
+function remoteWireguardClientState(client: RemoteWireGuardClient) {
+  return client.active ? '在线' : client.last_handshake_seconds === undefined || client.last_handshake_seconds === null ? '等待连接' : '已离线'
+}
+
+function remoteWireguardClientTraffic(client: RemoteWireGuardClient) {
+  return `↓ ${formatBytes(client.rx_bytes)} · ↑ ${formatBytes(client.tx_bytes)}`
+}
+
+async function generateRemoteWireguard() {
+  const name = remoteWireguardName.value.trim()
+  const endpoint = remoteWireguardEndpoint.value.trim()
+  if (!name || !endpoint) {
+    notify('请填写客户端名称和公网域名/IP')
+    return
+  }
+  if (!window.confirm(`将在 RouterOS 创建「${name}」的 WireGuard 客户端，并允许其访问家庭 LAN。继续吗？`)) return
+  busy.value = 'remote-wg-generate'
+  try {
+    const result = await api<{ message: string; client: { name: string; address: string }; config: string }>('/api/wireguard/remote-access/generate', {
+      method: 'POST',
+      body: JSON.stringify({
+        name,
+        endpoint,
+        port: Number(remoteWireguardPort.value),
+        dns: remoteWireguardDns.value.trim(),
+      }),
+    })
+    const qr = await qrToDataURL(result.config, { width: 292, margin: 2, errorCorrectionLevel: 'M' })
+    remoteWireguardConfig.value = { name: result.client.name, address: result.client.address, config: result.config, qr }
+    notify(result.message)
+    await loadOpsFeature()
+  } catch (error) {
+    notify(error instanceof Error ? error.message : 'WireGuard 客户端创建失败')
+  } finally {
+    busy.value = ''
+  }
+}
+
+function downloadRemoteWireguard() {
+  if (!remoteWireguardConfig.value) return
+  const fileName = `${remoteWireguardConfig.value.name.replace(/[^\w.-]+/g, '-') || 'family-wireguard'}.conf`
+  const url = URL.createObjectURL(new Blob([remoteWireguardConfig.value.config], { type: 'text/plain;charset=utf-8' }))
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = fileName
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
+async function revokeRemoteWireguard(client: RemoteWireGuardClient) {
+  if (!client.id || !window.confirm(`撤销「${client.name || '该客户端'}」后，已导入的配置将立即失效。继续吗？`)) return
+  busy.value = `remote-wg-revoke-${client.id}`
+  try {
+    const result = await api<{ message: string }>('/api/wireguard/remote-access/revoke', {
+      method: 'POST',
+      body: JSON.stringify({ id: client.id }),
+    })
+    notify(result.message)
+    await loadOpsFeature()
+  } catch (error) {
+    notify(error instanceof Error ? error.message : 'WireGuard 客户端撤销失败')
   } finally {
     busy.value = ''
   }
@@ -1337,9 +1412,14 @@ async function loadOpsFeature() {
   const results = await Promise.allSettled([
     dnsMaintenanceApi<JsonRecord>('/status'),
     api<JsonRecord>('/api/alerts'),
+    api<RemoteWireGuardPayload>('/api/wireguard/remote-access'),
   ])
   if (results[0].status === 'fulfilled') mosdnsStatus.value = results[0].value
   if (results[1].status === 'fulfilled') alertConfig.value = results[1].value
+  if (results[2].status === 'fulfilled') {
+    remoteWireguard.value = results[2].value
+    if (results[2].value.interface?.listen_port) remoteWireguardPort.value = String(results[2].value.interface.listen_port)
+  }
 }
 
 async function saveAlerts() {
@@ -1597,7 +1677,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
       <div class="sidebar-bottom">
         <div class="mini-availability"><HeartPulse :size="16" /><span>系统可用性</span><strong>{{ ready ? '99.9%' : '检查中' }}</strong></div>
         <a class="secondary-button sidebar-console-switch" href="/legacy" title="回到原版管理界面" aria-label="回到原版管理界面"><ArrowUpRight :size="15" /><span>回到原版</span></a>
-        <div class="sidebar-version">Family Proxy <span>0.11.7</span></div>
+        <div class="sidebar-version">Family Proxy <span>0.11.8</span></div>
       </div>
     </aside>
 
@@ -1728,6 +1808,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
         <section v-else class="view-panel" :class="{ 'standalone-ops': standaloneMode }">
           <div class="page-heading"><div><span class="eyebrow">OPERATIONS</span><h1>系统维护</h1><p>{{ standaloneMode ? '这里显示 Linux 旁路主机、Mihomo 和 MosDNS 状态；家庭网关策略由你自行维护。' : '这里显示 Z4Pro NAS 主机、Mihomo 旁路服务、RB5009 路由器和 WireGuard 互联状态。' }}</p></div><span class="soft-badge" :class="{ good: system.healthy }">{{ system.healthy ? '系统正常' : '实时状态' }}</span></div>
           <section v-if="standaloneMode" class="surface-card standalone-ops-card"><div class="card-heading"><div><span class="eyebrow">STANDALONE HOST</span><h2>独立旁路运行环境</h2></div><Server :size="19" class="muted-icon" /></div><div class="standalone-ops-grid"><div><span>运行模式</span><strong>独立旁路</strong><small>未接入 RouterOS</small></div><div><span>代理入口</span><strong>7890 / 7893</strong><small>手动代理或策略路由</small></div><div><span>设备接管</span><strong>未启用</strong><small>不会读取 DHCP 设备</small></div></div><div class="standalone-update-list"><div v-for="item in platformItems" :key="item.key" class="standalone-update-row"><div><strong>{{ item.label }}</strong><small>{{ platformItem(item.key).current_version || platformItem(item.key).current || '当前版本未记录' }}</small></div><span class="standalone-update-state" :class="{ good: ['current', 'checked', 'up_to_date', 'updated', 'success'].includes(platformItem(item.key).state || '') }">{{ updateLabel(platformItem(item.key).state || 'unknown') }}</span></div></div><div class="data-note-line">系统更新只检查本机 Linux、Mihomo 和 MosDNS；家庭网关、DNS 接管和 IPv6 策略由现有网络设备维护。</div></section>
+          <section v-if="!standaloneMode" class="surface-card remote-wg-card"><div class="card-heading"><div><span class="eyebrow">WIREGUARD ACCESS</span><h2>异地回家</h2><p>生成官方 WireGuard 客户端配置；连接后全 IPv4 流量经家庭出口，并可访问家庭 LAN 设备。</p></div><span class="soft-badge" :class="{ good: remoteWireguard.supported && remoteWireguard.interface?.running }">{{ remoteWireguard.supported === false ? '不可用' : remoteWireguard.interface?.running ? '接口在线' : '待创建' }}</span></div><div v-if="remoteWireguard.supported === false" class="remote-wg-unavailable"><AlertTriangle :size="17" /><span>{{ remoteWireguard.message || 'RouterOS 版本不支持自动生成客户端配置。' }}</span></div><div v-else class="remote-wg-layout"><form class="remote-wg-form" @submit.prevent="generateRemoteWireguard"><div class="remote-wg-fields"><label>客户端名称<input v-model="remoteWireguardName" maxlength="40" autocomplete="off" placeholder="例如 iPhone 16 Pro Max" /></label><label>外部域名或公网 IP<input v-model="remoteWireguardEndpoint" maxlength="253" autocomplete="off" placeholder="例如 vpn.example.com" /></label><label>WireGuard UDP 端口<input v-model="remoteWireguardPort" inputmode="numeric" type="number" min="1" max="65535" /></label><label>家庭 DNS<input v-model="remoteWireguardDns" autocomplete="off" placeholder="默认使用旁路主机 MosDNS" /></label></div><div class="data-note-line">{{ remoteWireguard.interface ? `服务端 ${remoteWireguard.interface.name} · ${remoteWireguard.interface.network} · UDP ${remoteWireguard.interface.listen_port}` : '首次生成时会创建独立的 WireGuard 接口和家庭出口 NAT。' }}</div><button class="primary-button" type="submit" :disabled="busy === 'remote-wg-generate'"><Plus :size="15" />生成客户端二维码</button></form><div class="remote-wg-client-list"><div class="remote-wg-list-head"><span>已生成客户端</span><strong>{{ remoteWireguard.clients?.length || 0 }}</strong></div><div v-if="remoteWireguard.clients?.length" class="remote-wg-list"><div v-for="client in remoteWireguard.clients" :key="client.id" class="remote-wg-client"><div><strong>{{ client.name || '未命名客户端' }}</strong><small>{{ client.address || '未分配地址' }} · {{ remoteWireguardClientTraffic(client) }}</small></div><div class="remote-wg-client-actions"><span :class="{ good: client.active }">{{ remoteWireguardClientState(client) }}</span><button class="icon-button small danger" title="撤销客户端" aria-label="撤销客户端" :disabled="busy === `remote-wg-revoke-${client.id}`" @click="revokeRemoteWireguard(client)"><Trash2 :size="14" /></button></div></div></div><div v-else class="empty-inline">还没有生成远程客户端</div></div></div></section>
           <div class="resource-grid"><article class="resource-card"><div class="resource-head"><Cpu :size="18" /><span>{{ standaloneMode ? 'Linux 主机 · CPU' : 'Z4Pro NAS · CPU' }}</span><strong>{{ number(system.cpu?.percent).toFixed(1) }}%</strong></div><div class="resource-track"><span :style="{ width: `${Math.min(100, number(system.cpu?.percent))}%` }" /></div><small>{{ system.cpu?.cores || '—' }} 核 · 负载 {{ system.cpu?.load_1m ?? '—' }}</small></article><article class="resource-card"><div class="resource-head"><HardDrive :size="18" /><span>{{ standaloneMode ? 'Linux 主机 · 内存' : 'Z4Pro NAS · 内存' }}</span><strong>{{ number(system.memory?.percent).toFixed(1) }}%</strong></div><div class="resource-track green"><span :style="{ width: `${Math.min(100, number(system.memory?.percent))}%` }" /></div><small>{{ formatBytes(system.memory?.used) }} / {{ formatBytes(system.memory?.total) }}</small></article><article class="resource-card"><div class="resource-head"><Thermometer :size="18" /><span>{{ standaloneMode ? 'Linux 主机 · 温度' : 'Z4Pro NAS · 温度' }}</span><strong>{{ Number.isFinite(currentTemp) ? `${currentTemp.toFixed(0)}°C` : '不可用' }}</strong></div><div class="resource-track orange"><span :style="{ width: `${Math.min(100, number(system.temperature?.cpu_c))}%` }" /></div><small>{{ standaloneMode ? 'Linux 主机温度 · 传感器状态' : 'NAS CPU 温度 · 传感器状态' }}</small></article></div>
           <div class="section-grid ops-grid"><section class="surface-card maintenance-card"><div class="card-heading"><div><span class="eyebrow">COMPONENTS</span><h2>核心组件与设备</h2></div><RefreshCw :size="18" class="muted-icon" /></div><div class="component-row"><div class="component-icon"><Zap :size="17" /></div><div><strong>Mihomo 旁路代理</strong><small>{{ standaloneMode ? 'Linux 主机 Docker 旁路服务' : 'Z4Pro NAS Docker 旁路服务' }} · {{ updateStatus.current_version || '尚无版本记录' }}{{ updateStatus.latest_version ? ` · 最新 ${updateStatus.latest_version}` : '' }}</small></div><span class="component-state" :class="updateTone(mihomoState)">{{ updateLabel(mihomoState) }}</span><button class="compact-button" :disabled="busy === 'mihomo-check'" @click="checkMihomo">检查更新</button><button v-if="mihomoState === 'update_available'" class="compact-button" @click="applyMihomo">升级并应用</button></div><div v-if="!standaloneMode" class="component-row"><div class="component-icon"><Server :size="17" /></div><div><strong>Z4Pro NAS 系统</strong><small>当前运行的 NAS 主机系统 · {{ z4proUpdate.current_version || '尚无版本记录' }}{{ z4proUpdate.latest_version ? ` · 最新 ${z4proUpdate.latest_version}` : '' }}</small></div><span class="component-state" :class="updateTone(z4proState)">{{ updateLabel(z4proState) }}</span><button class="compact-button" :disabled="busy === 'platform-check'" @click="checkPlatform">检查更新</button></div><div class="component-row"><div class="component-icon"><Globe2 :size="17" /></div><div><strong>MosDNS 解析服务</strong><small>规则、广告过滤与 DNS 回归检查 · {{ updateLabel(mosdnsUpdateState()) }}</small></div><span class="component-state" :class="updateTone(mosdnsUpdateState())">{{ updateLabel(mosdnsUpdateState()) }}</span><button class="compact-button" @click="checkMosdns">检查更新</button><button v-if="mosdnsStatus.phase === 'update_available'" class="compact-button" @click="applyMosdns">升级并应用</button></div><div v-if="!standaloneMode" class="component-row"><div class="component-icon"><Router :size="17" /></div><div><strong>RB5009 路由器</strong><small>{{ summary.router === 'connected' ? '家庭网关 API 管理连接正常' : '家庭网关 API 管理连接不可用' }}</small></div><span class="component-state" :class="{ good: summary.router === 'connected' }">{{ summary.router === 'connected' ? '在线' : '检查' }}</span><button class="compact-button" @click="load">重新读取</button></div></section><section v-if="!standaloneMode" class="surface-card maintenance-card"><div class="card-heading"><div><span class="eyebrow">RUNTIME</span><h2>Z4Pro NAS 运行详情</h2></div><MoreHorizontal :size="19" class="muted-icon" /></div><div class="runtime-list"><div><span>NAS 运行时间</span><strong>{{ formatUptime(system.uptime_seconds) }}</strong></div><div><span>Docker 容器</span><strong>{{ system.docker?.running ?? '—' }} / {{ system.docker?.total ?? '—' }}</strong></div><div><span>NAS 系统盘</span><strong>{{ number(system.disk?.percent).toFixed(1) }}%</strong></div><div><span>WireGuard 远程互联</span><strong>{{ wireguardPeers }} 个 Peer</strong></div></div><button class="card-link" @click="loadOpsFeature"><RefreshCw :size="15" />刷新详细维护状态</button></section></div>
           <div class="section-grid ops-extra-grid"><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">PLATFORM UPDATES</span><h2>{{ standaloneMode ? '组件更新状态' : '平台更新状态' }}</h2></div><button class="icon-button small" title="检查平台更新" aria-label="检查平台更新" :disabled="busy === 'platform-check'" @click="checkPlatform"><RefreshCw :size="15" /></button></div><div v-for="item in platformItems" :key="item.key" class="update-row"><div class="update-row-main"><strong>{{ item.label }}</strong><small>{{ platformItem(item.key).current_version || platformItem(item.key).current || '当前版本未记录' }}</small></div><div class="update-row-meta"><span class="component-state" :class="updateTone(platformItem(item.key).state || 'unknown')">{{ updateLabel(platformItem(item.key).state || 'unknown') }}</span><small v-if="platformItem(item.key).latest_version">最新 <span class="update-latest" :title="String(platformItem(item.key).latest_version)">{{ updateVersion(platformItem(item.key).latest_version) }}</span></small></div></div><div class="data-note-line">{{ platformStatus.checked_at ? `上次检查：${timeValue(platformStatus.checked_at)}` : '尚未执行平台更新检查。' }}</div></section><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">FAILOVER ALERTS</span><h2>故障告警</h2></div><span class="soft-badge" :class="{ good: alertConfig.enabled && alertConfig.configured }">{{ alertConfig.enabled && alertConfig.configured ? '已启用' : alertConfig.configured ? '已配置' : '未配置' }}</span></div><div class="alert-options"><label class="toggle-control"><input v-model="alertConfig.enabled" type="checkbox" /><span>启用机场出口故障告警</span></label><label class="toggle-control"><input v-model="alertConfig.notify_recovery" type="checkbox" /><span>恢复后发送通知</span></label><label v-for="source in (alertConfig.available_sources || [])" :key="source.slot" class="source-option"><input type="checkbox" :checked="(alertConfig.source_slots || []).includes(source.slot)" @change="toggleAlertSource(source.slot)" /><span>{{ source.label }}</span></label></div><div class="alert-fields"><input v-model="alertToken" type="password" autocomplete="off" placeholder="Bot Token（留空保持不变）" /><input v-model="alertChat" autocomplete="off" placeholder="Chat ID（留空保持不变）" /></div><div class="inline-actions"><button class="primary-button" @click="saveAlerts">保存告警设置</button><button class="secondary-button" @click="testAlerts">发送测试通知</button></div><div class="data-note-line">{{ alertConfig.enabled && alertConfig.configured ? '所选机场来源的候选节点全部不可用时推送；同一故障只通知一次。' : alertConfig.configured ? '凭据已保存，选择机场来源并启用后开始监控。' : '请填写 Bot Token 与 Chat ID 后保存。' }}</div></section><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">WIREGUARD</span><h2>远程互联</h2></div><Network :size="18" class="muted-icon" /></div><div v-for="item in visibleWireguardInterfaces" :key="item.name" class="wg-interface"><template v-if="item.kind === 'mobile'"><div v-for="peer in item.peers || []" :key="peer.id || peer.name" class="wg-peer wg-mobile-peer"><div><strong>{{ wireguardPeerLabel(peer) }}</strong><small v-if="peer.alias">{{ peer.name }} · {{ peer.endpoint || '未建立' }}</small><small v-else>{{ peer.endpoint || '未建立' }}</small></div><div class="wg-peer-meta"><span>{{ wireguardHandshake(peer.last_handshake_seconds) }}</span><button class="icon-button small" title="编辑 Peer 名称" aria-label="编辑 Peer 名称" @click="openWireguardPeerRename(peer)"><Pencil :size="13" /></button></div></div></template><div v-else class="wg-peer wg-site-peer"><div><strong>{{ wireguardInterfaceLabel(item) }}</strong><small>{{ item.peers?.[0]?.endpoint || '固定父母家庭连接' }}</small></div><div class="wg-peer-meta"><span>{{ item.probe?.reachable ? '链路正常' : wireguardHandshake(item.peers?.[0]?.last_handshake_seconds) }}</span><button class="icon-button small" title="编辑固定 WG 名称" aria-label="编辑固定 WG 名称" @click="openWireguardInterfaceRename(item)"><Pencil :size="13" /></button></div></div></div><div v-if="!visibleWireguardInterfaces.length" class="empty-inline">当前没有活跃的 WireGuard 连接</div></section></div>
@@ -1739,6 +1820,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
     <div v-if="toastMessage" class="toast"><CheckCircle2 :size="16" />{{ toastMessage }}</div>
     <div v-if="renameTarget" class="modal-backdrop" @click.self="renameTarget = null"><form class="modal-card device-editor" @submit.prevent="saveRename"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="renameTarget = null"><X :size="17" /></button><span class="eyebrow">DEVICE PROFILE</span><h2>编辑设备</h2><p>{{ renameTarget.ip }} · {{ renameTarget.mac }}</p><label>显示名称<input v-model="renameDraft" autofocus maxlength="40" /></label><fieldset class="icon-picker"><legend>显示图标</legend><div class="icon-options"><button v-for="item in deviceIconOptions" :key="item.key" type="button" class="icon-choice" :class="{ selected: iconDraft === item.key }" :title="item.label" :aria-label="item.label" @click="iconDraft = item.key"><component :is="item.icon" :size="19" /><span>{{ item.label }}</span></button></div></fieldset><div class="modal-actions"><button type="button" class="secondary-button" @click="renameTarget = null">取消</button><button class="primary-button" type="submit" :disabled="busy === 'rename'">保存</button></div></form></div>
     <div v-if="wireguardRenameTarget" class="modal-backdrop" @click.self="wireguardRenameTarget = null"><form class="modal-card" @submit.prevent="saveWireguardRename"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="wireguardRenameTarget = null"><X :size="17" /></button><span class="eyebrow">WIREGUARD NAME</span><h2>编辑远程互联名称</h2><p>当前显示：{{ wireguardRenameTarget.label }}；留空即可恢复原始名称。</p><label>显示名称<input v-model="wireguardRenameDraft" autofocus maxlength="40" :placeholder="wireguardRenameTarget.defaultLabel" /></label><div class="modal-actions"><button type="button" class="secondary-button" @click="wireguardRenameTarget = null">取消</button><button class="primary-button" type="submit" :disabled="busy === 'wireguard-rename'">保存</button></div></form></div>
+    <div v-if="remoteWireguardConfig" class="modal-backdrop" @click.self="remoteWireguardConfig = null"><div class="modal-card remote-wg-qr-modal"><button type="button" class="modal-close icon-button" title="关闭二维码" aria-label="关闭二维码" @click="remoteWireguardConfig = null"><X :size="17" /></button><span class="eyebrow">WIREGUARD CLIENT</span><h2>{{ remoteWireguardConfig.name }}</h2><p>使用官方 WireGuard 客户端扫描二维码；客户端地址 {{ remoteWireguardConfig.address }}。二维码包含私钥，请勿转发。</p><div class="remote-wg-qr"><img :src="remoteWireguardConfig.qr" alt="WireGuard 客户端二维码" /></div><div class="modal-actions"><button type="button" class="secondary-button" @click="downloadRemoteWireguard"><ArrowDown :size="15" />下载 .conf</button><button type="button" class="primary-button" @click="remoteWireguardConfig = null">完成</button></div></div></div>
     <div v-if="dnsUpstreamsOpen" class="modal-backdrop" @click.self="dnsUpstreamsOpen = false"><form class="modal-card wide-editor" @submit.prevent="saveDnsUpstreams"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="dnsUpstreamsOpen = false"><X :size="17" /></button><span class="eyebrow">DNS UPSTREAMS</span><h2>编辑解析服务器</h2><p>一行一个地址；带有 `|` 的内容会作为拨号地址保留。保存时会先做健康检查，失败不会替换当前配置。</p><label>国内上游<textarea v-model="dnsDomesticDraft" spellcheck="false" placeholder="223.5.5.5&#10;https://dns.alidns.com/dns-query" /></label><label>国外上游<textarea v-model="dnsForeignDraft" spellcheck="false" placeholder="https://1.1.1.1/dns-query" /></label><div class="modal-actions"><button type="button" class="secondary-button" @click="dnsUpstreamsOpen = false">取消</button><button class="primary-button" type="submit" :disabled="busy === 'dns-upstreams'">校验并应用</button></div></form></div>
     <div v-if="airportPoolEditor" class="modal-backdrop" @click.self="airportPoolEditor = ''"><form class="modal-card" @submit.prevent="saveAirportPoolMode"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="airportPoolEditor = ''"><X :size="17" /></button><span class="eyebrow">POOL MODE</span><h2>编辑 {{ airportPoolEditor }}</h2><p>模式只改变当前候选池的选择方式，不会修改订阅内容。</p><label>候选池模式<select v-model="airportPoolMode"><option value="fallback">故障切换：按顺序使用候选</option><option value="url-test">自动测速：按延迟和健康度选择</option><option value="select">手动选择：保持当前节点</option></select></label><div class="modal-actions"><button type="button" class="secondary-button" @click="airportPoolEditor = ''">取消</button><button class="primary-button" type="submit" :disabled="busy === 'airport-mode'">保存模式</button></div></form></div>
     <div v-if="ruleCardEditorOpen" class="modal-backdrop" @click.self="closeRuleCardEditor"><form class="modal-card wide-editor rule-card-editor" @submit.prevent="closeRuleCardEditor"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="closeRuleCardEditor"><X :size="17" /></button><span class="eyebrow">RULE CARD</span><h2>{{ ruleCardTitle(ruleCardEditorKey, ruleCardEntries(ruleCardEditorKey)) }}</h2><p>修改会直接写入当前草稿；跨卡片的优先级请回到卡片网格拖动调整。</p><label v-if="ruleCardEditorKey.startsWith('__custom__')">卡片名称<input :value="ruleCardLabel(ruleCardEditorKey)" maxlength="40" placeholder="留空则显示匹配内容" @input="setRuleCardLabel(ruleCardEditorKey, $event)" /></label><div v-if="ruleCardEntries(ruleCardEditorKey).length" class="rule-card-editor-list"><div v-for="entry in ruleCardEntries(ruleCardEditorKey)" :key="`${entry.index}-${entry.raw}`" class="rule-card-editor-row"><div class="editor-rule-top"><span>第 {{ entry.index + 1 }} 条</span><span v-if="ruleIsProtected(entry.raw)" class="system-badge">系统保护</span></div><template v-if="ruleAdvanced"><input class="control raw-control" :value="entry.raw" :readonly="ruleIsProtected(entry.raw)" @input="setRawRule(entry.index, $event)" /></template><template v-else><div class="editor-two-column"><label>匹配方式<select class="control" :value="entry.model.type" :disabled="ruleIsProtected(entry.raw)" @change="setRuleFromEvent(entry.index, 'type', $event)"><option value="DOMAIN">域名</option><option value="DOMAIN-SUFFIX">域名及子域名</option><option value="DOMAIN-KEYWORD">域名关键词</option><option value="GEOSITE">网站分类</option><option value="GEOIP">地区 IP</option><option value="IP-CIDR">IPv4 网段</option><option value="IP-CIDR6">IPv6 网段</option><option value="MATCH">兜底</option></select></label><label>匹配内容<input class="control" :value="entry.model.value" :readonly="ruleIsProtected(entry.raw) || entry.model.type === 'MATCH'" placeholder="例如 example.com" @input="setRuleFromEvent(entry.index, 'value', $event)" /></label><label>出口<select class="control" :value="entry.model.policy" :disabled="ruleIsProtected(entry.raw)" @change="setRuleFromEvent(entry.index, 'policy', $event)"><option v-for="policy in rulePolicies" :key="policy" :value="policy">{{ policy }}</option></select></label></div></template><div class="modal-actions editor-row-actions"><span v-if="ruleIsProtected(entry.raw)" class="muted-caption">系统规则不可改写</span><button v-else type="button" class="compact-button danger" @click="removeRule(entry.index)"><Trash2 :size="14" />删除此规则</button></div></div></div><div v-else class="empty-inline">此卡片暂时没有可编辑规则</div><div class="modal-actions"><button v-if="ruleCardEditorKey !== '__default__' && !ruleCardEditorKey.startsWith('set:')" type="button" class="secondary-button" @click="addRuleToCard(ruleCardEditorKey)"><Plus :size="15" />新增到此卡片</button><button type="submit" class="primary-button">完成</button></div></form></div>
