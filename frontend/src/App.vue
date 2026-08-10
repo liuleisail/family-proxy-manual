@@ -489,6 +489,32 @@ function dnsUpstreamText(data: JsonRecord) {
   return dnsUpstreamItems(data).map(dnsUpstreamLine).filter(Boolean).join('、') || '已配置'
 }
 
+function dnsRaceItems(group: string) {
+  const items = Array.isArray(dnsPerformance.value.upstreams) ? dnsPerformance.value.upstreams : []
+  return items
+    .filter((item: JsonRecord) => item.group === group)
+    .slice()
+    .sort((left: JsonRecord, right: JsonRecord) => {
+      const leftError = Number(left.error_rate || 0)
+      const rightError = Number(right.error_rate || 0)
+      if (leftError !== rightError) return leftError - rightError
+      const leftWin = Number(left.queries || 0) ? Number(left.winners || 0) / Number(left.queries) : 0
+      const rightWin = Number(right.queries || 0) ? Number(right.winners || 0) / Number(right.queries) : 0
+      if (leftWin !== rightWin) return rightWin - leftWin
+      return Number(left.average_ms || 0) - Number(right.average_ms || 0)
+    })
+}
+
+function dnsRaceWinRate(item: JsonRecord) {
+  const queries = Number(item.queries || 0)
+  return queries ? Number(item.winners || 0) / queries * 100 : 0
+}
+
+function dnsRaceErrorClass(item: JsonRecord) {
+  const errors = Number(item.error_rate || 0)
+  return errors >= 1 ? 'bad' : errors > 0 ? 'warn' : 'good'
+}
+
 function dnsFirst(data: JsonRecord, key: string) {
   const value = data[key]
   return Number(value || 0)
@@ -1238,6 +1264,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
           <template v-if="dnsTab === 'overview'">
             <div class="metric-grid feature-metrics"><article class="metric-card accent-blue"><span class="metric-label">累计查询</span><strong>{{ dnsTotal.toLocaleString() }}</strong><small>审计记录总量</small></article><article class="metric-card accent-green"><span class="metric-label">平均处理时间</span><strong>{{ msValue(dnsAverage) }}</strong><small>当前查询平均值</small></article><article class="metric-card accent-orange"><span class="metric-label">最近 1 小时</span><strong>{{ Number(dnsWindow('1h').request_count || 0).toLocaleString() }}</strong><small>平均 {{ msValue(dnsWindow('1h').average_duration_ms) }}</small></article><article class="metric-card accent-purple"><span class="metric-label">规则数量</span><strong>{{ dnsRuleCount.toLocaleString() }}</strong><small>国内、国外与国内 IP</small></article></div>
             <div class="section-grid feature-grid-two"><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">RESOLUTION PATH</span><h2>解析路径</h2></div><button class="icon-button small" title="编辑解析服务器" aria-label="编辑解析服务器" @click="openDnsUpstreams"><Pencil :size="15" /></button></div><div class="route-summary"><div><span>国内解析</span><strong>{{ dnsUpstreamText(dnsDomestic) }}</strong><small>本地网络直连</small></div><div><span>国外解析</span><strong>{{ dnsUpstreamText(dnsForeign) }}</strong><small>经 Mihomo SOCKS</small></div></div><div class="info-strip">这里只影响主动使用 Z4Pro MosDNS 的查询，不修改 RouterOS、DHCP DNS 或设备接管状态。</div></section><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">RECENT RANKING</span><h2>常用域名与活跃设备</h2></div><Globe2 :size="18" class="muted-icon" /></div><div class="rank-columns"><div><span class="muted-caption">常用域名</span><div v-for="item in dnsDomains" :key="String(item.key)" class="rank-row"><span>{{ item.key || '未知' }}</span><strong>{{ Number(item.count || 0).toLocaleString() }}</strong></div><div v-if="!dnsDomains.length" class="empty-inline">暂无数据</div></div><div><span class="muted-caption">活跃设备</span><div v-for="item in dnsClients" :key="String(item.key)" class="rank-row"><span>{{ String(item.key || '--').replace(/^::ffff:/, '') }}</span><strong>{{ Number(item.count || 0).toLocaleString() }}</strong></div><div v-if="!dnsClients.length" class="empty-inline">暂无数据</div></div></div></section></div>
+            <section class="section-grid feature-grid-two dns-race-grid"><section v-for="group in [{ id: 'domestic', label: '国内上游', caption: '国内解析并发竞速', color: 'green' }, { id: 'foreign', label: '国外上游', caption: '国外解析并发竞速', color: 'blue' }]" :key="group.id" class="surface-card dns-race-card"><div class="card-heading"><div><span class="eyebrow">UPSTREAM RACE</span><h2>{{ group.label }}</h2><p class="card-subtitle">{{ group.caption }} · 按错误率、胜率和平均延迟排序</p></div><span class="soft-badge" :class="{ good: group.color === 'green' }">{{ dnsRaceItems(group.id).length }} 个样本</span></div><div v-if="dnsRaceItems(group.id).length" class="dns-race-list"><div v-for="(item, index) in dnsRaceItems(group.id)" :key="`${item.name}-${item.address}`" class="dns-race-row" :class="{ best: index === 0 }"><div class="dns-race-leading"><span class="dns-race-rank">{{ index + 1 }}</span><div class="dns-race-identity"><strong>{{ item.name || '未命名上游' }}<em v-if="index === 0">当前最优</em></strong><small>{{ item.address || '地址未上报' }}</small></div><span class="dns-race-error" :class="dnsRaceErrorClass(item)">错误 {{ Number(item.error_rate || 0).toFixed(2) }}%</span></div><div class="dns-race-metrics"><div><span>胜率</span><strong>{{ dnsRaceWinRate(item).toFixed(1) }}%</strong><small>{{ Number(item.winners || 0).toLocaleString() }} / {{ Number(item.queries || 0).toLocaleString() }} 次胜出</small><div class="dns-race-track"><span :style="{ width: `${Math.min(100, Math.max(0, dnsRaceWinRate(item)))}%` }" /></div></div><div><span>平均延迟</span><strong>{{ msValue(item.average_ms) }}</strong><small>P95 {{ msValue(item.p95_ms) }} · P99 {{ msValue(item.p99_ms) }}</small></div></div></div></div><div v-else class="empty-inline">尚无该组性能样本</div></section></section><div class="dns-race-note"><Gauge :size="15" /><span>排名来自 MosDNS 当前累计竞速样本；P95/P99 用于观察尾部延迟，不代表每次查询都固定耗时。</span><span v-if="dnsPerformance.sample_size">样本 {{ Number(dnsPerformance.sample_size).toLocaleString() }} 条</span></div>
             <div class="section-grid feature-grid-two"><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">EFFECTIVE ROUTE</span><h2>实际分流结果</h2></div></div><div v-for="item in dnsEffective" :key="String(item.key)" class="rank-row"><span>{{ item.key || '默认' }}</span><strong>{{ Number(item.count || 0).toLocaleString() }}</strong></div><div v-if="!dnsEffective.length" class="empty-inline">暂无数据</div></section><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">SLOW QUERIES</span><h2>较慢查询</h2></div><Gauge :size="18" class="muted-icon" /></div><div v-for="item in dnsSlowest" :key="String(item.query_name || item.key)" class="rank-row"><span>{{ item.query_name || item.key || '未知' }}</span><strong>{{ msValue(item.duration_ms || item.value) }}</strong></div><div v-if="!dnsSlowest.length" class="empty-inline">暂无数据</div></section></div>
           </template>
 
