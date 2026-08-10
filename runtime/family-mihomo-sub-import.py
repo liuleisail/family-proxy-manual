@@ -502,6 +502,20 @@ def build_suggestions(results):
 
 
 def seed_pools():
+    seeded = default_pools_for_import()
+    atomic_json(CANDIDATES, seeded)
+    return seeded
+
+
+def default_pools_for_import():
+    """Build a conservative first-run pool without requiring a speed test.
+
+    Region-aware pools only receive nodes whose names identify that region. If
+    a subscription has no Hong Kong node, Proxy still needs a usable bootstrap
+    path, so it receives the first few imported nodes as a generic reserve.
+    Later full testing and confirmation can replace these entries with the
+    normal stability-ranked candidates.
+    """
     available = nodes()
     seeded = {}
     for pool, words in POOLS.items():
@@ -509,7 +523,8 @@ def seed_pools():
         seeded[pool] = rank_pool_candidates([
             {"name": n["name"], "source": n["source"], "score": 0} for n in matches
         ])
-    atomic_json(CANDIDATES, seeded)
+    if not seeded["Proxy"]:
+        seeded["Proxy"] = [item["name"] for item in available[:5]]
     return seeded
 
 
@@ -708,6 +723,13 @@ def generate_config(selected=None, settings=None):
     ai_groups = [group for pool, group in (("JP-AI", "JP-AI"), ("SG-AI", "SG-AI"),
                                              ("US-AI", "US-AI"), ("其他-AI", "其他-AI"))
                  if selected[pool]]
+    # A fresh subscription may not contain region labels. Keep the default
+    # rules usable through the generic imported-node pool until the user has
+    # completed the normal business-pool stability selection.
+    generic_fallback = ["Proxy-Auto"] if proxy else []
+    hk_runtime = hk or generic_fallback
+    tg_runtime = tg or generic_fallback
+    ai_groups = ai_groups or generic_fallback
     ai_nodes = jp + sg + us + other_ai
     github = github_candidates(selected)
     v2ex = list(dict.fromkeys(proxy))
@@ -724,11 +746,11 @@ def generate_config(selected=None, settings=None):
     groups = [
         {"name": "Apple", "type": "select", "proxies": ["DIRECT", "Proxy-Auto"] + proxy},
         {"name": "MicroSoft", "type": "select", "proxies": ["DIRECT", "Proxy-Auto"] + proxy},
-        candidate_pool_group("HK-视频", hk, settings),
+        candidate_pool_group("HK-视频", hk_runtime, settings),
         candidate_pool_group("JP-AI", jp, settings),
         candidate_pool_group("SG-AI", sg, settings),
         candidate_pool_group("US-AI", us, settings),
-        candidate_pool_group("TG", tg, settings),
+        candidate_pool_group("TG", tg_runtime, settings),
         fallback("TG-Notify", notify, "https://api.telegram.org", 300),
         candidate_pool_group("Proxy", proxy, settings),
         fallback("GitHub-Auto", github, "https://github.com/", 300, "200"),
@@ -808,8 +830,15 @@ def apply_provider(slot, cleaned, count):
     try:
         current = pools()
         valid = {node["name"] for node in nodes()}
-        reconciled = {pool: [name for name in current[pool] if name in valid] for pool in POOLS}
-        validate_pools(reconciled)
+        has_active_candidates = any(current[pool] for pool in POOLS)
+        reconciled = ({pool: [name for name in current[pool] if name in valid] for pool in POOLS}
+                      if has_active_candidates else default_pools_for_import())
+        # Replacing the only source may invalidate every old candidate. Keep
+        # the install immediately usable while retaining existing pools whenever
+        # at least one of their nodes still exists.
+        if has_active_candidates and not any(reconciled[pool] for pool in POOLS):
+            reconciled = default_pools_for_import()
+        validate_pools(reconciled, allow_empty=True, allow_generic_proxy=True)
         generate_config(reconciled)
         PREVIOUS.write_bytes(previous_candidates)
         atomic_json(CANDIDATES, reconciled)
@@ -871,7 +900,7 @@ def clear_slot(slot):
         current = pools()
         valid = {node["name"] for node in nodes()}
         reconciled = {pool: [name for name in current[pool] if name in valid] for pool in POOLS}
-        validate_pools(reconciled)
+        validate_pools(reconciled, allow_generic_proxy=True)
         generate_config(reconciled)
         PREVIOUS.write_bytes(previous_candidates)
         atomic_json(CANDIDATES, reconciled)
@@ -911,24 +940,26 @@ def delete_source(slot):
     return {"slot": slot, "removed": True}
 
 
-def validate_pools(value):
+def validate_pools(value, allow_empty=False, allow_generic_proxy=False):
     indexed = node_index()
+    value = value if isinstance(value, dict) else {}
     cleaned = {}
     for pool in POOLS:
         entries = value.get(pool, [])
-        minimum = 0 if pool == "其他-AI" else 1
+        minimum = 0 if allow_empty or pool == "其他-AI" else 1
         if not isinstance(entries, list) or not minimum <= len(entries) <= 5 or len(entries) != len(set(entries)):
             raise ValueError(f"{pool} 必须是 {minimum} 至 5 个不重复节点")
         if any(item not in indexed for item in entries):
             raise ValueError(f"{pool} 含有不存在的节点")
-        if any(not pool_matches(pool, indexed[item]) for item in entries):
+        if any(not pool_matches(pool, indexed[item]) and not (
+                allow_generic_proxy and pool == "Proxy") for item in entries):
             raise ValueError(f"{pool} 含有不符合地域规则的节点")
         cleaned[pool] = list(entries)
     return cleaned
 
 
 def save_pools(value, settings=None):
-    cleaned = validate_pools(value)
+    cleaned = validate_pools(value, allow_generic_proxy=True)
     cleaned_settings = validate_pool_settings(settings if settings is not None else pool_settings())
     previous = CANDIDATES.read_bytes() if CANDIDATES.exists() else b"{}"
     previous_settings = POOL_SETTINGS.read_bytes() if POOL_SETTINGS.exists() else b"{}"
@@ -973,7 +1004,7 @@ def rollback_pools():
     current = CANDIDATES.read_bytes() if CANDIDATES.exists() else b"{}"
     current_settings = POOL_SETTINGS.read_bytes() if POOL_SETTINGS.exists() else b"{}"
     restored_bytes = PREVIOUS.read_bytes()
-    restored = validate_pools(json.loads(restored_bytes))
+    restored = validate_pools(json.loads(restored_bytes), allow_generic_proxy=True)
     restored_settings = validate_pool_settings(
         json.loads(PREVIOUS_POOL_SETTINGS.read_text()) if PREVIOUS_POOL_SETTINGS.exists() else {}
     )
@@ -1326,7 +1357,7 @@ def start_replace_and_clear_slot(slot):
 def start_retest_apply(value):
     if not suggestions()["ready"]:
         raise ValueError("请先完成全量稳定性测速并生成完整建议")
-    selected = validate_pools(value)
+    selected = validate_pools(value, allow_generic_proxy=True)
     if not TEST_JOB_LOCK.acquire(blocking=False):
         return {"started": False, **test_status()}
     github = github_candidates(selected)
@@ -1777,6 +1808,8 @@ PAGE = PAGE.replace(
     1,
 )
 PAGE = PAGE.replace('</style>', '@media(max-width:760px){.nav{grid-template-columns:repeat(5,1fr)}}</style>', 1)
+PAGE = PAGE.replace('订阅只负责导入节点；业务流量仅使用经过筛选的候选池。',
+                    '首次导入会自动生成可用的启动候选池；已有规则、策略和候选池保持不变。', 1)
 PAGE = PAGE.replace('</style>', '.probe-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}.probe-card{padding:14px}.probe-card h3{margin:0;font-size:15px}.probe-target{margin-top:7px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#aeaeb2;overflow-wrap:anywhere}.probe-meta{margin-top:10px;color:#8e8e93;font-size:12px;line-height:1.55}.probe-result{margin-top:7px;font-size:13px;font-variant-numeric:tabular-nums}.probe-actions{margin-top:12px}.probe-actions .btn{width:100%}</style>', 1)
 _slot_card_start = PAGE.find("function slotCard(s){")
 _slot_card_end = PAGE.find("async function load(){", _slot_card_start)
@@ -1784,6 +1817,8 @@ if _slot_card_start < 0 or _slot_card_end < 0:
     raise RuntimeError("subscription card template marker missing")
 _slot_card_js = r'''function slotCard(s){let imported=s.imported;let removeButton=s.removable?'<button class="btn danger" onclick="deleteSource(\''+s.slot+'\')">删除机场</button>':'';return '<article class="card"><div class="card-head"><h2>'+esc(s.label)+'</h2><div class="source-state '+(imported?'':'empty')+'">'+(imported?'已导入 '+s.nodes+' 个有效节点':'尚未导入')+'</div><div class="muted">'+(imported?esc(s.updated_at):'导入后可在候选池中选择节点')+'</div></div><div class="form"><input id="url-'+s.slot+'" type="text" inputmode="url" autocapitalize="off" spellcheck="false" autocomplete="off" placeholder="HTTPS 原生 Clash/Mihomo 订阅链接"><div class="actions"><button class="btn primary" onclick="imp(\''+s.slot+'\')">直连导入或替换</button><button class="btn danger" onclick="dropSlot(\''+s.slot+'\')">清空节点</button>'+removeButton+'</div><div id="msg-'+s.slot+'" class="status"></div></div></article>'}'''
 PAGE = PAGE[:_slot_card_start] + _slot_card_js + PAGE[_slot_card_end:]
+PAGE = PAGE.replace('导入后可在候选池中选择节点',
+                    '首次导入自动生成启动候选池；现有规则和候选池保持不变', 1)
 PAGE = PAGE.replace('<div class="section-title"><h2>订阅来源</h2></div>',
                     '<div class="section-title"><h2>订阅来源</h2><button class="icon-btn" title="添加备用机场" aria-label="添加备用机场" onclick="addSource()">+</button></div>')
 _history_marker = "<div class=\"runtime-line muted\">'+(v.history.map"
@@ -1997,7 +2032,7 @@ def migrate():
 
 if __name__ == "__main__":
     if "--apply-current" in sys.argv:
-        selected = validate_pools(pools())
+        selected = validate_pools(pools(), allow_empty=True, allow_generic_proxy=True)
         settings = pool_settings()
         generate_config(selected, settings)
         atomic_json(CANDIDATES, selected)

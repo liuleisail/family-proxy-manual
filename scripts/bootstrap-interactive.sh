@@ -181,4 +181,4 @@ echo
 echo "基础部署完成。下一步："
 echo "1. 审阅并导入 routeros/01-preflight-and-backup.rsc 与 02-prepare-controller.rsc（替换示例 IP）。"
 echo "2. 若已有兼容 MosDNS，按 DEPLOYMENT.md 的可选步骤接入管理页。"
-echo "3. 从管理页导入订阅、建立候选池，再只接管一台测试设备。"
+echo "3. 从管理页导入订阅即可生成启动候选池；稳定运行后再按需测速优化，最后只接管一台测试设备。"
