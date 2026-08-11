@@ -89,13 +89,11 @@ Bot Token 与 Chat ID 已在截图中遮挡，保留告警来源、故障与恢�
 
 ![Telegram 推送与告警](docs/screenshots/telegram-alerts.png)
 
-## 人工部署快速开始
+## 安装
 
-首次部署应在一台已安装 Docker、Docker Compose 插件和 `systemd` 的旁路服务器上完成。安装器会自动判断是否能通过 RouterOS API 集成；没有 RouterOS 时进入独立旁路模式。安装器只部署控制平面，不会自动改 RouterOS、导入订阅、接管设备或覆盖已有同名 Docker 容器。
+旁路服务器需要 Linux、Docker Engine、Docker Compose 插件、`systemd` 和固定 LAN IPv4。支持 Debian、Ubuntu、极空间、飞牛及其它 Linux 系统。安装器不会自动修改 RouterOS、DNS、订阅或设备接管状态。
 
-### 最短首次部署
-
-适用于已具备 Docker、systemd 和固定 LAN IPv4 的 Debian、Ubuntu、极空间、飞牛或其它 Linux 旁路服务器：
+### 1. 交互式安装
 
 ```bash
 git clone https://github.com/liuleisail/family-proxy-manual.git
@@ -103,45 +101,53 @@ cd family-proxy-manual
 sudo ./scripts/bootstrap-interactive.sh
 ```
 
-脚本会展示本机网卡地址，询问 LAN、旁路主机 IP、路由集成模式、可选 RouterOS API 凭据、管理页凭据和 SSD 数据目录；凭据仅写入权限为 `600` 的 `/etc/family-proxy-ui/router.env`。随后它自动执行控制平面安装、基础 Mihomo 容器创建、服务启动和本机验证。管理页密码会立刻转换为 PBKDF2 哈希，明文不会保留。
+按提示填写 LAN 网段、旁路主机 IP、接口、模式、管理账号和数据目录。脚本会安装服务、创建 Mihomo 容器、启动并校验控制面。
 
-该入口**不**自动写 RouterOS、接管设备、导入订阅，或覆盖已有 Mihomo/MosDNS 容器。选择 RouterOS 模式时，API 凭据会先做一次只读登录验证；选择独立旁路时不会读取 DHCP、WireGuard 或 RouterOS 规则。独立模式下通过本机 `7890` HTTP/SOCKS5 或 `7893` 透明入口使用代理，设备需要由客户端或家庭网关自行配置策略。
-
-### 非 RB5009 路由器与设备 IP 设置
-
-项目不绑定 RB5009 型号。如果家庭网关本身运行 RouterOS 7，并且 API、策略路由、地址列表和防火墙能力可用，仍可选择 `routeros` 模式；此时把 `FAMILY_ROUTER_IP` 和 `ROUTER_HOST` 填成实际网关的 LAN/API 地址，把 `FAMILY_PROXY_IP` 填成旁路 Linux 主机在同一 LAN 内的固定地址。不要把这些地址写成示例值，也不要让旁路主机与网关或客户端共用一个 IP。
-
-如果家庭网关不是 RouterOS（例如其它品牌路由器、Debian/Ubuntu 网关或只提供普通 NAT 的设备），请选择 `standalone`。推荐的地址关系如下：
-
-| 角色 | 示例地址 | 设置要求 |
-| --- | --- | --- |
-| 家庭网关 | `192.168.10.1` | 保持原来的 LAN 网关地址 |
-| 旁路 Linux 主机 | `192.168.10.10` | 使用固定地址或 DHCP 静态租约，填写 `FAMILY_PROXY_IP` |
-| 需要翻墙的设备 | `192.168.10.101` | 使用独立地址，最好为该设备建立 DHCP 静态租约 |
-
-设备 IP 本身不能单独实现翻墙，也不要把设备默认网关改成旁路主机，除非你已经在该 Linux 主机上另行配置并验证 IP 转发、回程路由和防火墙。最稳妥的独立模式用法是：设备继续使用家庭网关 `192.168.10.1` 作为默认网关，在设备或代理客户端中填写 `192.168.10.10:7890`；`7890` 是混合 HTTP/SOCKS5 代理端口，设备 IP 只用于固定识别，不需要改成旁路主机地址。
-
-如果希望设备完全无感地走透明代理，则需要非 RouterOS 家庭网关自行支持“按源 IP/源网段的策略路由”，把选定设备的流量送到旁路主机，并由旁路主机完成 TPROXY 和回程路由。当前项目不会自动写其它品牌路由器的策略，也不会仅凭修改设备 IP 完成这一步；`7893` 是透明入口，不是给手机或电脑填写的普通代理端口。没有确认网关策略路由和回程路径前，请使用 `7890` 客户端代理，先拿一台固定 IP 的测试设备验证，再扩展到其它设备。
-
-### 一键安装与首次启动向导
-
-新服务器也可以使用网页向导完成首次设置：
+### 2. 网页向导
 
 ```bash
-git clone https://github.com/liuleisail/family-proxy-manual.git
-cd family-proxy-manual
 sudo ./scripts/install-one-click.sh
 ```
 
-脚本只在终端询问启动网关所需的 LAN、旁路 IP、接口和数据目录；安装完成后输出一个仅局域网可访问的一次性地址。用同一局域网设备打开该地址，在进入管理页前选择自动检测、RouterOS 集成或独立旁路，并填写管理页账号、DNS 页面认证及可选 GEO 更新策略。向导提交后会原子更新 `router.env`、删除一次性令牌、重启控制面并进入正常登录页。RouterOS 规则、订阅和客户端接管仍需人工审阅，不会被一键安装自动执行。
-
-该入口要求服务器已经安装 Docker Engine、Compose 插件和 `systemd`；它不会替换已有 Docker、Mihomo、MosDNS 或 RouterOS 配置。安装器输出的向导地址只应在家庭局域网内打开，不要通过 Telegram、工单或公网反向代理转发。向导完成后先执行：
+脚本输出局域网一次性地址。打开后选择 `routeros` 或 `standalone`，完成配置后执行：
 
 ```bash
 sudo ./scripts/verify-server.sh
 ```
 
-确认控制面和本机服务正常后，再按 [DEPLOYMENT.md](DEPLOYMENT.md) 审阅 RouterOS 模板、接入现有 DNS，并只加入一台测试设备。
+### 3. 路由模式与地址
+
+- RouterOS 7：不要求 RB5009。`FAMILY_ROUTER_IP`/`ROUTER_HOST` 填实际网关地址，`FAMILY_PROXY_IP` 填旁路主机固定地址。
+- 非 RouterOS：选择 `standalone`。网关保持原地址，旁路主机使用固定地址，设备使用独立 IP 或 DHCP 静态租约。
+- 独立模式最简单的用法是将设备代理设置为 `FAMILY_PROXY_IP:7890`。设备默认网关仍指向家庭网关；仅修改设备 IP 不会自动翻墙。
+- `7893` 是 TPROXY 透明入口，不是普通代理端口。透明代理需要家庭网关自行提供策略路由和回程路由。
+
+### 4. 手工部署
+
+```bash
+git clone https://github.com/liuleisail/family-proxy-manual.git
+cd family-proxy-manual
+sudo install -d -m 700 /etc/family-proxy-ui
+sudo install -m 600 config/router.env.example /etc/family-proxy-ui/router.env
+sudoedit /etc/family-proxy-ui/router.env
+sudo ./scripts/install-server.sh
+sudo ./scripts/install-mihomo-container.sh
+sudo ./scripts/install-server.sh --start
+sudo ./scripts/verify-server.sh
+```
+
+`frontend/dist/index.html` 必须存在；DNS 服务需自行监听旁路主机的 `53` 端口，本项目不会抢占该端口。
+
+### 5. RouterOS 接入
+
+仅在 `routeros` 模式执行：
+
+1. 运行 `routeros/01-preflight-and-backup.rsc` 并保存备份。
+2. 填写 LAN 和旁路主机 IP，运行 `routeros/02-prepare-controller.rsc`。
+3. 在管理页导入订阅后，只加入一台测试设备。
+4. 验证国内、局域网和外网访问后，再接入其它设备。
+
+完整部署说明见 [DEPLOYMENT.md](DEPLOYMENT.md)，RouterOS 命令见 [routeros/README.md](routeros/README.md)。
 
 ### 可选：建立专用运维密钥账号
 
@@ -150,46 +156,6 @@ sudo ./scripts/verify-server.sh
 RouterOS 不应额外创建一个不受限制的全权账号。管理页面应使用单独的 RouterOS 控制账号，并同时限制来源为旁路服务器 IP、仅开启 SSH/read/write 等实际所需权限，并使用独立公钥。页面已有可用控制账号时，复用并核验该账号即可，不要为了“免输密码”创建第二个高权限账号。
 
 变更前备份服务器的 `/etc/passwd`、`/etc/shadow`、`/etc/sudoers*` 和 SSH 配置，以及 RouterOS 的文本/二进制备份。创建后必须实际验证三件事：密钥登录成功、密码登录被拒绝、控制器到 RouterOS 的专用密钥仍可登录。回滚时删除该 NAS 账号对应的 `authorized_keys`、`sudoers` 和 SSH `Match User` 配置，再重新加载 SSH；RouterOS 侧仅在专用控制账号不再被页面使用时才删除其公钥和账号。
-
-### 1. 获取项目并填写本地私密配置
-
-```bash
-git clone https://github.com/liuleisail/family-proxy-manual.git
-cd family-proxy-manual
-sudo install -d -m 700 /etc/family-proxy-ui
-sudo install -m 600 config/router.env.example /etc/family-proxy-ui/router.env
-sudoedit /etc/family-proxy-ui/router.env
-```
-
-只需要填写本机 LAN、旁路主机 IP、承载受管设备流量的 LAN 桥接口、RouterOS API 地址/账号/密码和管理页账号/密码。Z4Pro 的桥接口通常是 `kvmbr0`，其它服务器先用 `ip -br link` 核实。`router.env` 不会被提交；首次安装后明文 `UI_PASSWORD` 会自动转换为哈希并删除。
-
-### 2. 部署控制平面与 Mihomo
-
-```bash
-sudo ./scripts/install-server.sh
-sudo ./scripts/install-mihomo-container.sh
-sudo ./scripts/install-server.sh --start
-sudo ./scripts/verify-server.sh
-```
-
-第一条命令会生成带时间戳的本地备份、渲染程序、安装 systemd 服务，但不启动服务；在 Debian/Ubuntu 上还会按需安装 `python3-yaml`、用于温度读取的 `lm-sensors`，以及设备诊断所需的 `tcpdump` 和 `prlimit`。第二条命令只在不存在 `family-mihomo-fallback` 容器时创建基础 Mihomo 容器。第三、四条命令启动服务，并验证控制平面、系统状态、机场状态和抓包容量限制。
-
-安装前请确认仓库中存在已构建的 `frontend/dist/index.html`；从源码开发时先按上面的前端命令构建。安装脚本会在复制静态文件前检查该文件，避免服务启动后根路径落回旧界面。
-
-DNS 必须先由服务器上现有的 MosDNS/DNS 服务监听旁路主机的 `53` 端口；本项目故意不自动接管端口 `53`，避免影响现有家庭 DNS。
-
-MosDNS-T 的推荐加固配置见 [MOSDNS.md](MOSDNS.md)。其中包含分流前总缓存的处理、国内外独立缓存、规则优先级、HTTPDNS 精简清单、自动更新校验和回滚要求。
-
-### 3. 准备 RouterOS，再接管测试设备
-
-1. 先在 RouterOS 运行 `routeros/01-preflight-and-backup.rsc`，保存文本导出和二进制备份。
-2. 填写 LAN 网段和旁路主机 IP 后，运行 `routeros/02-prepare-controller.rsc`。它创建一套共享策略和空的设备地址列表；列表为空时不会接管任何设备。
-3. 确保 RouterOS API 仅允许旁路主机访问，再打开局域网管理页导入订阅、筛选候选池。
-4. 仅加入一台测试设备，验证国内 App、局域网服务和外网服务；通过后再加入其它设备。
-
-管理页不可用时才使用 `routeros/03-enable-device-template.rsc` 手工接管单台设备；回滚使用 `routeros/99-remove-device-template.rsc`。同一设备不能同时由网页和手工 RouterOS 模板管理。
-
-完整的部署、升级与恢复流程见 [DEPLOYMENT.md](DEPLOYMENT.md)，RouterOS 命令说明见 [routeros/README.md](routeros/README.md)。
 
 ## 一、使用边界
 
