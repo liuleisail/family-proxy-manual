@@ -1375,7 +1375,13 @@ def clear_device_connections(api, ip):
         source = connection.get("src-address", "").rsplit(":", 1)[0]
         reply_destination = connection.get("reply-dst-address", "").rsplit(":", 1)[0]
         if source == ip or reply_destination == ip:
-            api.remove("/ip/firewall/connection", connection[".id"])
+            try:
+                api.remove("/ip/firewall/connection", connection[".id"])
+            except RouterError as exc:
+                # Connection tracking is live; an entry may expire after the snapshot.
+                if "no such item" not in str(exc).lower():
+                    raise
+                continue
             removed += 1
     return removed
 
