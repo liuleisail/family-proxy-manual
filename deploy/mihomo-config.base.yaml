@@ -30,6 +30,12 @@ proxy-groups:
   - name: Proxy-Auto
     type: select
     proxies: [DIRECT]
+  - name: Apple
+    type: select
+    proxies: [DIRECT]
+  - name: Telegram
+    type: select
+    proxies: [Proxy-Auto, DIRECT]
   - name: Others
     type: select
     proxies: [Proxy-Auto, DIRECT]
