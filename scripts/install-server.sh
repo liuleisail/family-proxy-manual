@@ -74,6 +74,10 @@ install -d -m 700 "$family_docker_root/family-mihomo-docker/providers/rule-sets"
 if [[ ! -e /etc/family-proxy-ui/managed-ips ]]; then
   install -m 600 /dev/null /etc/family-proxy-ui/managed-ips
 fi
+[[ -d /var/log ]] || install -d -m 755 /var/log
+if [[ ! -f /var/log/family-proxy-ui-audit.jsonl ]]; then
+  install -m 600 /dev/null /var/log/family-proxy-ui-audit.jsonl
+fi
 [[ -s /etc/family-proxy-ui/cn-ipv4.txt ]] || /usr/local/sbin/refresh-family-cn-ipv4 --no-sync
 [[ -s /etc/family-proxy-ui/gateway.secret ]] || { umask 077; head -c 48 /dev/urandom | base64 > /etc/family-proxy-ui/gateway.secret; }
 for unit in "$REPO_DIR"/systemd/*.service; do install -m 644 "$unit" /etc/systemd/system/; done

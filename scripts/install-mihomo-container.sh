@@ -24,6 +24,12 @@ if [[ ! -s "$dir/docker-compose.yml" ]]; then
 else
   echo "Preserving existing Mihomo Compose configuration."
 fi
+if [[ ! -e "$dir/cache.db" ]]; then
+  install -m 640 /dev/null "$dir/cache.db"
+elif [[ ! -f "$dir/cache.db" ]]; then
+  echo "$dir/cache.db exists but is not a regular file; move it aside and retry" >&2
+  exit 1
+fi
 docker compose -f "$dir/docker-compose.yml" up -d
 for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:9091/version >/dev/null && break; sleep 2; done
 curl -fsS http://127.0.0.1:9091/version >/dev/null || { echo "Mihomo controller did not become ready" >&2; exit 1; }

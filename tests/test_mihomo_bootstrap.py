@@ -100,6 +100,25 @@ class MihomoBootstrapTests(unittest.TestCase):
         self.assertIn('if [[ ! -s "$dir/config.yaml" ]]; then', script)
         self.assertIn("Preserving existing Mihomo config.yaml", script)
 
+    def test_base_config_declares_all_named_rule_targets(self):
+        config = MODULE.yaml.safe_load(
+            (ROOT / "deploy" / "mihomo-config.base.yaml").read_text()
+        )
+        groups = {item["name"] for item in config["proxy-groups"]}
+        targets = {rule.split(",", 2)[2] for rule in config["rules"]}
+        self.assertTrue({"Apple", "Telegram"}.issubset(groups))
+        builtins = {"DIRECT", "REJECT", "PASS", "Others", "Apple", "Telegram", "V2EX-Auto"}
+        self.assertTrue(targets.difference(builtins).issubset(groups))
+
+    def test_server_installer_creates_audit_log_for_systemd_namespace(self):
+        script = (ROOT / "scripts" / "install-server.sh").read_text()
+        self.assertIn("install -m 600 /dev/null /var/log/family-proxy-ui-audit.jsonl", script)
+
+    def test_container_installer_precreates_cache_file(self):
+        script = (ROOT / "scripts" / "install-mihomo-container.sh").read_text()
+        self.assertIn('install -m 640 /dev/null "$dir/cache.db"', script)
+        self.assertIn('cache.db exists but is not a regular file', script)
+
 
 if __name__ == "__main__":
     unittest.main()
