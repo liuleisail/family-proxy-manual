@@ -549,3 +549,46 @@ h1 em { color: var(--blue); font-style: normal; }
   .surface-card { padding: 20px; }
 }
 @media (max-width: 760px) { .standalone-guide-grid, .standalone-ops-grid { grid-template-columns: 1fr; } }
+
+/* Compact upstream comparison keeps the race panels readable without nested metric cards. */
+.dns-race-grid { align-items: start; }
+.dns-race-card { align-self: start; min-width: 0; }
+.dns-race-card .card-heading { align-items: flex-start; }
+.dns-race-card .card-subtitle { margin-top: 6px; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+.dns-race-list { overflow: hidden; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface-strong); }
+.dns-race-columns, .dns-race-row { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(98px, .7fr) minmax(110px, .75fr) minmax(64px, .45fr); column-gap: 13px; align-items: center; }
+.dns-race-columns { min-height: 33px; padding: 0 14px; border-bottom: 1px solid var(--line-soft); color: var(--text-muted); font-size: 10px; }
+.dns-race-columns span:not(:first-child) { text-align: right; }
+.dns-race-row { min-height: 74px; padding: 10px 14px; border-top: 1px solid var(--line-soft); }
+.dns-race-row:first-of-type { border-top: 0; }
+.dns-race-row.best { margin: 0 8px; padding-right: 6px; padding-left: 6px; border-top-color: transparent; border-radius: 6px; background: rgba(255, 255, 255, .035); }
+.dns-race-leading { display: grid; grid-template-columns: 27px minmax(0, 1fr); align-items: center; gap: 9px; min-width: 0; }
+.dns-race-rank { display: grid; width: 25px; height: 25px; place-items: center; border-radius: 50%; background: var(--surface); color: var(--text-muted); font-size: 11px; font-weight: 700; }
+.dns-race-row.best .dns-race-rank { background: rgba(97, 227, 173, .16); color: var(--green); }
+.dns-race-identity { min-width: 0; }
+.dns-race-identity strong, .dns-race-identity small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dns-race-identity strong { color: var(--text); font-size: 12px; font-weight: 680; }
+.dns-race-identity em { margin-left: 6px; color: var(--green); font-size: 9px; font-style: normal; font-weight: 600; }
+.dns-race-identity small { margin-top: 4px; color: var(--text-muted); font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.dns-race-metric { min-width: 0; text-align: right; }
+.dns-race-metric strong { display: block; color: var(--text); font-size: 14px; font-weight: 700; line-height: 1; }
+.dns-race-metric small { display: block; margin-top: 5px; overflow: hidden; color: var(--text-muted); font-size: 9px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.dns-race-track { height: 3px; margin-top: 7px; overflow: hidden; border-radius: 99px; background: var(--line-soft); }
+.dns-race-track span { display: block; height: 100%; border-radius: inherit; background: var(--green); }
+.dns-race-error { color: var(--green); font-size: 10px; font-weight: 650; text-align: right; white-space: nowrap; }
+.dns-race-error.good { color: var(--green); }.dns-race-error.warn { color: var(--orange); }.dns-race-error.bad { color: var(--red); }
+.dns-race-note { display: flex; align-items: center; gap: 7px; padding: 10px 12px; border-left: 2px solid var(--blue); background: rgba(94, 168, 255, .07); color: var(--text-muted); font-size: 10px; line-height: 1.5; }
+.dns-race-note svg { flex: 0 0 auto; color: var(--blue); }
+.dns-race-note span:last-child { margin-left: auto; color: var(--text-soft); white-space: nowrap; }
+
+@media (max-width: 760px) {
+  .dns-race-columns { display: none; }
+  .dns-race-row { grid-template-columns: minmax(0, 1fr) auto; row-gap: 8px; min-height: 0; padding: 13px 0; }
+  .dns-race-row.best { margin: 0; padding-right: 0; padding-left: 0; }
+  .dns-race-leading { grid-column: 1 / -1; }
+  .dns-race-win { grid-column: 1; text-align: left; }
+  .dns-race-latency { grid-column: 2; }
+  .dns-race-error { grid-column: 1 / -1; justify-self: start; }
+  .dns-race-note { align-items: flex-start; flex-wrap: wrap; }
+  .dns-race-note span:last-child { margin-left: 22px; }
+}
