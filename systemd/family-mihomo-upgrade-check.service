@@ -1,0 +1,9 @@
+[Unit]
+Description=Family Mihomo update availability check
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/sbin/family-mihomo-upgrade check

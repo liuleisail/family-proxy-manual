@@ -1,12 +1,18 @@
+import tempfile
 import unittest
 from pathlib import Path
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "runtime" / "family-proxy-ui.py"
+TEST_STATE_DIR = tempfile.TemporaryDirectory(prefix="family-proxy-ui-test-")
 family_proxy_ui = type("FamilyProxyUI", (), {})()
 source = MODULE_PATH.read_text(encoding="utf-8").replace(
     "__FAMILY_LAN_CIDR__", "192.168.2.0/24"
+).replace(
+    'CSRF_TOKEN_PATH = Path("/etc/family-proxy-ui/csrf-token")',
+    f'CSRF_TOKEN_PATH = Path({str(Path(TEST_STATE_DIR.name) / "csrf-token")!r})',
 )
+family_proxy_ui.__dict__["__file__"] = str(MODULE_PATH)
 exec(compile(source, str(MODULE_PATH), "exec"), family_proxy_ui.__dict__)
 
 

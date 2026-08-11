@@ -46,7 +46,7 @@ python3 "$REPO_DIR/scripts/prepare-config.py" "$CONFIG"
 stamp=$(date +%Y%m%d-%H%M%S)
 backup=/var/backups/family-proxy/$stamp
 install -d -m 700 "$backup" /opt/family-proxy-ui /var/lib/family-proxy/docker
-for item in /opt/family-proxy-ui /etc/family-proxy-ui /etc/systemd/system/family-proxy-ui.service /etc/systemd/system/family-mihomo-sub-import.service /etc/systemd/system/family-proxy-gateway.service /etc/systemd/system/family-mihomo-tproxy-auto.service; do
+for item in /opt/family-proxy-ui /etc/family-proxy-ui /usr/local/sbin/homekit-direct-routes /usr/local/sbin/homekit-direct-routes.sh /etc/systemd/system/homekit-direct-routes.service /etc/systemd/system/homekit-direct-routes.timer /etc/systemd/system/family-proxy-ui.service /etc/systemd/system/family-mihomo-sub-import.service /etc/systemd/system/family-proxy-gateway.service /etc/systemd/system/family-mihomo-tproxy-auto.service /etc/systemd/system/family-platform-update-check.service /etc/systemd/system/family-platform-update-check.timer; do
   [[ -e $item ]] && cp -a "$item" "$backup/" || true
 done
 install -d -m 700 /opt/family-proxy-ui/rendered
@@ -55,13 +55,28 @@ python3 -m py_compile /opt/family-proxy-ui/rendered/*.py
 install -m 755 /opt/family-proxy-ui/rendered/family-proxy-ui.py /opt/family-proxy-ui/family-proxy-ui.py
 install -m 755 /opt/family-proxy-ui/rendered/family-mihomo-sub-import.py /opt/family-proxy-ui/family-mihomo-sub-import.py
 install -m 755 /opt/family-proxy-ui/rendered/family-proxy-gateway.py /opt/family-proxy-ui/family-proxy-gateway.py
+install -m 644 "$REPO_DIR/runtime/rules.html" /opt/family-proxy-ui/rules.html
+[[ -f "$REPO_DIR/frontend/dist/index.html" ]] || { echo "frontend/dist is missing; run: (cd frontend && npm install && npm run build)" >&2; exit 1; }
+install -d -m 755 /opt/family-proxy-ui/frontend
+cp -a "$REPO_DIR/frontend/dist/." /opt/family-proxy-ui/frontend/
 install -m 755 "$REPO_DIR/scripts/family-mihomo-tproxy-auto" /usr/local/sbin/family-mihomo-tproxy-auto
 install -m 755 "$REPO_DIR/scripts/refresh-cn-ipv4" /usr/local/sbin/refresh-family-cn-ipv4
 install -m 755 "$REPO_DIR/scripts/sync-routeros-cn-ipv4.py" /usr/local/sbin/sync-routeros-cn-ipv4
 install -m 755 "$REPO_DIR/scripts/refresh-mihomo-geodata.py" /usr/local/sbin/refresh-mihomo-geodata
+install -m 755 "$REPO_DIR/scripts/family-mihomo-upgrade" /usr/local/sbin/family-mihomo-upgrade
+install -m 755 "$REPO_DIR/scripts/homekit-direct-routes" /usr/local/sbin/homekit-direct-routes
+install -m 755 "$REPO_DIR/scripts/homekit-direct-routes" /usr/local/sbin/homekit-direct-routes.sh
+install -m 755 "$REPO_DIR/scripts/apply-runtime-mode" /usr/local/sbin/apply-family-proxy-mode
 install -d -m 700 /etc/family-proxy-ui /var/lib/family-proxy/docker/family-mihomo-sub-import/providers
+family_docker_root=$(awk -F= '$1 == "FAMILY_DOCKER_ROOT" { print $2; exit }' "$CONFIG")
+[[ -n $family_docker_root && $family_docker_root == /* ]] || { echo "FAMILY_DOCKER_ROOT is required" >&2; exit 1; }
+install -d -m 700 "$family_docker_root/family-mihomo-docker/providers/rule-sets"
 if [[ ! -e /etc/family-proxy-ui/managed-ips ]]; then
   install -m 600 /dev/null /etc/family-proxy-ui/managed-ips
+fi
+[[ -d /var/log ]] || install -d -m 755 /var/log
+if [[ ! -f /var/log/family-proxy-ui-audit.jsonl ]]; then
+  install -m 600 /dev/null /var/log/family-proxy-ui-audit.jsonl
 fi
 [[ -s /etc/family-proxy-ui/cn-ipv4.txt ]] || /usr/local/sbin/refresh-family-cn-ipv4 --no-sync
 [[ -s /etc/family-proxy-ui/gateway.secret ]] || { umask 077; head -c 48 /dev/urandom | base64 > /etc/family-proxy-ui/gateway.secret; }
@@ -69,7 +84,7 @@ for unit in "$REPO_DIR"/systemd/*.service; do install -m 644 "$unit" /etc/system
 for unit in "$REPO_DIR"/systemd/*.timer; do install -m 644 "$unit" /etc/systemd/system/; done
 systemctl daemon-reload
 systemctl enable family-proxy-ui family-mihomo-sub-import family-proxy-gateway family-mihomo-tproxy-auto
-systemctl enable --now family-cn-ipv4-refresh.timer
+ /usr/local/sbin/apply-family-proxy-mode
 if grep -qx 'MIHOMO_GEODATA_AUTO_UPDATE=true' "$CONFIG" && docker inspect family-mihomo-fallback >/dev/null 2>&1; then
   systemctl enable --now family-mihomo-geodata-refresh.timer
 else

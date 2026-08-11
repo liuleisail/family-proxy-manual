@@ -10,7 +10,7 @@ from pathlib import Path
 
 REQUIRED = {
     "FAMILY_LAN_CIDR", "FAMILY_LAN_PREFIX", "FAMILY_PROXY_IP", "FAMILY_ROUTER_IP",
-    "FAMILY_DOCKER_ROOT", "ROUTER_HOST", "ROUTER_USER", "ROUTER_PASSWORD", "UI_USERNAME",
+    "FAMILY_DOCKER_ROOT", "ROUTER_MODE", "UI_USERNAME",
 }
 
 
@@ -30,7 +30,20 @@ def main():
         raise SystemExit("usage: prepare-config.py /etc/family-proxy-ui/router.env")
     path = Path(sys.argv[1])
     pairs, values = parse(path)
-    missing = sorted(name for name in REQUIRED if not values.get(name))
+    setup_pending = values.get("SETUP_PENDING", "false").lower() == "true"
+    router_mode = values.get("ROUTER_MODE", "routeros").lower()
+    if router_mode not in {"auto", "routeros", "standalone"}:
+        raise SystemExit("ROUTER_MODE must be auto, routeros, or standalone")
+    if router_mode == "auto" and not setup_pending:
+        raise SystemExit("ROUTER_MODE=auto must be resolved by the first-run wizard or bootstrap installer")
+    required = set(REQUIRED)
+    if router_mode != "standalone" and not setup_pending:
+        required |= {"ROUTER_HOST", "ROUTER_USER", "ROUTER_PASSWORD"}
+    if setup_pending:
+        # The browser wizard supplies the final router mode, RouterOS credentials,
+        # and UI account. Network identity and a temporary UI hash are still required.
+        required -= {"ROUTER_HOST", "ROUTER_USER", "ROUTER_PASSWORD"}
+    missing = sorted(name for name in required if not values.get(name))
     placeholders = sorted(name for name, value in values.items() if "replace_with" in value or value == "change_me")
     if missing or placeholders:
         message = []

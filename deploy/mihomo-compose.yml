@@ -1,6 +1,6 @@
 services:
   family-mihomo-fallback:
-    image: metacubex/mihomo:Alpha
+    image: metacubex/mihomo:latest
     container_name: family-mihomo-fallback
     network_mode: host
     restart: unless-stopped
@@ -9,3 +9,5 @@ services:
     volumes:
       - ./config.yaml:/root/.config/mihomo/config.yaml:ro
       - ./cache.db:/root/.config/mihomo/cache.db
+      - ../family-mihomo-docker/providers:/root/.config/mihomo/providers:rw
+      - ../family-mihomo-sub-import/providers:/root/.config/mihomo/imported-providers:ro

@@ -6,12 +6,15 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import mimetypes
 import os
+import re
 import secrets
 import signal
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import yaml
@@ -20,7 +23,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -28,38 +31,81 @@ CONFIG_PATH = Path("/etc/family-proxy-ui/router.env")
 GATEWAY_SECRET_PATH = Path("/etc/family-proxy-ui/gateway.secret")
 MANAGED_IPS_PATH = Path("/etc/family-proxy-ui/managed-ips")
 DEVICE_PREFS_PATH = Path("/etc/family-proxy-ui/device-preferences.json")
+SETUP_STATE_PATH = Path("/etc/family-proxy-ui/setup-state.json")
+PAGE_LAYOUT_PREFS_PATH = Path("/etc/family-proxy-ui/page-layout-preferences.json")
+HOMEKIT_ROUTE_STATE_PATH = Path("/var/lib/family-proxy/homekit-direct-routes.json")
+ALERT_CONFIG_PATH = Path("/etc/family-proxy-ui/mihomo-alert.json")
+RULE_SETS_PATH = Path("/etc/family-proxy-ui/rule-sets.json")
+RULE_CARD_LABELS_PATH = Path("/etc/family-proxy-ui/rule-card-labels.json")
+PLATFORM_UPDATE_STATUS_PATH = Path("/var/lib/family-proxy/platform-update-status.json")
+ALERT_SOURCES_PATH = Path("/tmp/zfsv3/nvme13/18053615760/data/docker/family-mihomo-sub-import/providers/sources.json")
 TPROXY_SYNC = "/usr/local/sbin/family-mihomo-tproxy-auto"
 MIHOMO_API = "http://127.0.0.1:9091"
 MIHOMO_CONFIG_PATH = Path("__FAMILY_DOCKER_ROOT__/family-mihomo-fallback/config.yaml")
+MIHOMO_UPGRADE_SCRIPT = "/usr/local/sbin/family-mihomo-upgrade"
 RULE_BACKUP_DIR = MIHOMO_CONFIG_PATH.parent / "rule-backups"
 RULES_TEMPLATE_PATH = Path("/opt/family-proxy-ui/rules.html")
+FRONTEND_ROOT = Path(os.environ.get("FAMILY_FRONTEND_ROOT", "/opt/family-proxy-ui/frontend"))
+local_frontend = Path(__file__).resolve().parent.parent / "frontend/dist"
+if not (FRONTEND_ROOT / "index.html").is_file() and (local_frontend / "index.html").is_file():
+    FRONTEND_ROOT = local_frontend
+FRONTEND_INDEX_PATH = FRONTEND_ROOT / "index.html"
 MIHOMO_GROUPS = ("AI", "Youtube", "Telegram", "Google", "Others")
 LAN = ipaddress.ip_network("__FAMILY_LAN_CIDR__")
 PROXY_IP = "__FAMILY_PROXY_IP__"
 FIXED_MANAGED_IPS = set()
 RESERVED_IPS = {"__FAMILY_ROUTER_IP__", "__FAMILY_RESERVED_GATEWAY_IP__", PROXY_IP}
 AUDIT_PATH = Path("/var/log/family-proxy-ui-audit.jsonl")
-BUILD_VERSION = "2026.07.22-wireguard-monitor"
+CSRF_TOKEN_PATH = Path("/etc/family-proxy-ui/csrf-token")
+BUILD_VERSION = "2026.08.10-standalone-routing"
 SHARED_LIST = "family_mihomo_devices"
 SHARED_TABLE = "family_mihomo_shared"
 SHARED_CONN_MARK = "family_mihomo_conn"
 SHARED_TAG = "family-mihomo-shared"
-CSRF_TOKEN = secrets.token_urlsafe(32)
+DEVICE_ICON_KEYS = frozenset({
+    "phone", "laptop", "desktop", "tablet", "tv", "camera",
+    "gamepad", "speaker", "router", "home", "watch", "server",
+})
+def load_csrf_token():
+    try:
+        token = CSRF_TOKEN_PATH.read_text(encoding="utf-8").strip()
+        if len(token) >= 32:
+            return token
+    except OSError:
+        pass
+    token = secrets.token_urlsafe(32)
+    CSRF_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = CSRF_TOKEN_PATH.with_suffix(".new")
+    temporary.write_text(token + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, CSRF_TOKEN_PATH)
+    return token
+
+
+CSRF_TOKEN = load_csrf_token()
 HEALTH_LOCK = threading.Lock()
 HEALTH_GATE = {"ready": True, "failures": 0, "successes": 0}
 RULES_LOCK = threading.Lock()
 DEVICE_PREFS_LOCK = threading.Lock()
+PAGE_LAYOUT_PREFS_LOCK = threading.Lock()
+HOMEKIT_ROUTE_LOCK = threading.Lock()
 DNS_METRICS_LOCK = threading.Lock()
 DNS_SAMPLES = deque(maxlen=120)
 SYSTEM_STATUS_LOCK = threading.Lock()
 SYSTEM_STATUS_CACHE = {"timestamp": 0.0, "value": None, "cpu_sample": None}
+HDD_TEMPERATURE_CACHE = {"timestamp": 0.0, "value": []}
 WIREGUARD_STATUS_LOCK = threading.Lock()
 WIREGUARD_EVENTS_PATH = Path("/var/lib/family-proxy/wireguard-events.json")
 WIREGUARD_EVENT_RETENTION = 7 * 24 * 60 * 60
 WIREGUARD_EVENT_LIMIT = 200
 WIREGUARD_STATE = {"interfaces": {}, "probe_timestamp": 0.0, "probe": None}
+REMOTE_WG_COMMENT_PREFIX = "family-proxy-remote-wg"
 CAPTURE_DIR = Path("/run/family-proxy-captures")
 CAPTURE_INTERFACE = os.environ.get("FAMILY_CAPTURE_INTERFACE", "kvmbr0")
+HOMEKIT_ROUTE_INTERFACE = os.environ.get("FAMILY_HOMEKIT_ROUTE_INTERFACE", "kvmbr0")
+HOMEKIT_ROUTE_TABLE = "3001"
+HOMEKIT_ROUTE_RULE_PREF = "2900"
+TPROXY_RETURN_PROTO = "186"
 CAPTURE_MAX_BYTES = 50_000_000
 CAPTURE_TOTAL_BYTES = 200_000_000
 CAPTURE_RETENTION_SECONDS = 24 * 60 * 60
@@ -72,7 +118,66 @@ CAPTURE_SCOPES = {
 }
 CAPTURE_LOCK = threading.Lock()
 CAPTURE_STATE = {"active": None}
-PROTECTED_RULES = {"GEOSITE,CN,DIRECT", "GEOIP,CN,DIRECT,no-resolve"}
+GITHUB_ROUTING_RULES = (
+    "DOMAIN-SUFFIX,github.com,GitHub-出口",
+    "DOMAIN-SUFFIX,githubusercontent.com,GitHub-出口",
+    "DOMAIN-SUFFIX,githubassets.com,GitHub-出口",
+    "DOMAIN-SUFFIX,githubapp.com,GitHub-出口",
+)
+V2EX_ROUTING_RULE = "DOMAIN-SUFFIX,v2ex.com,V2EX-Auto"
+TELEGRAM_GEOIP_RULE = "GEOIP,telegram,Telegram,no-resolve"
+TELEGRAM_LEGACY_NOTIFY_RULE = "DOMAIN,api.telegram.org,TG-Notify"
+TELEGRAM_NOTIFY_RULE = (
+    "AND,((SRC-IP-CIDR,127.0.0.1/32),(DOMAIN,api.telegram.org)),TG-Notify"
+)
+TELEGRAM_CLIENT_IP_RULES = (
+    "IP-CIDR,149.154.160.0/20,TG-Auto,no-resolve",
+    "IP-CIDR,91.108.4.0/22,TG-Auto,no-resolve",
+    "IP-CIDR,91.108.56.0/22,TG-Auto,no-resolve",
+)
+TELEGRAM_API_RULE = "DOMAIN,api.telegram.org,TG-Auto"
+TELEGRAM_GENERATED_RULES = {
+    TELEGRAM_LEGACY_NOTIFY_RULE,
+    TELEGRAM_NOTIFY_RULE,
+    TELEGRAM_API_RULE,
+    *TELEGRAM_CLIENT_IP_RULES,
+}
+SYSTEM_GENERATED_RULES = TELEGRAM_GENERATED_RULES
+SYSTEM_RULE_CARD_LABELS = {
+    TELEGRAM_NOTIFY_RULE: "系统推送",
+    TELEGRAM_API_RULE: "Telegram 客户端",
+    **{rule: "Telegram 客户端 IP" for rule in TELEGRAM_CLIENT_IP_RULES},
+}
+PROTECTED_RULES = {
+    "GEOSITE,CN,DIRECT",
+    "GEOIP,CN,DIRECT,no-resolve",
+    *GITHUB_ROUTING_RULES,
+    V2EX_ROUTING_RULE,
+}
+RULE_SET_KEY_PREFIX = "family-"
+RULE_SET_MAX_COUNT = 30
+RULE_SET_MAX_SOURCES = 16
+RULE_SET_MAX_INTERVAL = 7 * 24 * 60 * 60
+OVERSEAS_AI_RULE_SET_URL = (
+    "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ai-!cn.mrs"
+)
+LEGACY_AI_RULE_SET_URLS = {
+    "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/openai.mrs",
+    "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/gemini.mrs",
+}
+PAGE_LAYOUT_SECTIONS = {
+    "devices": ("devices", "manual_add", "bypass", "traffic", "z4pro", "router", "wireguard"),
+    "dns": ("rankings", "observability", "data_management"),
+    "airport": ("subscription_help", "switch_history"),
+    "rules": ("guide", "preview"),
+    "maintenance": ("guide",),
+}
+PAGE_LAYOUT_LOCKED = {
+    "devices": {"devices", "manual_add"},
+}
+PAGE_LAYOUT_FOLDABLE = {
+    "devices": {"bypass", "traffic", "z4pro", "router", "wireguard"},
+}
 
 
 class RouterError(RuntimeError):
@@ -85,10 +190,16 @@ def load_config():
         if "=" in line and not line.lstrip().startswith("#"):
             key, value = line.strip().split("=", 1)
             config[key] = value
-    required = {"ROUTER_HOST", "ROUTER_USER", "ROUTER_PASSWORD"}
-    if required - config.keys():
+    mode = config.get("ROUTER_MODE", "routeros").lower()
+    if mode not in {"routeros", "standalone"}:
+        raise RouterError("Router integration mode is unresolved; complete the first-run setup")
+    if mode == "routeros" and {"ROUTER_HOST", "ROUTER_USER", "ROUTER_PASSWORD"} - config.keys():
         raise RouterError("Router automation credentials are incomplete")
     return config
+
+
+def standalone_mode():
+    return load_config().get("ROUTER_MODE", "routeros").lower() == "standalone"
 
 
 def valid_basic_auth(header):
@@ -387,9 +498,675 @@ def select_mihomo_node(group_name, node_name):
     return {"message": f"{group_name} 已切换到 {node_name}"}
 
 
+def mihomo_upgrade_status():
+    result = subprocess.run([MIHOMO_UPGRADE_SCRIPT, "status"], text=True, capture_output=True, timeout=5)
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, ValueError) as exc:
+        raise RouterError("Mihomo 维护状态无法读取") from exc
+    if not isinstance(payload, dict):
+        raise RouterError("Mihomo 维护状态格式错误")
+    return payload
+
+
+def start_mihomo_upgrade(unit):
+    if unit not in {"family-mihomo-upgrade-check.service", "family-mihomo-upgrade.service"}:
+        raise RouterError("不允许的维护操作")
+    result = subprocess.run(["systemctl", "start", "--no-block", unit], text=True, capture_output=True, timeout=8)
+    if result.returncode:
+        raise RouterError("Mihomo 维护任务无法启动")
+    return {"message": "维护任务已启动，请等待状态刷新", "status": mihomo_upgrade_status()}
+
+
+def load_alert_settings():
+    try:
+        data = json.loads(ALERT_CONFIG_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        data = {}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RouterError("Telegram 告警设置读取失败") from exc
+    available = available_alert_sources()
+    valid_slots = {item["slot"] for item in available}
+    return {
+        "enabled": bool(data.get("enabled")),
+        "configured": bool(str(data.get("token", "")).strip() and str(data.get("chat_id", "")).strip()),
+        "chat_id_masked": ("*" * max(0, len(str(data.get("chat_id", ""))) - 4) + str(data.get("chat_id", ""))[-4:]) if data.get("chat_id") else "",
+        "notify_recovery": bool(data.get("notify_recovery", True)),
+        "source_slots": [slot for slot in data.get("source_slots", []) if slot in valid_slots],
+        "available_sources": available,
+    }
+
+
+def available_alert_sources():
+    try:
+        data = json.loads(ALERT_SOURCES_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        data = [{"slot": "primary", "label": "主力机场"}]
+    return [{"slot": str(item["slot"]), "label": str(item.get("label", item["slot"]))}
+            for item in data if isinstance(item, dict) and item.get("slot")]
+
+
+def save_alert_settings(payload):
+    try:
+        existing = json.loads(ALERT_CONFIG_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        existing = {}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RouterError("Telegram 告警设置读取失败") from exc
+    token = str(payload.get("token", "")).strip() or str(existing.get("token", "")).strip()
+    chat_id = str(payload.get("chat_id", "")).strip() or str(existing.get("chat_id", "")).strip()
+    enabled = bool(payload.get("enabled"))
+    source_slots = [str(item) for item in payload.get("source_slots", []) if isinstance(item, str)]
+    valid_slots = {item["slot"] for item in available_alert_sources()}
+    source_slots = [slot for slot in source_slots if slot in valid_slots]
+    if enabled and (not token or not chat_id):
+        raise RouterError("启用告警需要同时填写 Bot Token 和 Chat ID")
+    if enabled and not source_slots:
+        raise RouterError("启用告警至少选择一个机场来源")
+    data = {"enabled": enabled, "token": token, "chat_id": chat_id,
+            "notify_recovery": bool(payload.get("notify_recovery", True)), "source_slots": source_slots}
+    ALERT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = ALERT_CONFIG_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, ALERT_CONFIG_PATH)
+    audit("alert_settings", "saved", "enabled=" + str(enabled))
+    return load_alert_settings()
+
+
+def send_alert_test():
+    try:
+        data = json.loads(ALERT_CONFIG_PATH.read_text(encoding="utf-8"))
+        token, chat_id = str(data.get("token", "")).strip(), str(data.get("chat_id", "")).strip()
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RouterError("请先保存 Telegram 告警设置") from exc
+    if not data.get("enabled") or not token or not chat_id:
+        raise RouterError("请先启用并完成 Telegram 告警设置")
+    try:
+        response = subprocess.run([
+            "curl", "-sS", "--max-time", "20", "--proxy", "http://127.0.0.1:7890",
+            "--data-urlencode", "chat_id=" + chat_id,
+            "--data-urlencode", "text=家庭网络控制台测试通知\nTelegram 告警通道已验证",
+            "https://api.telegram.org/bot" + token + "/sendMessage",
+        ], capture_output=True, text=True, timeout=25)
+        result = json.loads(response.stdout or "{}")
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        raise RouterError("Telegram 测试消息发送失败") from exc
+    if response.returncode != 0 or not result.get("ok"):
+        raise RouterError("Telegram 未确认测试消息，请检查通知出口或 Bot 设置")
+    audit("alert_settings", "test_sent", "telegram")
+    return {"message": "测试消息已发送"}
+
+
+def atomic_json(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def read_platform_update_status():
+    try:
+        payload = json.loads(PLATFORM_UPDATE_STATUS_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"checked_at": 0, "mode": "standalone" if standalone_mode() else "routeros",
+                "routeros": {"state": "not_applicable"}, "z4pro": {"state": "not_applicable"}}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RouterError("系统更新状态读取失败") from exc
+    return payload if isinstance(payload, dict) else {"checked_at": 0}
+
+
+def parse_zos_timestamp(value):
+    try:
+        return int(time.mktime(time.strptime(value, "%Y-%m-%d %H:%M:%S")))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def zos_upgrade_status():
+    current_version = "未知"
+    try:
+        for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+            if line.startswith("ZOS_VERSION="):
+                current_version = line.split("=", 1)[1].strip().strip('"')
+                break
+    except OSError:
+        pass
+    log_dir = Path("/zspace/applications/logs/upgrader")
+    logs = sorted(log_dir.glob("upgradeInfo*.log"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in logs[:4]:
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in reversed(lines[-1600:]):
+            marker = "response="
+            if marker not in line:
+                continue
+            try:
+                response = json.loads(line.split(marker, 1)[1])
+                entries = response.get("data", {}).get("list", [])
+            except (ValueError, AttributeError):
+                continue
+            if not isinstance(entries, list):
+                continue
+            updates = [item for item in entries if isinstance(item, dict)
+                       and (str(item.get("upgrade_level", "NO")).upper() != "NO" or item.get("app_version"))]
+            checked_at = parse_zos_timestamp(line[:19]) or int(path.stat().st_mtime)
+            if updates:
+                system = next((item for item in updates if item.get("app_id") == "Z043_SYSTEM"), updates[0])
+                return {
+                    "state": "update_available", "available": True,
+                    "current_version": current_version,
+                    "latest_version": str(system.get("app_version") or "官方更新"),
+                    "detail": str(system.get("version_content") or "极空间官方检测到可用系统或服务更新"),
+                    "checked_at": checked_at,
+                }
+            return {
+                "state": "current", "available": False, "current_version": current_version,
+                "latest_version": current_version, "detail": "极空间官方升级服务最近一次检查未发现可用更新",
+                "checked_at": checked_at,
+            }
+    return {
+        "state": "unknown", "available": False, "current_version": current_version,
+        "latest_version": "等待极空间官方检查", "detail": "尚未读取到有效的极空间官方升级检查结果", "checked_at": 0,
+    }
+
+
+def routeros_upgrade_status():
+    if standalone_mode():
+        return {
+            "state": "not_applicable", "available": False, "current_version": "未接入",
+            "latest_version": "不适用", "channel": "独立旁路", "detail": "独立旁路模式未连接 RouterOS",
+            "checked_at": int(time.time()),
+        }
+    try:
+        with RouterOS() as api:
+            records = api.print("/system/package/update")
+        record = records[0] if records else {}
+        current = str(record.get("installed-version") or record.get("installed-version", "未知"))
+        latest = str(record.get("latest-version") or current)
+        state = "update_available" if latest and current and latest != current else "current"
+        return {
+            "state": state, "available": state == "update_available", "current_version": current,
+            "latest_version": latest, "channel": str(record.get("channel") or "未知"),
+            "detail": str(record.get("status") or ("有可用更新" if state == "update_available" else "当前已是最新")),
+            "checked_at": int(time.time()),
+        }
+    except (RouterError, OSError, ValueError) as exc:
+        return {
+            "state": "check_failed", "available": False, "current_version": "未知",
+            "latest_version": "未知", "channel": "未知", "detail": f"RouterOS 官方通道检查失败：{exc}",
+            "checked_at": int(time.time()),
+        }
+
+
+def mihomo_component_update_status(check=False):
+    if check:
+        try:
+            subprocess.run([MIHOMO_UPGRADE_SCRIPT, "check"], text=True, capture_output=True, timeout=55)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        payload = mihomo_upgrade_status()
+    except (RouterError, OSError, subprocess.SubprocessError) as exc:
+        return {"state": "check_failed", "available": False, "current_version": "未知",
+                "latest_version": "未知", "detail": f"Mihomo 更新检查失败：{exc}", "checked_at": int(time.time())}
+    state = str(payload.get("state", "unknown"))
+    current_version = str(payload.get("current_version") or "未知")
+    latest_version = str(payload.get("latest_version") or "未知")
+    detail = str(payload.get("message") or "Mihomo 更新状态已读取")
+    # The running image may still be an older Alpha deployment while the
+    # candidate is a stable release. Only classify the candidate version.
+    prerelease = any(marker in latest_version.lower()
+                     for marker in ("alpha", "beta", "preview", "pre-release", "nightly", "-rc", ".rc"))
+    if state == "update_available" and prerelease:
+        state = "preview_ignored"
+        detail = "检测到 Alpha/预发布镜像；仅在维护页展示，不发送 Telegram 更新通知。"
+    return {
+        "state": state,
+        "available": state == "update_available",
+        "current_version": current_version,
+        "latest_version": latest_version,
+        "detail": detail,
+        "checked_at": int(payload.get("updated_at") or 0),
+    }
+
+
+def mosdns_component_update_status(check=False):
+    if check:
+        try:
+            secret = GATEWAY_SECRET_PATH.read_text(encoding="utf-8").strip()
+            request = Request("http://127.0.0.1:18102/check", method="POST", headers={
+                "X-Family-Gateway": secret, "X-Requested-With": "family-dns",
+            })
+            with urlopen(request, timeout=8):
+                pass
+            # The updater switches to "checking" in its worker thread. Give it
+            # a moment to publish that state before deciding whether to poll.
+            time.sleep(1)
+        except (OSError, HTTPError, URLError):
+            pass
+    status_path = Path("/etc/family-proxy-ui/mosdns-updater-status.json")
+    for _ in range(25 if check else 1):
+        try:
+            payload = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        if payload.get("phase") != "checking" or not check:
+            break
+        time.sleep(1)
+    phase = str(payload.get("phase", "unknown"))
+    checked_at = str(payload.get("checked_at") or payload.get("updated_at") or "")
+    return {
+        "state": "update_available" if payload.get("update_available") else ("check_failed" if phase == "error" else phase),
+        "available": bool(payload.get("update_available")),
+        "current_version": str(payload.get("current_version") or payload.get("current_image") or "未知"),
+        "latest_version": str(payload.get("latest_image") or "未知"),
+        "detail": str(payload.get("message") or "MosDNS 更新状态尚未读取"),
+        "checked_at": checked_at,
+    }
+
+
+def host_platform_status():
+    values = {}
+    try:
+        for raw in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+            if "=" in raw:
+                key, value = raw.split("=", 1)
+                values[key] = value.strip().strip('"')
+    except OSError:
+        pass
+    name = values.get("PRETTY_NAME") or values.get("NAME") or "Linux 主机"
+    version = values.get("VERSION_ID") or "未知版本"
+    return {
+        "state": "current", "available": False, "current_version": version,
+        "latest_version": version, "detail": f"独立旁路运行于 {name}；系统更新请使用主机官方方式",
+        "checked_at": int(time.time()),
+    }
+
+
+def send_platform_update_alert(updates):
+    try:
+        data = json.loads(ALERT_CONFIG_PATH.read_text(encoding="utf-8"))
+        token, chat_id = str(data.get("token", "")).strip(), str(data.get("chat_id", "")).strip()
+    except (OSError, json.JSONDecodeError):
+        return False, "Telegram 告警未配置"
+    if not data.get("enabled") or not token or not chat_id:
+        return False, "Telegram 告警未启用"
+    lines = ["家庭网络控制台发现系统更新，请在官方界面确认后手动升级："]
+    for item in updates:
+        channel = f"（{item['channel']}）" if item.get("channel") else ""
+        lines.append(f"• {item['name']}{channel}：{item['current_version']} -> {item['latest_version']}")
+    try:
+        response = subprocess.run([
+            "curl", "-sS", "--max-time", "20", "--proxy", "http://127.0.0.1:7890",
+            "--data-urlencode", "chat_id=" + chat_id,
+            "--data-urlencode", "text=" + "\n".join(lines),
+            "https://api.telegram.org/bot" + token + "/sendMessage",
+        ], capture_output=True, text=True, timeout=25)
+        result = json.loads(response.stdout or "{}")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False, "Telegram 推送失败"
+    return (True, "已发送 Telegram 更新提醒") if response.returncode == 0 and result.get("ok") else (False, "Telegram 未确认更新提醒")
+
+
+def check_platform_updates():
+    previous = read_platform_update_status()
+    standalone = standalone_mode()
+    routeros = routeros_upgrade_status()
+    z4pro = ({
+        "state": "not_applicable", "available": False, "current_version": "未接入",
+        "latest_version": "不适用", "detail": "独立旁路模式未运行 Z4Pro ZOS 官方升级服务",
+        "checked_at": int(time.time()),
+    } if standalone else zos_upgrade_status())
+    mihomo, mosdns = mihomo_component_update_status(check=True), mosdns_component_update_status(check=True)
+    host = host_platform_status() if standalone else None
+    updates = []
+    if routeros.get("available"):
+        updates.append({"name": "RouterOS", **routeros})
+    if z4pro.get("available"):
+        updates.append({"name": "Z4Pro ZOS", **z4pro})
+    if mihomo.get("available"):
+        updates.append({"name": "Mihomo", **mihomo})
+    if mosdns.get("available"):
+        updates.append({"name": "MosDNS", **mosdns})
+    fingerprint = json.dumps([(item["name"], item["current_version"], item["latest_version"]) for item in updates], ensure_ascii=False)
+    notification = {"state": "not_needed", "message": "当前没有可推送的系统更新"}
+    notified_fingerprint = previous.get("notified_fingerprint", "")
+    if updates and fingerprint != notified_fingerprint:
+        sent, message = send_platform_update_alert(updates)
+        notification = {"state": "sent" if sent else "pending", "message": message}
+        if sent:
+            notified_fingerprint = fingerprint
+    elif updates:
+        notification = {"state": "already_sent", "message": "当前可用版本已经提醒，不重复推送"}
+    result = {
+        "checked_at": int(time.time()), "mode": "standalone" if standalone else "routeros",
+        "routeros": routeros, "z4pro": z4pro,
+        "mihomo": mihomo, "mosdns": mosdns,
+        "notification": notification, "notified_fingerprint": notified_fingerprint,
+    }
+    if host is not None:
+        result["host"] = host
+    atomic_json(PLATFORM_UPDATE_STATUS_PATH, result)
+    audit("platform_update_check", "checked", notification["state"])
+    return result
+
+
 def rules_version(rules):
     value = json.dumps(rules, ensure_ascii=False, separators=(",", ":")).encode()
     return hashlib.sha256(value).hexdigest()[:16]
+
+
+def rule_sets_version(rule_sets):
+    value = json.dumps(rule_sets, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(value).hexdigest()[:16]
+
+
+def rule_card_labels_version(labels):
+    value = json.dumps(labels, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(value).hexdigest()[:16]
+
+
+def load_rule_card_labels():
+    try:
+        value = json.loads(RULE_CARD_LABELS_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        value = {}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RouterError("规则卡片名称无法读取") from exc
+    return {**normalize_rule_card_labels(value), **SYSTEM_RULE_CARD_LABELS}
+
+
+def normalize_rule_card_labels(value, rules=None):
+    if not isinstance(value, dict) or len(value) > 100:
+        raise RouterError("规则卡片名称格式错误")
+    valid_rules = set(rules or ())
+    normalized = {}
+    for raw, label in value.items():
+        raw = str(raw).strip()
+        label = str(label).strip()
+        if not raw or not label or len(label) > 40:
+            raise RouterError("规则卡片名称不能为空且不能超过 40 个字符")
+        if rules is not None and raw not in valid_rules:
+            continue
+        normalized[raw] = label
+    return normalized
+
+
+def load_rule_sets():
+    try:
+        value = json.loads(RULE_SETS_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RouterError("规则集清单无法读取") from exc
+    return normalize_rule_sets(value)
+
+
+def normalize_rule_sets(value, policies=None):
+    if not isinstance(value, list) or len(value) > RULE_SET_MAX_COUNT:
+        raise RouterError(f"规则集数量必须在 0 到 {RULE_SET_MAX_COUNT} 之间")
+    valid_policies = set(policies or ())
+    normalized, seen = [], set()
+    for index, item in enumerate(value, 1):
+        if not isinstance(item, dict):
+            raise RouterError(f"第 {index} 个规则集格式错误")
+        key = str(item.get("key", "")).strip().lower()
+        name = str(item.get("name", "")).strip()
+        policy = str(item.get("policy", "")).strip()
+        priority = str(item.get("priority", "normal")).strip().lower()
+        interval = item.get("interval", 86400)
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", key) or key in seen:
+            raise RouterError(f"第 {index} 个规则集标识必须唯一，且只含小写字母、数字和连字符")
+        if not name or len(name) > 40:
+            raise RouterError(f"第 {index} 个规则集名称不能为空且不能超过 40 个字符")
+        raw_sources = item.get("sources")
+        if raw_sources is None:
+            raw_sources = [{"key": "source-1", "url": item.get("url", ""),
+                            "behavior": item.get("behavior", ""), "format": item.get("format", "")}]
+        if not isinstance(raw_sources, list) or not raw_sources or len(raw_sources) > RULE_SET_MAX_SOURCES:
+            raise RouterError(f"第 {index} 个规则集必须包含 1 到 {RULE_SET_MAX_SOURCES} 条来源地址")
+        sources, source_keys = [], set()
+        for source_index, source in enumerate(raw_sources, 1):
+            if not isinstance(source, dict):
+                raise RouterError(f"第 {index} 个规则集的第 {source_index} 条来源格式错误")
+            source_key = str(source.get("key", f"source-{source_index}")).strip().lower()
+            url = str(source.get("url", "")).strip()
+            behavior = str(source.get("behavior", "")).strip().lower()
+            fmt = str(source.get("format", "")).strip().lower()
+            parsed = urlparse(url)
+            if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", source_key) or source_key in source_keys:
+                raise RouterError(f"第 {index} 个规则集的来源标识必须唯一")
+            if parsed.scheme != "https" or not parsed.netloc or len(url) > 1024:
+                raise RouterError(f"第 {index} 个规则集的第 {source_index} 条来源必须使用 HTTPS 地址")
+            if behavior not in {"domain", "ipcidr", "classical"}:
+                raise RouterError(f"第 {index} 个规则集的第 {source_index} 条来源行为类型不受支持")
+            if fmt not in {"yaml", "text", "mrs"} or (fmt == "mrs" and behavior == "classical"):
+                raise RouterError(f"第 {index} 个规则集的第 {source_index} 条来源格式与行为类型不兼容")
+            sources.append({"key": source_key, "url": url, "behavior": behavior, "format": fmt})
+            source_keys.add(source_key)
+        if priority not in {"high", "normal"}:
+            raise RouterError(f"第 {index} 个规则集优先级不受支持")
+        try:
+            interval = int(interval)
+        except (TypeError, ValueError) as exc:
+            raise RouterError(f"第 {index} 个规则集更新周期无效") from exc
+        if not 3600 <= interval <= RULE_SET_MAX_INTERVAL:
+            raise RouterError(f"第 {index} 个规则集更新周期必须在 1 小时到 7 天之间")
+        if valid_policies and policy not in valid_policies:
+            raise RouterError(f"第 {index} 个规则集选择的出口不可用")
+        normalized.append({"key": key, "name": name, "sources": sources,
+                           "policy": policy, "priority": priority,
+                           "interval": interval})
+        seen.add(key)
+    return normalized
+
+
+def consolidate_overseas_ai_rule_set(rules, rule_sets):
+    """Replace legacy OpenAI/Gemini providers with one overseas AI provider."""
+    affected_urls = LEGACY_AI_RULE_SET_URLS | {OVERSEAS_AI_RULE_SET_URL}
+    affected_providers = set()
+    first_index = None
+    interval = 86400
+    remaining = []
+    for index, rule_set in enumerate(rule_sets):
+        kept_sources = []
+        for source in rule_set["sources"]:
+            if source["url"] not in affected_urls:
+                kept_sources.append(source)
+                continue
+            affected_providers.add(f"{RULE_SET_KEY_PREFIX}{rule_set['key']}-{source['key']}")
+            if first_index is None:
+                first_index = index
+                interval = rule_set["interval"]
+        if kept_sources:
+            remaining.append({**rule_set, "sources": kept_sources})
+
+    if first_index is None:
+        return list(rules), list(rule_sets), False
+
+    used_keys = {item["key"] for item in remaining}
+    target_key = "overseas-ai"
+    suffix = 2
+    while target_key in used_keys:
+        target_key = f"overseas-ai-{suffix}"
+        suffix += 1
+    target = {
+        "key": target_key,
+        "name": "海外 AI",
+        "sources": [{
+            "key": "category-ai-cn-1",
+            "url": OVERSEAS_AI_RULE_SET_URL,
+            "behavior": "domain",
+            "format": "mrs",
+        }],
+        "policy": "AI-Auto",
+        "priority": "high",
+        "interval": interval,
+    }
+    insert_at = min(first_index, len(remaining))
+    remaining.insert(insert_at, target)
+
+    target_rule = f"RULE-SET,{RULE_SET_KEY_PREFIX}{target_key}-category-ai-cn-1,AI-Auto"
+    migrated_rules = []
+    inserted = False
+    for rule in rules:
+        parts = rule.split(",", 2)
+        if len(parts) >= 2 and parts[0] == "RULE-SET" and parts[1] in affected_providers:
+            if not inserted:
+                migrated_rules.append(target_rule)
+                inserted = True
+            continue
+        if rule == target_rule:
+            if inserted:
+                continue
+            inserted = True
+        migrated_rules.append(rule)
+    if not inserted:
+        match_index = next((index for index, rule in enumerate(migrated_rules)
+                            if rule.upper().startswith("MATCH,")), len(migrated_rules))
+        migrated_rules.insert(match_index, target_rule)
+    changed = migrated_rules != list(rules) or remaining != list(rule_sets)
+    return migrated_rules, remaining, changed
+
+
+def place_single_match_last(rules):
+    matches = [rule for rule in rules if rule.upper().startswith("MATCH,")]
+    if len(matches) != 1 or rules[-1] == matches[0]:
+        return list(rules), False
+    return [rule for rule in rules if not rule.upper().startswith("MATCH,")] + matches, True
+
+
+def migrate_overseas_ai_rule_set():
+    _, _, current_rules = load_mihomo_config()
+    current_rule_sets = load_rule_sets()
+    current_labels = load_rule_card_labels()
+    rules, rule_sets, changed = consolidate_overseas_ai_rule_set(current_rules, current_rule_sets)
+    rules, match_changed = place_single_match_last(rules)
+    changed = changed or match_changed
+    if not changed:
+        return {"changed": False, "message": "海外 AI 规则集合无需迁移"}
+    labels = normalize_rule_card_labels(current_labels, rules)
+    result = save_mihomo_rules(
+        rules, rules_version(current_rules),
+        rule_sets, rule_sets_version(current_rule_sets),
+        labels, rule_card_labels_version(current_labels),
+    )
+    return {"changed": True, "message": "OpenAI、Gemini 和海外 AI 已合并为一个规则集合",
+            "rule_sets": len(result["rule_sets"]), "rules": len(result["rules"])}
+
+
+def rule_set_provider(rule_set, source):
+    return {
+        "type": "http",
+        "behavior": source["behavior"],
+        "format": source["format"],
+        "path": f"./providers/rule-sets/{rule_set['key']}-{source['key']}.{source['format']}",
+        "url": source["url"],
+        "interval": rule_set["interval"],
+        "proxy": "Proxy-Auto",
+        "size-limit": 4 * 1024 * 1024,
+    }
+
+
+def telegram_rule_set_keys(rule_sets):
+    return {
+        rule_set["key"] for rule_set in rule_sets
+        if any("telegram" in source["url"].lower() for source in rule_set["sources"])
+    }
+
+
+def has_telegram_ip_rule_set(rule_sets):
+    keys = telegram_rule_set_keys(rule_sets)
+    return any(
+        rule_set["key"] in keys and any(source["behavior"] == "ipcidr"
+                                         for source in rule_set["sources"])
+        for rule_set in rule_sets
+    )
+
+
+def enforce_telegram_system_rules(rules, rule_sets):
+    keys = telegram_rule_set_keys(rule_sets)
+    prefixes = tuple(f"RULE-SET,{RULE_SET_KEY_PREFIX}{key}-" for key in keys)
+    rules = [rule for rule in rules if rule not in TELEGRAM_GENERATED_RULES]
+    if has_telegram_ip_rule_set(rule_sets):
+        rules = [rule for rule in rules if not rule.startswith("GEOIP,telegram,")]
+    elif not any(rule.startswith("GEOIP,telegram,") for rule in rules):
+        insert_at = next((index for index, rule in enumerate(rules)
+                          if prefixes and rule.startswith(prefixes)),
+                         next((index for index, rule in enumerate(rules)
+                               if rule.startswith("GEOSITE,telegram,")),
+                              next((index for index, rule in enumerate(rules)
+                                    if rule.upper().startswith("MATCH,")), len(rules))))
+        rules.insert(insert_at, TELEGRAM_GEOIP_RULE)
+    notify_at = next((index for index, rule in enumerate(rules)
+                      if prefixes and rule.startswith(prefixes)),
+                     next((index for index, rule in enumerate(rules)
+                           if rule.startswith("GEOSITE,telegram,")),
+                          next((index for index, rule in enumerate(rules)
+                                if rule.upper().startswith("MATCH,")), len(rules))))
+    for offset, rule in enumerate((TELEGRAM_NOTIFY_RULE, *TELEGRAM_CLIENT_IP_RULES, TELEGRAM_API_RULE)):
+        rules.insert(notify_at + offset, rule)
+    return rules
+
+
+def merge_rule_sets(document, rule_sets):
+    providers = document.get("rule-providers")
+    providers = dict(providers) if isinstance(providers, dict) else {}
+    for key in list(providers):
+        if str(key).startswith(RULE_SET_KEY_PREFIX):
+            providers.pop(key)
+    for rule_set in rule_sets:
+        for source in rule_set["sources"]:
+            providers[f"{RULE_SET_KEY_PREFIX}{rule_set['key']}-{source['key']}"] = rule_set_provider(rule_set, source)
+    if providers:
+        document["rule-providers"] = providers
+    else:
+        document.pop("rule-providers", None)
+    rules = [str(rule) for rule in document.get("rules", [])]
+    high = [rule_set for rule_set in rule_sets if rule_set["priority"] == "high"]
+    normal = [rule_set for rule_set in rule_sets if rule_set["priority"] == "normal"]
+    def build(items):
+        return [f"RULE-SET,{RULE_SET_KEY_PREFIX}{item['key']}-{source['key']},{item['policy']}" +
+                (",no-resolve" if source["behavior"] == "ipcidr" else "")
+                for item in items for source in item["sources"]]
+    desired = build(rule_sets)
+    desired_set = set(desired)
+    retained, seen = [], set()
+    for rule in rules:
+        if not rule.startswith("RULE-SET," + RULE_SET_KEY_PREFIX):
+            retained.append(rule)
+        elif rule in desired_set and rule not in seen:
+            retained.append(rule)
+            seen.add(rule)
+    rules = retained
+    missing_high = [rule for rule in build(high) if rule not in seen]
+    missing_normal = [rule for rule in build(normal) if rule not in seen]
+    high_index = next((index for index, rule in enumerate(rules)
+                       if rule.startswith("GEOSITE,") and rule != "GEOSITE,CN,DIRECT"),
+                      next((index for index, rule in enumerate(rules) if rule == "GEOSITE,CN,DIRECT"), len(rules)))
+    rules[high_index:high_index] = missing_high
+    normal_index = next((index for index, rule in enumerate(rules) if rule == "GEOSITE,CN,DIRECT"), len(rules))
+    rules[normal_index:normal_index] = missing_normal
+    rules = enforce_telegram_system_rules(rules, rule_sets)
+    rules = enforce_system_rule_order(rules)
+    document["rules"] = rules
+    return rules
+
+
+def enforce_system_rule_order(rules):
+    """Keep narrow system routes ahead of broader overlapping categories."""
+    ordered = [rule for rule in rules if rule not in (*GITHUB_ROUTING_RULES, V2EX_ROUTING_RULE)]
+    microsoft_index = next((index for index, rule in enumerate(ordered)
+                            if rule.startswith("GEOSITE,microsoft,")), len(ordered))
+    ordered[microsoft_index:microsoft_index] = GITHUB_ROUTING_RULES
+    cn_index = next((index for index, rule in enumerate(ordered)
+                     if rule.startswith(("GEOSITE,CN,", "GEOIP,CN,"))), len(ordered))
+    ordered.insert(cn_index, V2EX_ROUTING_RULE)
+    return ordered
 
 
 def load_mihomo_config():
@@ -413,11 +1190,17 @@ def rules_payload():
         group.get("name") for group in document.get("proxy-groups", [])
         if isinstance(group, dict) and isinstance(group.get("name"), str)
     )
+    rule_sets = load_rule_sets()
+    rule_card_labels = load_rule_card_labels()
     return {
         "rules": rules,
         "version": rules_version(rules),
         "policies": list(dict.fromkeys(policies)),
-        "protected": sorted(PROTECTED_RULES),
+        "protected": sorted(PROTECTED_RULES | SYSTEM_GENERATED_RULES),
+        "rule_sets": rule_sets,
+        "rule_sets_version": rule_sets_version(rule_sets),
+        "rule_card_labels": rule_card_labels,
+        "rule_card_labels_version": rule_card_labels_version(rule_card_labels),
     }
 
 
@@ -436,9 +1219,10 @@ def normalize_rules(value):
         if "," not in rule:
             raise RouterError(f"第 {index} 条规则缺少分隔符")
         rules.append(rule)
+    rules = enforce_system_rule_order(rules)
     missing = PROTECTED_RULES - set(rules)
     if missing:
-        raise RouterError("国内直连保护规则不能删除")
+        raise RouterError("系统保护规则不能删除")
     matches = [index for index, rule in enumerate(rules) if rule.upper().startswith("MATCH,")]
     if matches != [len(rules) - 1]:
         raise RouterError("必须且只能保留一条 MATCH 规则，并放在最后")
@@ -462,17 +1246,34 @@ def mihomo_apply_payload(payload):
         raise RouterError("Mihomo 规则校验接口不可用") from exc
 
 
-def save_mihomo_rules(value, expected_version):
+def save_mihomo_rules(value, expected_version, rule_sets_value=None, expected_rule_sets_version=None,
+                      rule_card_labels_value=None, expected_rule_card_labels_version=None):
     rules = normalize_rules(value)
     with RULES_LOCK:
         original_text, document, current_rules = load_mihomo_config()
         if expected_version != rules_version(current_rules):
             raise RouterError("规则已被其他操作更新，请刷新后重试")
-        if rules == current_rules:
-            return {**rules_payload(), "message": "规则没有变化"}
+        current_rule_sets = load_rule_sets()
+        if expected_rule_sets_version not in (None, "", rule_sets_version(current_rule_sets)):
+            raise RouterError("规则集已被其他操作更新，请刷新后重试")
+        current_rule_card_labels = load_rule_card_labels()
+        if expected_rule_card_labels_version not in (None, "", rule_card_labels_version(current_rule_card_labels)):
+            raise RouterError("规则卡片名称已被其他操作更新，请刷新后重试")
+        policies = {"DIRECT", "REJECT", "REJECT-DROP", "PASS"}
+        policies.update(group.get("name") for group in document.get("proxy-groups", [])
+                        if isinstance(group, dict) and isinstance(group.get("name"), str))
+        rule_sets = current_rule_sets if rule_sets_value is None else normalize_rule_sets(rule_sets_value, policies)
+        rule_card_labels = (current_rule_card_labels if rule_card_labels_value is None
+                            else normalize_rule_card_labels(rule_card_labels_value, rules))
         document["rules"] = rules
+        merged_rules = merge_rule_sets(document, rule_sets)
+        if (rules == current_rules and rule_sets == current_rule_sets
+                and rule_card_labels == current_rule_card_labels and merged_rules == current_rules):
+            return {**rules_payload(), "message": "规则没有变化"}
         candidate = yaml.safe_dump(document, allow_unicode=True, sort_keys=False)
         mihomo_apply_payload(candidate)
+        previous_rule_sets = RULE_SETS_PATH.read_bytes() if RULE_SETS_PATH.exists() else None
+        previous_rule_card_labels = RULE_CARD_LABELS_PATH.read_bytes() if RULE_CARD_LABELS_PATH.exists() else None
         try:
             RULE_BACKUP_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
             stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -482,10 +1283,22 @@ def save_mihomo_rules(value, expected_version):
             temporary = RULE_BACKUP_DIR / f".config-{os.getpid()}-{secrets.token_hex(4)}.yaml"
             temporary.write_text(candidate, encoding="utf-8")
             os.chmod(temporary, 0o640)
+            atomic_json(RULE_SETS_PATH, rule_sets)
+            atomic_json(RULE_CARD_LABELS_PATH, rule_card_labels)
             os.replace(temporary, MIHOMO_CONFIG_PATH)
             for old_backup in sorted(RULE_BACKUP_DIR.glob("config-before-rules-*.yaml"))[:-20]:
                 old_backup.unlink()
         except OSError as exc:
+            if previous_rule_sets is None:
+                RULE_SETS_PATH.unlink(missing_ok=True)
+            else:
+                RULE_SETS_PATH.write_bytes(previous_rule_sets)
+                os.chmod(RULE_SETS_PATH, 0o600)
+            if previous_rule_card_labels is None:
+                RULE_CARD_LABELS_PATH.unlink(missing_ok=True)
+            else:
+                RULE_CARD_LABELS_PATH.write_bytes(previous_rule_card_labels)
+                os.chmod(RULE_CARD_LABELS_PATH, 0o600)
             try:
                 mihomo_apply_payload(original_text)
             except RouterError:
@@ -494,6 +1307,16 @@ def save_mihomo_rules(value, expected_version):
         health = local_health()
         if not health["ready"]:
             MIHOMO_CONFIG_PATH.write_text(original_text, encoding="utf-8")
+            if previous_rule_sets is None:
+                RULE_SETS_PATH.unlink(missing_ok=True)
+            else:
+                RULE_SETS_PATH.write_bytes(previous_rule_sets)
+                os.chmod(RULE_SETS_PATH, 0o600)
+            if previous_rule_card_labels is None:
+                RULE_CARD_LABELS_PATH.unlink(missing_ok=True)
+            else:
+                RULE_CARD_LABELS_PATH.write_bytes(previous_rule_card_labels)
+                os.chmod(RULE_CARD_LABELS_PATH, 0o600)
             mihomo_apply_payload(original_text)
             raise RouterError("规则已撤回：应用后健康检查未通过")
         audit("rules", "mihomo", "ok", f"{len(current_rules)} -> {len(rules)}")
@@ -820,7 +1643,10 @@ def normalize_mac(value):
 
 
 def load_device_preferences():
-    defaults = {"aliases": {}, "favorites": []}
+    defaults = {
+        "aliases": {}, "favorites": [], "homekit_direct": [],
+        "wireguard_aliases": {}, "device_icons": {},
+    }
     if not DEVICE_PREFS_PATH.exists():
         return defaults
     try:
@@ -829,10 +1655,18 @@ def load_device_preferences():
         raise RouterError("设备名称与常用名单读取失败") from exc
     aliases = data.get("aliases", {})
     favorites = data.get("favorites", [])
-    if not isinstance(aliases, dict) or not isinstance(favorites, list):
+    homekit_direct = data.get("homekit_direct", [])
+    wireguard_aliases = data.get("wireguard_aliases", {})
+    device_icons = data.get("device_icons", {})
+    if (not isinstance(aliases, dict) or not isinstance(favorites, list)
+            or not isinstance(homekit_direct, list) or not isinstance(wireguard_aliases, dict)
+            or not isinstance(device_icons, dict)):
         raise RouterError("设备名称与常用名单格式错误")
     clean_aliases = {}
+    clean_wireguard_aliases = {}
+    clean_device_icons = {}
     clean_favorites = set()
+    clean_homekit_direct = set()
     for mac, alias in aliases.items():
         try:
             normalized = normalize_mac(mac)
@@ -840,12 +1674,35 @@ def load_device_preferences():
             continue
         if isinstance(alias, str) and alias.strip():
             clean_aliases[normalized] = alias.strip()[:40]
+    for key, alias in wireguard_aliases.items():
+        if (isinstance(key, str) and re.fullmatch(r"(?:interface|peer):[A-Za-z0-9_.:-]+", key)
+                and isinstance(alias, str) and alias.strip()
+                and not any(ord(char) < 32 for char in alias)):
+            clean_wireguard_aliases[key] = alias.strip()[:40]
     for mac in favorites:
         try:
             clean_favorites.add(normalize_mac(mac))
         except RouterError:
             continue
-    return {"aliases": clean_aliases, "favorites": sorted(clean_favorites)}
+    for mac in homekit_direct:
+        try:
+            clean_homekit_direct.add(normalize_mac(mac))
+        except RouterError:
+            continue
+    for mac, icon in device_icons.items():
+        try:
+            normalized = normalize_mac(mac)
+        except RouterError:
+            continue
+        if isinstance(icon, str) and icon in DEVICE_ICON_KEYS:
+            clean_device_icons[normalized] = icon
+    return {
+        "aliases": clean_aliases,
+        "favorites": sorted(clean_favorites),
+        "homekit_direct": sorted(clean_homekit_direct),
+        "wireguard_aliases": clean_wireguard_aliases,
+        "device_icons": clean_device_icons,
+    }
 
 
 def save_device_preferences(data):
@@ -856,7 +1713,261 @@ def save_device_preferences(data):
     os.replace(temporary, DEVICE_PREFS_PATH)
 
 
-def update_device_preference(mac, alias=None, favorite=None):
+def load_page_layout_preferences():
+    defaults = {page: {"hidden": [], "order": list(allowed), "expanded": []}
+                for page, allowed in PAGE_LAYOUT_SECTIONS.items()}
+    try:
+        data = json.loads(PAGE_LAYOUT_PREFS_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return defaults
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RouterError("页面显示设置读取失败") from exc
+    if not isinstance(data, dict):
+        raise RouterError("页面显示设置格式错误")
+    result = {}
+    for page, allowed in PAGE_LAYOUT_SECTIONS.items():
+        values = data.get(page, {})
+        # Accept the first release's list-only format, then transparently
+        # migrate it to the richer hidden/order structure on the next save.
+        if isinstance(values, list):
+            hidden, order, expanded = values, list(allowed), []
+        elif isinstance(values, dict):
+            hidden = values.get("hidden", [])
+            order = values.get("order", list(allowed))
+            expanded = values.get("expanded", [])
+        else:
+            hidden, order, expanded = [], list(allowed), []
+        locked = PAGE_LAYOUT_LOCKED.get(page, set())
+        cleaned_hidden = sorted({value for value in hidden
+                                 if isinstance(value, str) and value in allowed and value not in locked}) if isinstance(hidden, list) else []
+        cleaned_order = [value for value in order
+                         if isinstance(value, str) and value in allowed] if isinstance(order, list) else []
+        if set(cleaned_order) != set(allowed):
+            cleaned_order = list(allowed)
+        foldable = PAGE_LAYOUT_FOLDABLE.get(page, set())
+        cleaned_expanded = sorted({value for value in expanded
+                                   if isinstance(value, str) and value in foldable
+                                   and value not in cleaned_hidden}) if isinstance(expanded, list) else []
+        result[page] = {"hidden": cleaned_hidden, "order": cleaned_order, "expanded": cleaned_expanded}
+    return result
+
+
+def save_page_layout_preferences(data):
+    PAGE_LAYOUT_PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = PAGE_LAYOUT_PREFS_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, PAGE_LAYOUT_PREFS_PATH)
+
+
+def update_page_layout_preferences(page, hidden, order=None, expanded=None):
+    if page not in PAGE_LAYOUT_SECTIONS:
+        raise RouterError("页面标识无效")
+    if not isinstance(hidden, list) or len(hidden) > len(PAGE_LAYOUT_SECTIONS[page]):
+        raise RouterError("隐藏板块格式无效")
+    values = set()
+    locked = PAGE_LAYOUT_LOCKED.get(page, set())
+    for value in hidden:
+        if not isinstance(value, str) or value not in PAGE_LAYOUT_SECTIONS[page] or value in locked:
+            raise RouterError("包含不允许隐藏的板块")
+        values.add(value)
+    if order is None:
+        order = list(PAGE_LAYOUT_SECTIONS[page])
+    if not isinstance(order, list) or len(order) != len(PAGE_LAYOUT_SECTIONS[page]):
+        raise RouterError("排序格式无效")
+    if any(not isinstance(value, str) for value in order) or set(order) != set(PAGE_LAYOUT_SECTIONS[page]):
+        raise RouterError("排序包含不允许的板块")
+    if expanded is None:
+        expanded = []
+    if not isinstance(expanded, list):
+        raise RouterError("展开状态格式无效")
+    foldable = PAGE_LAYOUT_FOLDABLE.get(page, set())
+    expanded_values = set()
+    for value in expanded:
+        if not isinstance(value, str) or value not in foldable or value in values:
+            raise RouterError("展开状态包含不允许的板块")
+        expanded_values.add(value)
+    with PAGE_LAYOUT_PREFS_LOCK:
+        data = load_page_layout_preferences()
+        data[page] = {"hidden": sorted(values), "order": order, "expanded": sorted(expanded_values)}
+        save_page_layout_preferences(data)
+    audit("page_layout", "saved", page + "=" + ",".join(order) + ";hidden=" + ",".join(sorted(values)) + ";expanded=" + ",".join(sorted(expanded_values)))
+    return {"page": page, **data[page]}
+
+
+def read_homekit_route_state():
+    default = {"ips": [], "macs": [], "updated_at": 0, "migration_complete": False}
+    try:
+        state = json.loads(HOMEKIT_ROUTE_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+    if not isinstance(state, dict):
+        return default
+    ips = []
+    for value in state.get("ips", []):
+        try:
+            parsed = ipaddress.ip_address(value)
+            if parsed.version == 4 and parsed in LAN:
+                ips.append(str(parsed))
+        except ValueError:
+            continue
+    macs = []
+    for value in state.get("macs", []):
+        try:
+            macs.append(normalize_mac(value))
+        except RouterError:
+            continue
+    return {
+        "ips": sorted(set(ips)),
+        "macs": sorted(set(macs)),
+        "updated_at": int(state.get("updated_at") or 0),
+        "migration_complete": bool(state.get("migration_complete")),
+    }
+
+
+def save_homekit_route_state(state):
+    HOMEKIT_ROUTE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = HOMEKIT_ROUTE_STATE_PATH.with_suffix(".new")
+    temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, HOMEKIT_ROUTE_STATE_PATH)
+
+
+def legacy_homekit_direct_ips(route_interface):
+    """Read only legacy controller-like direct /32 routes during one migration."""
+    result = subprocess.run(["ip", "-4", "-o", "route", "show", "dev", route_interface],
+                            text=True, capture_output=True, timeout=3)
+    if result.returncode:
+        raise RouterError("无法读取现有 HomeKit 直连路由")
+    candidates = set()
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if not fields or "via" in fields or "src" not in fields:
+            continue
+        destination = fields[0]
+        if "/" in destination and not destination.endswith("/32"):
+            continue
+        address = destination.removesuffix("/32")
+        try:
+            if ipaddress.ip_address(address) in LAN and f"src {PROXY_IP}" in line:
+                candidates.add(address)
+        except ValueError:
+            continue
+    return candidates
+
+
+def homekit_direct_route_sync():
+    """Maintain source-specific Z4Pro-to-LAN HomeKit routes.
+
+    Selected devices are stored by MAC, then resolved from live DHCP leases.
+    TPROXY replies keep their RouterOS return route; only traffic whose source
+    is the Z4Pro itself uses the direct LAN table.
+    """
+    if standalone_mode():
+        return {"selected": 0, "active": 0, "missing": [], "addresses": {}, "updated_at": 0}
+    route_interface = load_config().get("FAMILY_HOMEKIT_ROUTE_INTERFACE", HOMEKIT_ROUTE_INTERFACE).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]+", route_interface):
+        raise RouterError("HomeKit 直连接口名称无效")
+    previous = read_homekit_route_state()
+    with DEVICE_PREFS_LOCK:
+        selected = set(load_device_preferences()["homekit_direct"])
+    if not selected and not previous["migration_complete"]:
+        legacy_ips = legacy_homekit_direct_ips(route_interface)
+        if legacy_ips:
+            with RouterOS() as api:
+                leases = api.print("/ip/dhcp-server/lease")
+            migrated = {str(lease.get("mac-address") or "").upper() for lease in leases
+                        if str(lease.get("address") or "") in legacy_ips}
+            migrated = {normalize_mac(mac) for mac in migrated if mac}
+            if migrated:
+                with DEVICE_PREFS_LOCK:
+                    preferences = load_device_preferences()
+                    preferences["homekit_direct"] = sorted(migrated)
+                    save_device_preferences(preferences)
+                selected = migrated
+    interface_check = subprocess.run(["ip", "link", "show", "dev", route_interface],
+                                     text=True, capture_output=True, timeout=3)
+    if interface_check.returncode:
+        raise RouterError(f"HomeKit 直连接口不可用：{route_interface}")
+    with RouterOS() as api:
+        leases = api.print("/ip/dhcp-server/lease")
+    addresses = {}
+    for lease in leases:
+        mac = str(lease.get("mac-address") or "").upper()
+        address = str(lease.get("address") or "")
+        if mac not in selected:
+            continue
+        try:
+            if ipaddress.ip_address(address) in LAN:
+                addresses[mac] = address
+        except ValueError:
+            continue
+    desired_ips = set(addresses.values())
+    with HOMEKIT_ROUTE_LOCK:
+        current_rules = subprocess.run(["ip", "-4", "-o", "rule", "show"], text=True,
+                                       capture_output=True, timeout=3)
+        if current_rules.returncode:
+            raise RouterError("无法读取 HomeKit 本地直连策略")
+        for line in current_rules.stdout.splitlines():
+            if f"from {PROXY_IP}" not in line or f"lookup {HOMEKIT_ROUTE_TABLE}" not in line:
+                continue
+            fields = line.split()
+            destination = fields[fields.index("to") + 1] if "to" in fields else str(LAN)
+            subprocess.run(
+                ["ip", "-4", "rule", "del", "from", PROXY_IP, "to", destination,
+                 "lookup", HOMEKIT_ROUTE_TABLE], text=True, capture_output=True, timeout=3,
+            )
+        table_route = subprocess.run(
+            ["ip", "-4", "route", "replace", str(LAN), "dev", route_interface,
+             "src", PROXY_IP, "table", HOMEKIT_ROUTE_TABLE],
+            text=True, capture_output=True, timeout=3,
+        )
+        if table_route.returncode:
+            raise RouterError("HomeKit 本地直连路由表写入失败")
+        for address in sorted(desired_ips, key=lambda value: tuple(map(int, value.split(".")))):
+            result = subprocess.run(
+                ["ip", "-4", "rule", "add", "pref", HOMEKIT_ROUTE_RULE_PREF,
+                 "from", PROXY_IP, "to", f"{address}/32", "lookup", HOMEKIT_ROUTE_TABLE],
+                text=True, capture_output=True, timeout=3,
+            )
+            if result.returncode:
+                raise RouterError(f"HomeKit 本地直连策略写入失败：{address}")
+        managed = managed_ips()
+        router_ip = load_config()["FAMILY_ROUTER_IP"]
+        for address in sorted(set(previous["ips"]) | desired_ips,
+                              key=lambda value: tuple(map(int, value.split(".")))):
+            existing = subprocess.run(["ip", "-4", "route", "show", f"{address}/32"],
+                                      text=True, capture_output=True, timeout=3)
+            if (existing.returncode == 0 and f"dev {route_interface}" in existing.stdout
+                    and " via " not in existing.stdout and f"src {PROXY_IP}" in existing.stdout):
+                subprocess.run(["ip", "-4", "route", "del", f"{address}/32", "dev", route_interface],
+                               text=True, capture_output=True, timeout=3)
+            if address in managed:
+                result = subprocess.run(
+                    ["ip", "-4", "route", "replace", f"{address}/32", "via", router_ip,
+                     "dev", route_interface, "proto", TPROXY_RETURN_PROTO],
+                    text=True, capture_output=True, timeout=3,
+                )
+                if result.returncode:
+                    raise RouterError(f"旁路回程路由恢复失败：{address}")
+        state = {
+            "ips": sorted(desired_ips), "macs": sorted(selected),
+            "updated_at": int(time.time()), "migration_complete": True,
+        }
+        save_homekit_route_state(state)
+    missing = sorted(selected - set(addresses))
+    return {
+        "selected": len(selected),
+        "active": len(desired_ips),
+        "missing": missing,
+        "addresses": addresses,
+        "updated_at": state["updated_at"],
+    }
+
+
+def update_device_preference(mac, alias=None, favorite=None, homekit_direct=None, icon=None):
+    if standalone_mode():
+        raise RouterError("独立旁路模式不读取家庭网关设备，也不提供设备接管配置")
     mac = normalize_mac(mac)
     with RouterOS() as api:
         lease = next((item for item in api.print("/ip/dhcp-server/lease")
@@ -866,6 +1977,7 @@ def update_device_preference(mac, alias=None, favorite=None):
     with DEVICE_PREFS_LOCK:
         data = load_device_preferences()
         favorites = set(data["favorites"])
+        direct_macs = set(data["homekit_direct"])
         if alias is not None:
             if not isinstance(alias, str):
                 raise RouterError("设备名称格式错误")
@@ -884,10 +1996,84 @@ def update_device_preference(mac, alias=None, favorite=None):
             else:
                 favorites.discard(mac)
         data["favorites"] = sorted(favorites)
+        if homekit_direct is not None:
+            if not isinstance(homekit_direct, bool):
+                raise RouterError("HomeKit 本地直连状态格式错误")
+            if homekit_direct:
+                direct_macs.add(mac)
+            else:
+                direct_macs.discard(mac)
+        data["homekit_direct"] = sorted(direct_macs)
+        if icon is not None:
+            if not isinstance(icon, str) or icon not in DEVICE_ICON_KEYS:
+                raise RouterError("设备图标不受支持")
+            data["device_icons"][mac] = icon
         save_device_preferences(data)
     ip = lease.get("address", "")
-    audit("device_preference", ip, "success", f"mac={mac} favorite={favorite} alias_changed={alias is not None}")
-    return {"message": "设备信息已保存", "mac": mac}
+    try:
+        direct_status = homekit_direct_route_sync() if homekit_direct is not None else None
+    except (OSError, RouterError, subprocess.SubprocessError):
+        with DEVICE_PREFS_LOCK:
+            rollback = load_device_preferences()
+            rollback["homekit_direct"] = [item for item in rollback["homekit_direct"] if item != mac]
+            if homekit_direct is False:
+                rollback["homekit_direct"].append(mac)
+                rollback["homekit_direct"].sort()
+            save_device_preferences(rollback)
+        raise
+    audit("device_preference", ip, "success",
+          f"mac={mac} favorite={favorite} homekit_direct={homekit_direct} "
+          f"icon={icon or ''} alias_changed={alias is not None}")
+    message = "设备信息已保存"
+    if homekit_direct is not None:
+        message = "已启用 HomeKit 本地直连" if homekit_direct else "已移除 HomeKit 本地直连"
+        if direct_status and direct_status["missing"]:
+            message += "；等待 DHCP 租约出现后生效"
+    return {"message": message, "mac": mac, "homekit": direct_status, "icon": icon}
+
+
+def setup_status():
+    try:
+        mode = load_config().get("ROUTER_MODE", "routeros")
+    except RouterError:
+        mode = "auto"
+    try:
+        state = json.loads(SETUP_STATE_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"pending": False, "mode": mode}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RouterError("首次配置状态读取失败") from exc
+    if state.get("pending") is not True:
+        return {"pending": False, "mode": mode}
+    token = str(state.get("token") or "").strip()
+    return {
+        "pending": bool(token),
+        "mode": mode,
+        "url": "/setup?" + urlencode({"token": token}) if token else "/setup",
+    }
+
+
+def update_wireguard_alias(key, alias):
+    if not isinstance(key, str) or not re.fullmatch(r"(?:interface|peer):[A-Za-z0-9_.:-]+", key):
+        raise RouterError("WireGuard 设备标识无效")
+    if not isinstance(alias, str):
+        raise RouterError("WireGuard 设备名称格式错误")
+    alias = alias.strip()
+    if len(alias) > 40 or any(ord(char) < 32 for char in alias):
+        raise RouterError("WireGuard 设备名称需为 1 至 40 个可见字符")
+    with DEVICE_PREFS_LOCK:
+        data = load_device_preferences()
+        if alias:
+            data["wireguard_aliases"][key] = alias
+        else:
+            data["wireguard_aliases"].pop(key, None)
+        save_device_preferences(data)
+    audit("wireguard_alias", key, "success", f"alias_changed={bool(alias)}")
+    return {
+        "message": "WireGuard 设备名称已保存" if alias else "已恢复 WireGuard 默认名称",
+        "key": key,
+        "alias": alias,
+    }
 
 
 def routeros_duration_seconds(value):
@@ -924,6 +2110,23 @@ def mask_endpoint(value):
         labels = host.split(".")
         host = "*." + ".".join(labels[-2:]) if len(labels) > 2 else host
     return f"{host}:{port}" if port else host
+
+
+def mobile_peer_display_name(name):
+    labels = {
+        "surge-ios-home": "iPhone",
+        "shadowrocket-ipadmini-home": "iPad mini",
+        "surge-mba-home": "MacBook Air",
+    }
+    return labels.get(name, name)
+
+
+def mobile_peer_state(age):
+    if age is not None and age <= 180:
+        return "up", "已连接"
+    if age is not None and age <= 600:
+        return "warn", "握手偏久"
+    return "idle", "待机"
 
 
 def load_wireguard_events(now=None):
@@ -981,12 +2184,16 @@ def wireguard_probe(api, target, source):
 
 def wireguard_status():
     config = load_config()
-    mobile_name = config.get("WIREGUARD_MOBILE_INTERFACE", "back-to-home-vpn")
-    site_name = config.get("WIREGUARD_SITE_INTERFACE", "wg-home")
-    mobile_label = config.get("WIREGUARD_MOBILE_LABEL", "手机按需回家")
-    site_label = config.get("WIREGUARD_SITE_LABEL", "站点常驻互联")
+    if config.get("ROUTER_MODE", "routeros").lower() == "standalone":
+        return {"updated_at": int(time.time()), "interfaces": [], "events": [], "mode": "standalone"}
+    mobile_name = config.get("WIREGUARD_MOBILE_INTERFACE") or "back-to-home-vpn"
+    site_name = config.get("WIREGUARD_SITE_INTERFACE") or "wg-home"
+    mobile_label = config.get("WIREGUARD_MOBILE_LABEL") or "手机按需回家"
+    site_label = config.get("WIREGUARD_SITE_LABEL") or "站点常驻互联"
     site_probe = config.get("WIREGUARD_SITE_PROBE", "")
     site_probe_source = config.get("WIREGUARD_SITE_PROBE_SOURCE", "")
+    with DEVICE_PREFS_LOCK:
+        wireguard_aliases = load_device_preferences()["wireguard_aliases"]
     now = int(time.time())
     with WIREGUARD_STATUS_LOCK:
         with RouterOS() as api:
@@ -1005,7 +2212,9 @@ def wireguard_status():
             if not name:
                 continue
             kind = "mobile" if name == mobile_name else "site" if name == site_name else "other"
-            label = mobile_label if kind == "mobile" else site_label if kind == "site" else name
+            default_label = mobile_label if kind == "mobile" else site_label if kind == "site" else name
+            alias_key = f"interface:{name}"
+            label = wireguard_aliases.get(alias_key, default_label)
             interface_peers = [item for item in peers if item.get("interface") == name]
             peer_rows = []
             active_peers = 0
@@ -1025,12 +2234,30 @@ def wireguard_status():
                 endpoint_port = peer.get("current-endpoint-port") or peer.get("endpoint-port", "")
                 if endpoint_value and endpoint_port:
                     endpoint_value = f"{endpoint_value}:{endpoint_port}"
+                raw_peer_name = peer.get("name") or peer.get("comment") or ""
+                peer_name = raw_peer_name or f"回家设备 {index}"
+                peer_identity = str(peer.get(".id") or peer.get("public-key") or raw_peer_name or f"index:{index}")
+                peer_id = hashlib.sha256(f"{name}\0{peer_identity}".encode("utf-8")).hexdigest()[:16]
+                peer_default_label = mobile_peer_display_name(peer_name)
+                peer_alias_key = f"peer:{name}:{peer_id}"
+                legacy_alias_key = f"peer:{name}:{peer_name}"
+                peer_alias = wireguard_aliases.get(peer_alias_key, wireguard_aliases.get(legacy_alias_key, ""))
+                peer_state, peer_state_text = mobile_peer_state(age)
+                dynamic_peer = str(peer.get("dynamic", "")).lower() == "true"
                 peer_rows.append({
-                    "name": peer.get("name") or peer.get("comment") or f"对端 {index}",
+                    "id": peer_id,
+                    "name": peer_name,
+                    "display_name": peer_alias or peer_default_label,
+                    "default_label": peer_default_label,
+                    "alias": peer_alias,
+                    "alias_key": peer_alias_key,
+                    "visible_mobile_client": not (dynamic_peer and re.fullmatch(r"peer\d+", peer_name, re.I)),
                     "allowed_address": peer.get("allowed-address", ""),
                     "endpoint": mask_endpoint(endpoint_value),
                     "last_handshake_seconds": age,
                     "active": active,
+                    "state": peer_state,
+                    "state_text": peer_state_text,
                     "rx_bytes": rx,
                     "tx_bytes": tx,
                 })
@@ -1057,7 +2284,9 @@ def wireguard_status():
                 for rule in nat_rules
             )
             output.append({
-                "name": name, "label": label, "kind": kind, "state": state, "state_text": state_text,
+                "name": name, "label": label, "default_label": default_label,
+                "alias": wireguard_aliases.get(alias_key, ""), "alias_key": alias_key,
+                "kind": kind, "state": state, "state_text": state_text,
                 "running": running, "listen_port": interface.get("listen-port", ""), "mtu": interface.get("mtu", ""),
                 "peer_total": len(peer_rows), "peer_active": active_peers,
                 "last_handshake_seconds": latest, "rx_bytes": rx_bytes, "tx_bytes": tx_bytes,
@@ -1079,6 +2308,426 @@ def wireguard_status():
             save_wireguard_events(events)
         WIREGUARD_STATE["interfaces"] = current_states
         return {"updated_at": now, "interfaces": output, "events": events[-20:]}
+
+
+def remote_wireguard_defaults(config):
+    interface_name = config.get("WIREGUARD_REMOTE_INTERFACE") or "family-remote-wg"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,30}", interface_name):
+        raise RouterError("WireGuard 远程接入接口名称无效")
+    try:
+        listen_port = int(config.get("WIREGUARD_REMOTE_PORT") or "51820")
+    except ValueError as exc:
+        raise RouterError("WireGuard 远程接入端口无效") from exc
+    if not 1 <= listen_port <= 65535:
+        raise RouterError("WireGuard 远程接入端口必须在 1 至 65535 之间")
+    try:
+        address = ipaddress.ip_interface(config.get("WIREGUARD_REMOTE_ADDRESS") or "10.66.0.1/24")
+    except ValueError as exc:
+        raise RouterError("WireGuard 远程接入地址无效") from exc
+    if address.version != 4 or address.network.prefixlen > 30:
+        raise RouterError("WireGuard 远程接入地址必须是 IPv4 /30 至 /8 网段")
+    # MosDNS is the managed LAN resolver when it is available. RouterOS remains
+    # the fallback for installations that do not expose a separate DNS host.
+    dns = (config.get("WIREGUARD_REMOTE_DNS") or config.get("FAMILY_PROXY_IP")
+           or config.get("FAMILY_ROUTER_IP") or "")
+    if dns:
+        dns_values = []
+        for value in dns.split(","):
+            value = value.strip()
+            try:
+                parsed = ipaddress.ip_address(value)
+            except ValueError as exc:
+                raise RouterError("WireGuard DNS 必须填写 IPv4 或 IPv6 地址") from exc
+            if parsed.is_unspecified or parsed.is_multicast:
+                raise RouterError("WireGuard DNS 地址不可用")
+            dns_values.append(str(parsed))
+        dns = ",".join(dns_values)
+    allowed_address = config.get("WIREGUARD_REMOTE_CLIENT_ALLOWED") or "0.0.0.0/0"
+    if allowed_address.strip() != "0.0.0.0/0":
+        raise RouterError("WireGuard 远程接入必须使用 IPv4 全隧道 0.0.0.0/0")
+    try:
+        keepalive = int(config.get("WIREGUARD_REMOTE_KEEPALIVE") or "25")
+    except (TypeError, ValueError) as exc:
+        raise RouterError("WireGuard 保活间隔无效") from exc
+    if not 0 <= keepalive <= 65535:
+        raise RouterError("WireGuard 保活间隔必须在 0 至 65535 秒之间")
+    return {
+        "interface": interface_name,
+        "listen_port": listen_port,
+        "address": address,
+        "network": address.network,
+        "dns": dns,
+        "allowed_address": allowed_address,
+        "keepalive": keepalive,
+    }
+
+
+def routeros_version_number(value):
+    match = re.match(r"\s*(\d+)\.(\d+)(?:\.(\d+))?", str(value or ""))
+    if not match:
+        return None
+    return tuple(int(part or 0) for part in match.groups())
+
+
+def require_remote_wireguard_version(api):
+    resources = api.print("/system/resource")
+    version = resources[0].get("version", "") if resources else ""
+    parsed = routeros_version_number(version)
+    if parsed is None or parsed < (7, 21, 0):
+        raise RouterError(f"RouterOS {version or '未知版本'} 不支持自动生成 WireGuard 客户端配置；需要 7.21 或更高版本")
+    return str(version)
+
+
+def validate_public_endpoint(value):
+    value = str(value or "").strip().rstrip(".")
+    if not value or len(value) > 253 or any(char in value for char in "/\\ @"):
+        raise RouterError("外部访问地址必须是域名或公网 IP")
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        if not re.fullmatch(r"(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}", value):
+            raise RouterError("外部访问地址必须是域名或公网 IP")
+        return value.lower()
+    if not address.is_global:
+        raise RouterError("外部访问 IP 必须是公网地址，不能使用局域网或保留地址")
+    return str(address)
+
+
+def validate_wireguard_port(value, default):
+    try:
+        port = int(value or default)
+    except (TypeError, ValueError) as exc:
+        raise RouterError("WireGuard UDP 端口无效") from exc
+    if not 1 <= port <= 65535:
+        raise RouterError("WireGuard UDP 端口必须在 1 至 65535 之间")
+    return port
+
+
+def validate_remote_wireguard_name(value):
+    value = str(value or "").strip()
+    if not value or len(value) > 40 or any(ord(char) < 32 for char in value) or "/" in value or "\\" in value:
+        raise RouterError("客户端名称需为 1 至 40 个可见字符")
+    return value
+
+
+def remote_wireguard_peer_id(interface_name, peer):
+    identity = str(peer.get(".id") or peer.get("public-key") or peer.get("comment") or peer.get("name") or "")
+    return hashlib.sha256(f"{interface_name}\0{identity}".encode("utf-8")).hexdigest()[:16]
+
+
+def remote_wireguard_interface(api, defaults, create=False):
+    interfaces = api.print("/interface/wireguard")
+    existing = next((item for item in interfaces if item.get("name") == defaults["interface"]), None)
+    created = False
+    if existing:
+        comment = existing.get("comment", "")
+        if not comment.startswith(REMOTE_WG_COMMENT_PREFIX):
+            raise RouterError(f"WireGuard 接口 {defaults['interface']} 已存在，但不是本系统创建的接口")
+        current_port = int(existing.get("listen-port") or 0)
+        if current_port and current_port != defaults["listen_port"]:
+            raise RouterError(f"已存在的 {defaults['interface']} 使用 UDP {current_port}，请使用该端口或先在配置中调整")
+        return existing, created
+    conflicts = [item.get("name") for item in interfaces if int(item.get("listen-port") or 0) == defaults["listen_port"]]
+    if conflicts:
+        raise RouterError(f"UDP {defaults['listen_port']} 已被 WireGuard 接口占用：{', '.join(conflicts)}")
+    api.add("/interface/wireguard", name=defaults["interface"], **{
+        "listen-port": str(defaults["listen_port"]), "comment": REMOTE_WG_COMMENT_PREFIX,
+    })
+    existing = next((item for item in api.print("/interface/wireguard") if item.get("name") == defaults["interface"]), None)
+    if not existing:
+        raise RouterError("RouterOS 未返回新建的 WireGuard 接口")
+    created = True
+    return existing, created
+
+
+def remote_wireguard_network_conflicts(api, defaults):
+    network = defaults["network"]
+    if network.overlaps(LAN):
+        raise RouterError(f"WireGuard 地址池 {network} 与家庭 LAN {LAN} 冲突")
+    for item in api.print("/ip/address"):
+        if item.get("interface") == defaults["interface"]:
+            continue
+        try:
+            other = ipaddress.ip_interface(item.get("address", "")).network
+        except ValueError:
+            continue
+        if network.overlaps(other):
+            raise RouterError(f"WireGuard 地址池 {network} 与 RouterOS 地址 {other} 冲突")
+    for item in api.print("/ip/route"):
+        try:
+            destination = ipaddress.ip_network(item.get("dst-address", ""), strict=False)
+        except ValueError:
+            continue
+        if destination.prefixlen and network.overlaps(destination):
+            raise RouterError(f"WireGuard 地址池 {network} 与 RouterOS 路由 {destination} 冲突")
+
+
+def remote_wireguard_address(api, defaults):
+    addresses = api.print("/ip/address")
+    existing = next((item for item in addresses
+                     if item.get("interface") == defaults["interface"]
+                     and item.get("address", "").split("/", 1)[0] == str(defaults["address"].ip)), None)
+    if existing:
+        return False
+    other = next((item for item in addresses if item.get("interface") == defaults["interface"]), None)
+    if other:
+        raise RouterError(
+            f"WireGuard 接口 {defaults['interface']} 已使用地址 {other.get('address', '未知')}，"
+            f"与配置的 {defaults['address']} 不一致"
+        )
+    remote_wireguard_network_conflicts(api, defaults)
+    api.add("/ip/address", address=str(defaults["address"]), interface=defaults["interface"],
+            comment=REMOTE_WG_COMMENT_PREFIX + " address")
+    return True
+
+
+def remote_wireguard_used_addresses(peers, network):
+    used = {network.network_address, network.broadcast_address}
+    for peer in peers:
+        for value in str(peer.get("allowed-address", "")).split(","):
+            try:
+                address = ipaddress.ip_interface(value.strip()).ip
+            except ValueError:
+                continue
+            if address in network:
+                used.add(address)
+    return used
+
+
+def remote_wireguard_allocate_address(peers, defaults):
+    used = remote_wireguard_used_addresses(peers, defaults["network"])
+    for address in defaults["network"].hosts():
+        if address != defaults["address"].ip and address not in used:
+            return f"{address}/32"
+    raise RouterError(f"WireGuard 地址池 {defaults['network']} 已没有可用客户端地址")
+
+
+def remote_wireguard_rule(api, path, chain, action, comment, **props):
+    rules = api.print(path)
+    existing = next((item for item in rules if item.get("comment") == comment), None)
+    desired = {"chain": chain, "action": action, "comment": comment,
+               **{key.replace("_", "-"): value for key, value in props.items()}}
+    if existing:
+        api.set(path, existing[".id"], **desired)
+        return False
+    first = next((item for item in rules if item.get("chain") == chain), None)
+    if first:
+        add_before(api, path, first[".id"], **desired)
+    else:
+        api.add(path, **desired)
+    return True
+
+
+def ensure_remote_wireguard_firewall(api, defaults):
+    network = str(defaults["network"])
+    port = str(defaults["listen_port"])
+    members = api.print("/interface/list/member")
+    if not any(item.get("list") == "WAN" for item in members):
+        raise RouterError("RouterOS 未发现 WAN 接口列表，无法安全创建全流量 NAT")
+    comments = {
+        "input_port": f"{REMOTE_WG_COMMENT_PREFIX} input {port}",
+        "input_lan": REMOTE_WG_COMMENT_PREFIX + " input lan",
+        "forward_to_lan": REMOTE_WG_COMMENT_PREFIX + " forward to lan",
+        "forward_from_lan": REMOTE_WG_COMMENT_PREFIX + " forward from lan",
+        "nat": REMOTE_WG_COMMENT_PREFIX + " masquerade",
+    }
+    created = []
+    for key, chain, action, props in (
+        ("input_port", "input", "accept", {"protocol": "udp", "dst-port": port}),
+        ("input_lan", "input", "accept", {"src-address": network}),
+        ("forward_to_lan", "forward", "accept", {"src-address": network, "dst-address": str(LAN)}),
+        ("forward_from_lan", "forward", "accept", {"src-address": str(LAN), "dst-address": network}),
+    ):
+        if remote_wireguard_rule(api, "/ip/firewall/filter", chain, action, comments[key], **props):
+            created.append(("/ip/firewall/filter", comments[key]))
+
+    if remote_wireguard_rule(api, "/ip/firewall/nat", "srcnat", "masquerade", comments["nat"],
+                             src_address=network, out_interface_list="WAN"):
+        created.append(("/ip/firewall/nat", comments["nat"]))
+    return created
+
+
+def remote_wireguard_show_client_config(api, interface, peer, defaults, client_address, endpoint, dns):
+    records = api.talk("/interface/wireguard/peers/show-client-config",
+                        {".id": peer[".id"], "show-sensitive": "yes"})
+    for record in records:
+        for value in record.values():
+            if isinstance(value, str) and "[Interface]" in value:
+                return value[value.index("[Interface]"):].strip()
+
+    interfaces = api.print("/interface/wireguard")
+    server = next((item for item in interfaces if item.get("name") == interface.get("name")), interface)
+    peers = api.talk("/interface/wireguard/peers/print", {"show-sensitive": "yes"})
+    sensitive = next((item for item in peers if item.get(".id") == peer.get(".id")), {})
+    private_key = sensitive.get("private-key") or peer.get("private-key")
+    public_key = server.get("public-key")
+    if not private_key or not public_key:
+        raise RouterError("RouterOS 未返回客户端私钥或服务端公钥，请确认 API 用户拥有敏感字段读取权限")
+    address_line = f"Address = {client_address}"
+    lines = ["[Interface]", address_line, f"PrivateKey = {private_key}"]
+    if dns:
+        lines.append(f"DNS = {dns}")
+    lines.extend([
+        "",
+        "[Peer]",
+        f"PublicKey = {public_key}",
+        f"AllowedIPs = {defaults['allowed_address']}",
+        f"Endpoint = {endpoint}",
+        f"PersistentKeepalive = {defaults['keepalive']}",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def remote_wireguard_status():
+    if standalone_mode():
+        return {"mode": "standalone", "supported": False, "interface": None, "clients": [],
+                "message": "独立旁路模式未接入 RouterOS"}
+    defaults = remote_wireguard_defaults(load_config())
+    with RouterOS() as api:
+        resources = api.print("/system/resource")
+        version = resources[0].get("version", "") if resources else ""
+        supported = routeros_version_number(version) is not None and routeros_version_number(version) >= (7, 21, 0)
+        if not supported:
+            return {"mode": "routeros", "supported": False, "routeros_version": version,
+                    "interface": None, "clients": [],
+                    "message": f"需要 RouterOS 7.21 或更高版本（当前 {version or '未知'}）"}
+        interface = next((item for item in api.print("/interface/wireguard")
+                          if item.get("name") == defaults["interface"]), None)
+        if not interface:
+            return {"mode": "routeros", "supported": True, "routeros_version": version,
+                    "interface": None, "clients": [], "message": "尚未创建远程接入接口"}
+        peers = api.print("/interface/wireguard/peers")
+        clients = []
+        for peer in peers:
+            if peer.get("interface") != defaults["interface"] or not peer.get("comment", "").startswith(REMOTE_WG_COMMENT_PREFIX + " client"):
+                continue
+            age = routeros_duration_seconds(peer.get("last-handshake", "")) if peer.get("last-handshake") else None
+            clients.append({
+                "id": remote_wireguard_peer_id(defaults["interface"], peer),
+                "name": peer.get("name") or peer.get("comment", "").removeprefix(REMOTE_WG_COMMENT_PREFIX + " client "),
+                "address": peer.get("allowed-address", ""),
+                "active": age is not None and age <= 180,
+                "last_handshake_seconds": age,
+                "rx_bytes": int(peer.get("rx", 0) or 0),
+                "tx_bytes": int(peer.get("tx", 0) or 0),
+            })
+        return {
+            "mode": "routeros", "supported": True, "routeros_version": version,
+            "interface": {
+                "name": defaults["interface"], "listen_port": int(interface.get("listen-port") or defaults["listen_port"]),
+                "address": str(defaults["address"]), "network": str(defaults["network"]),
+                "running": interface.get("running") == "true", "client_count": len(clients),
+            },
+            "clients": clients,
+            "message": "全流量经家庭出口；客户端可访问家庭 LAN",
+        }
+
+
+def create_remote_wireguard_client(payload):
+    if standalone_mode():
+        raise RouterError("独立旁路模式不支持自动写入 RouterOS WireGuard")
+    if not isinstance(payload, dict):
+        raise RouterError("WireGuard 客户端参数无效")
+    name = validate_remote_wireguard_name(payload.get("name"))
+    endpoint_host = validate_public_endpoint(payload.get("endpoint"))
+    config = load_config()
+    defaults = remote_wireguard_defaults(config)
+    listen_port = validate_wireguard_port(payload.get("port"), defaults["listen_port"])
+    if listen_port != defaults["listen_port"]:
+        raise RouterError(f"当前远程接入接口固定使用 UDP {defaults['listen_port']}，请使用该端口")
+    dns = str(payload.get("dns") or defaults["dns"]).strip()
+    if dns:
+        dns = remote_wireguard_defaults({**config, "WIREGUARD_REMOTE_DNS": dns})["dns"]
+    endpoint = f"[{endpoint_host}]:{listen_port}" if ":" in endpoint_host else f"{endpoint_host}:{listen_port}"
+    created_interface = False
+    created_address = False
+    created_rules = []
+    peer = None
+    with RouterOS() as api:
+        version = require_remote_wireguard_version(api)
+        interface, created_interface = remote_wireguard_interface(api, defaults, create=True)
+        try:
+            created_address = remote_wireguard_address(api, defaults)
+            created_rules = ensure_remote_wireguard_firewall(api, defaults)
+            peers = [item for item in api.print("/interface/wireguard/peers")
+                     if item.get("interface") == defaults["interface"]]
+            client_address = remote_wireguard_allocate_address(peers, defaults)
+            comment = f"{REMOTE_WG_COMMENT_PREFIX} client {name}"
+            if any(item.get("comment") == comment for item in peers):
+                raise RouterError(f"客户端名称 {name} 已存在")
+            api.add("/interface/wireguard/peers", **{
+                "interface": defaults["interface"], "name": name, "comment": comment,
+                "allowed-address": client_address, "private-key": "auto",
+                "client-address": client_address, "client-dns": dns,
+                "client-endpoint": endpoint, "client-keepalive": str(defaults["keepalive"]),
+                "client-allowed-address": defaults["allowed_address"],
+            })
+            peer = next((item for item in api.print("/interface/wireguard/peers")
+                         if item.get("comment") == comment), None)
+            if not peer or not peer.get(".id"):
+                raise RouterError("RouterOS 未返回新建的 WireGuard 客户端")
+            client_config = remote_wireguard_show_client_config(api, interface, peer, defaults,
+                                                                client_address, endpoint, dns)
+            client_id = remote_wireguard_peer_id(defaults["interface"], peer)
+            audit("wireguard_remote_create", name, "success", f"id={client_id} address={client_address}")
+            return {
+                "message": f"已创建 {name}，请立即扫描二维码或下载配置",
+                "routeros_version": version,
+                "client": {"id": client_id, "name": name, "address": client_address},
+                "config": client_config,
+            }
+        except (RouterError, OSError, ValueError) as exc:
+            if peer and peer.get(".id"):
+                try:
+                    api.remove("/interface/wireguard/peers", peer[".id"])
+                except (RouterError, OSError):
+                    pass
+            for path, comment in created_rules:
+                for item in api.print(path):
+                    if item.get("comment") == comment:
+                        try:
+                            api.remove(path, item[".id"])
+                        except (RouterError, OSError):
+                            pass
+            if created_address:
+                for item in api.print("/ip/address"):
+                    if item.get("comment") == REMOTE_WG_COMMENT_PREFIX + " address":
+                        try:
+                            api.remove("/ip/address", item[".id"])
+                        except (RouterError, OSError):
+                            pass
+            if created_interface:
+                for item in api.print("/interface/wireguard"):
+                    if item.get("name") == defaults["interface"]:
+                        try:
+                            api.remove("/interface/wireguard", item[".id"])
+                        except (RouterError, OSError):
+                            pass
+            audit("wireguard_remote_create", name, "failed", str(exc))
+            raise
+
+
+def revoke_remote_wireguard_client(client_id):
+    if standalone_mode():
+        raise RouterError("独立旁路模式未接入 RouterOS")
+    if not re.fullmatch(r"[0-9a-f]{16}", str(client_id or "")):
+        raise RouterError("WireGuard 客户端编号无效")
+    defaults = remote_wireguard_defaults(load_config())
+    with RouterOS() as api:
+        interface = next((item for item in api.print("/interface/wireguard")
+                          if item.get("name") == defaults["interface"]), None)
+        if not interface:
+            raise RouterError("尚未创建远程接入接口")
+        peers = [item for item in api.print("/interface/wireguard/peers")
+                 if item.get("interface") == defaults["interface"]
+                 and item.get("comment", "").startswith(REMOTE_WG_COMMENT_PREFIX + " client")]
+        peer = next((item for item in peers if remote_wireguard_peer_id(defaults["interface"], item) == client_id), None)
+        if not peer:
+            raise RouterError("未找到该远程接入客户端")
+        name = peer.get("name") or peer.get("comment", "").removeprefix(REMOTE_WG_COMMENT_PREFIX + " client ")
+        api.remove("/interface/wireguard/peers", peer[".id"])
+        audit("wireguard_remote_revoke", name, "success", f"id={client_id}")
+        return {"message": f"已撤销 {name} 的 WireGuard 客户端配置"}
 
 
 def router_summary(api):
@@ -1142,6 +2791,28 @@ def router_summary(api):
     return summary
 
 
+def standalone_summary():
+    summary = local_health()
+    summary.update({
+        "mode": "standalone",
+        "mode_label": "独立旁路",
+        "proxy_ip": PROXY_IP,
+        "router": "not_configured",
+        "router_label": "家庭网关未接入 RouterOS",
+        "netwatch": "not_applicable",
+        "router_resource": {"available": False},
+        "ipv6_policy": "由家庭网关或客户端自行配置",
+        "drift": [],
+        "upnp_mappings": None,
+        "upnp_enabled": None,
+        "last_change": last_audit_event(),
+        "backup": latest_backup(load_config()),
+        "homekit_direct": {"selected": 0, "active": 0, "updated_at": 0},
+        "standalone_notice": "未接入 RouterOS；默认不接管设备。请手动设置 7890 代理，或在家庭网关配置策略路由。",
+    })
+    return summary
+
+
 def last_audit_event():
     try:
         lines = AUDIT_PATH.read_text(encoding="utf-8").splitlines()
@@ -1176,6 +2847,58 @@ def connection_packets(connections, ip):
     return active, packets
 
 
+def egress_policy_contract(api, mangle, nat, ipv6_filters):
+    """Read the shared policy contract once; this function never mutates RouterOS."""
+    routes = api.print("/ip/route")
+    return {
+        "mark_rule": any(item.get("comment") == SHARED_TAG + " mark connection" for item in mangle),
+        "route_rule": any(item.get("comment") == SHARED_TAG + " route to z4pro" for item in mangle),
+        "shared_route": any(item.get("comment") == SHARED_TAG + " route" for item in routes),
+        "dns_redirect": all(any(item.get("comment") == SHARED_TAG + f" DNS {protocol}" for item in nat)
+                            for protocol in ("TCP", "UDP")),
+        "ipv6_filters": ipv6_filters,
+    }
+
+
+def device_egress(ip, mac, is_managed, connections, contract):
+    active, packets = connection_packets(connections, ip)
+    marked = 0
+    for connection in connections:
+        source = connection.get("src-address", "").rsplit(":", 1)[0]
+        reply_destination = connection.get("reply-dst-address", "").rsplit(":", 1)[0]
+        if (source == ip or reply_destination == ip) and connection.get("connection-mark") == SHARED_CONN_MARK:
+            marked += 1
+    if not is_managed:
+        return {
+            "mode": "direct",
+            "headline": "未接管，保持 RB5009 直连",
+            "active_connections": active,
+            "marked_connections": 0,
+            "packets": packets,
+            "checks": {},
+        }
+    ipv6_guard = any(
+        item.get("comment") == managed_tag(ip) + " IPv6 bypass guard"
+        and item.get("src-mac-address", "").upper() == mac.upper()
+        for item in contract["ipv6_filters"]
+    )
+    checks = {
+        "membership": True,
+        "mark_rule": contract["mark_rule"],
+        "route_rule": contract["route_rule"] and contract["shared_route"],
+        "dns_redirect": contract["dns_redirect"],
+        "ipv6_guard": ipv6_guard,
+    }
+    return {
+        "mode": "managed" if all(checks.values()) else "degraded",
+        "headline": "经 Z4Pro 分流" if all(checks.values()) else "旁路规则需核对",
+        "active_connections": active,
+        "marked_connections": marked,
+        "packets": packets,
+        "checks": checks,
+    }
+
+
 def configuration_drift(api, leases, router_managed, file_managed):
     issues = []
     lease_by_ip = {item.get("address"): item for item in leases}
@@ -1206,14 +2929,21 @@ def configuration_drift(api, leases, router_managed, file_managed):
 
 
 def list_devices():
+    if standalone_mode():
+        return {"summary": standalone_summary(), "devices": [], "mode": "standalone"}
     with DEVICE_PREFS_LOCK:
         preferences = load_device_preferences()
     favorite_macs = set(preferences["favorites"])
+    homekit_direct_macs = set(preferences["homekit_direct"])
+    homekit_route_state = read_homekit_route_state()
     managed_macs = set()
     with RouterOS() as api:
         leases = api.print("/ip/dhcp-server/lease")
         mangle = api.print("/ip/firewall/mangle")
         connections = api.print("/ip/firewall/connection")
+        nat_rules = api.print("/ip/firewall/nat")
+        ipv6_filters = api.print("/ipv6/firewall/filter")
+        egress_contract = egress_policy_contract(api, mangle, nat_rules, ipv6_filters)
         managed = address_list_managed(api)
         legacy_managed = set()
         for rule in mangle:
@@ -1242,18 +2972,22 @@ def list_devices():
                 "name": preferences["aliases"].get(mac) or router_name,
                 "router_name": router_name,
                 "custom_name": mac in preferences["aliases"],
+                "icon": preferences["device_icons"].get(mac, "phone"),
                 "status": lease.get("status", "unknown"),
                 "static": lease.get("dynamic") != "true",
                 "managed": is_managed,
                 "favorite": is_managed or mac in favorite_macs,
+                "homekit_direct": mac in homekit_direct_macs,
+                "homekit_route_active": ip in set(homekit_route_state["ips"]),
                 "fixed": False,
                 "packets": packets,
                 "connections": active_connections,
                 "effective": is_managed and active_connections > 0,
+                "egress": device_egress(ip, mac, is_managed, connections, egress_contract),
             })
         summary = router_summary(api)
         drift = configuration_drift(api, leases, address_list_managed(api), file_managed)
-        upnp = [item for item in api.print("/ip/firewall/nat")
+        upnp = [item for item in nat_rules
                 if item.get("dynamic") == "true" and item.get("comment", "").startswith("upnp ")]
         upnp_settings = api.print("/ip/upnp")
         upnp_enabled = bool(upnp_settings and upnp_settings[0].get("enabled") == "true")
@@ -1263,7 +2997,12 @@ def list_devices():
             "upnp_enabled": upnp_enabled,
             "last_change": last_audit_event(),
             "backup": latest_backup(load_config()),
-            "ipv6_policy": "纳管设备阻断",
+            "ipv6_policy": "纳管设备快速拒绝并回退 IPv4",
+            "homekit_direct": {
+                "selected": len(homekit_direct_macs),
+                "active": len(homekit_route_state["ips"]),
+                "updated_at": homekit_route_state["updated_at"],
+            },
         })
     if managed_macs - favorite_macs:
         with DEVICE_PREFS_LOCK:
@@ -1322,6 +3061,27 @@ def ensure_shared_policy(api):
                       "dst-address-list": "local_lan_ipv4",
                       "comment": SHARED_TAG + " local bypass"})
 
+    # Keep HomeKit discovery and IGMP on the LAN instead of sending multicast
+    # into Mihomo. This must remain ahead of the shared connection marker.
+    mangle = api.print("/ip/firewall/mangle")
+    mark_rule = next((item for item in mangle
+                      if item.get("comment") == SHARED_TAG + " mark connection"), None)
+    if mark_rule:
+        multicast_comment = SHARED_TAG + " multicast direct"
+        multicast_rule = next((item for item in mangle
+                               if item.get("comment") == multicast_comment), None)
+        multicast_props = {
+            "chain": "prerouting", "action": "accept",
+            "src-address-list": SHARED_LIST, "dst-address": "224.0.0.0/4",
+            "comment": multicast_comment,
+        }
+        if multicast_rule:
+            api.set("/ip/firewall/mangle", multicast_rule[".id"], **multicast_props)
+            api.talk("/ip/firewall/mangle/move", {
+                "numbers": multicast_rule[".id"], "destination": mark_rule[".id"]})
+        else:
+            add_before(api, "/ip/firewall/mangle", mark_rule[".id"], **multicast_props)
+
     nat = api.print("/ip/firewall/nat")
     if not any(item.get("comment") == SHARED_TAG + " DNS TCP" for item in nat):
         tcp_id = add_before(api, "/ip/firewall/nat", nat_anchor,
@@ -1347,10 +3107,37 @@ def ensure_shared_policy(api):
             api.talk("/ip/firewall/filter/move", {
                 "numbers": exclude[".id"], "destination": fasttrack[".id"]})
 
+    filters = api.print("/ip/firewall/filter")
+    exclude = next((rule for rule in filters
+                    if rule.get("comment") == SHARED_TAG + " FastTrack exclude"), None)
+    quic_comment = SHARED_TAG + " QUIC fast fallback"
+    quic_rule = next((rule for rule in filters if rule.get("comment") == quic_comment), None)
+    quic_props = {
+        "chain": "forward", "action": "reject", "reject-with": "icmp-port-unreachable",
+        "protocol": "udp", "src-address-list": SHARED_LIST,
+        "dst-address-list": "!local_lan_ipv4", "dst-port": "443", "comment": quic_comment,
+    }
+    if not quic_rule:
+        api.add("/ip/firewall/filter", **quic_props)
+        quic_rule = next((rule for rule in api.print("/ip/firewall/filter")
+                          if rule.get("comment") == quic_comment), None)
+    else:
+        api.set("/ip/firewall/filter", quic_rule[".id"], **quic_props)
+    if quic_rule and exclude:
+        api.talk("/ip/firewall/filter/move", {
+            "numbers": quic_rule[".id"], "destination": exclude[".id"]})
+
     ipv6_filters = api.print("/ipv6/firewall/filter")
-    if not any(rule.get("comment") == "family-mihomo-auto IPv6 drop" for rule in ipv6_filters):
+    ipv6_guard = next((rule for rule in ipv6_filters
+                       if rule.get("comment") == "family-mihomo-auto IPv6 drop"), None)
+    if not ipv6_guard:
         api.add("/ipv6/firewall/filter", chain="family_mihomo_auto_v6",
-                action="drop", comment="family-mihomo-auto IPv6 drop")
+                action="reject", **{"reject-with": "icmp-admin-prohibited",
+                                    "comment": "family-mihomo-auto IPv6 drop"})
+    elif (ipv6_guard.get("action") != "reject"
+          or ipv6_guard.get("reject-with") != "icmp-admin-prohibited"):
+        api.set("/ipv6/firewall/filter", ipv6_guard[".id"], action="reject",
+                **{"reject-with": "icmp-admin-prohibited"})
 
 
 def rule_id(api, path, comment):
@@ -1400,8 +3187,8 @@ def cleanup_device_rules(api, ip):
         if item.get("name") in tables:
             api.remove("/routing/table", item[".id"])
             removed += 1
-    clear_device_connections(api, ip)
-    return removed
+    cleared_connections = clear_device_connections(api, ip)
+    return removed, cleared_connections
 
 
 def remove_shared_membership(api, ip):
@@ -1463,7 +3250,24 @@ def verify_device_rules(api, ip):
         raise RouterError("规则创建不完整：" + ", ".join(missing))
 
 
+def ensure_static_dhcp_lease(api, lease, ip):
+    """Pin a managed device to its current DHCP address and verify the result."""
+    mac = str(lease.get("mac-address") or "").upper()
+    if not mac:
+        raise RouterError("该 DHCP 租约没有 MAC 地址")
+    if lease.get("dynamic") == "true":
+        api.talk("/ip/dhcp-server/lease/make-static", {".id": lease[".id"]})
+    refreshed = next((item for item in api.print("/ip/dhcp-server/lease")
+                      if item.get("address") == ip
+                      and str(item.get("mac-address") or "").upper() == mac), None)
+    if not refreshed or refreshed.get("dynamic") == "true":
+        raise RouterError("DHCP 静态绑定校验失败；未写入旁路规则")
+    return refreshed
+
+
 def enable_device(ip):
+    if standalone_mode():
+        raise RouterError("独立旁路模式不会自动接管设备；请在客户端设置 7890 代理或在家庭网关配置策略路由")
     ip = validate_ip(ip)
     tag = managed_tag(ip)
     health = local_health()
@@ -1483,8 +3287,7 @@ def enable_device(ip):
         if conflict:
             raise RouterError(f"设备仍命中其它策略：{conflict}；请先解除冲突")
 
-        if lease.get("dynamic") == "true":
-            api.talk("/ip/dhcp-server/lease/make-static", {".id": lease[".id"]})
+        ensure_static_dhcp_lease(api, lease, ip)
         try:
             ensure_shared_policy(api)
             api.add("/ip/firewall/address-list", list=SHARED_LIST, address=ip,
@@ -1511,20 +3314,28 @@ def enable_device(ip):
                 pass
             audit("enable", ip, "rolled_back", str(exc))
             raise
-        return {"ip": ip, "message": "已加入旁路并通过规则校验；旧连接已清理，请重新打开应用验证"}
+        return {"ip": ip, "message": "已固定 DHCP IP，加入旁路并通过规则校验；旧连接已清理，请重新打开应用验证"}
 
 
 def remove_device(ip):
+    if standalone_mode():
+        raise RouterError("独立旁路模式没有 RouterOS 接管规则")
     ip = validate_ip(ip)
     with RouterOS() as api:
         removed = remove_shared_membership(api, ip)
-        removed += cleanup_device_rules(api, ip)
+        cleaned_rules, cleared_connections = cleanup_device_rules(api, ip)
+        removed += cleaned_rules
         addresses = managed_ips()
         addresses.discard(ip)
         save_managed_ips(addresses)
         sync_tproxy()
-        audit("remove", ip, "success", f"removed_rules={removed}")
-        return {"ip": ip, "message": f"已移除 {removed} 条页面管理规则，设备恢复直连"}
+        audit("remove", ip, "success",
+              f"removed_rules={removed}; cleared_connections={cleared_connections}; egress=rb5009-direct")
+        return {
+            "ip": ip,
+            "message": (f"已撤出 {removed} 条旁路规则并清除 {cleared_connections} 条旧连接；"
+                        "后续流量由 RB5009 直接出网，不经过 Z4Pro"),
+        }
 
 
 def cpu_sample():
@@ -1537,13 +3348,13 @@ def temperature_status():
     try:
         result = subprocess.run(["sensors", "-j"], capture_output=True, text=True, timeout=3)
     except (OSError, subprocess.SubprocessError):
-        return {"cpu_c": None, "nvme_c": None}
+        return {"cpu_c": None, "nvme_c": None, "hdd": hdd_temperature_status()}
     if result.returncode:
-        return {"cpu_c": None, "nvme_c": None}
+        return {"cpu_c": None, "nvme_c": None, "hdd": hdd_temperature_status()}
     try:
         document = json.loads(result.stdout)
     except (TypeError, ValueError):
-        return {"cpu_c": None, "nvme_c": None}
+        return {"cpu_c": None, "nvme_c": None, "hdd": hdd_temperature_status()}
 
     def reading(chip_prefix, feature_name):
         for chip, features in document.items():
@@ -1558,7 +3369,45 @@ def temperature_status():
     return {
         "cpu_c": reading("coretemp-", "Package id 0"),
         "nvme_c": reading("nvme-", "Composite"),
+        "hdd": hdd_temperature_status(),
     }
+
+
+def hdd_temperature_status():
+    """Return rotating-disk SMART temperatures, with a modest read-rate limit."""
+    now = time.monotonic()
+    cached = HDD_TEMPERATURE_CACHE.get("value")
+    if cached is not None and now - HDD_TEMPERATURE_CACHE["timestamp"] < 30:
+        return list(cached)
+    disks = []
+    try:
+        listed = subprocess.run(
+            ["lsblk", "--json", "-d", "-o", "NAME,MODEL,ROTA,TYPE"],
+            capture_output=True, text=True, timeout=3,
+        )
+        for item in json.loads(listed.stdout).get("blockdevices", []):
+            if item.get("type") == "disk" and item.get("rota") in (True, 1, "1"):
+                disks.append((str(item.get("name")), str(item.get("model") or "机械盘").strip()))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        disks = []
+
+    readings = []
+    for name, model in disks:
+        try:
+            result = subprocess.run(["smartctl", "-A", "-j", f"/dev/{name}"],
+                                    capture_output=True, text=True, timeout=4)
+            table = json.loads(result.stdout).get("ata_smart_attributes", {}).get("table", [])
+            attributes = {item.get("id"): item for item in table}
+            attribute = attributes.get(194) or attributes.get(190)
+            raw_data = (attribute or {}).get("raw", {})
+            raw = str(raw_data.get("string") or raw_data.get("value", ""))
+            match = re.search(r"\d+", raw)
+            if match:
+                readings.append({"name": name, "model": model, "temperature_c": int(match.group())})
+        except (OSError, ValueError, subprocess.SubprocessError):
+            continue
+    HDD_TEMPERATURE_CACHE.update({"timestamp": now, "value": readings})
+    return list(readings)
 
 
 def docker_status():
@@ -1611,10 +3460,12 @@ def system_status():
             cpu_percent < 95 and memory_percent < 90 and disk_percent < 90
             and (temperatures["cpu_c"] is None or temperatures["cpu_c"] < 85)
             and (temperatures["nvme_c"] is None or temperatures["nvme_c"] < 75)
+            and all(item["temperature_c"] < 60 for item in temperatures["hdd"])
             and not containers.get("unhealthy")
         )
         value = {
             "healthy": healthy,
+            "mode": "standalone" if standalone_mode() else "routeros",
             "cpu": {"percent": cpu_percent, "cores": os.cpu_count() or 0,
                     "load_1m": round(load_1m, 2), "load_5m": round(load_5m, 2), "load_15m": round(load_15m, 2)},
             "memory": {"used": memory_used, "total": memory_total, "percent": memory_percent,
@@ -1630,8 +3481,8 @@ def system_status():
         return dict(value)
 
 
-PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>家庭旁路设备管理</title><style>
-:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#15191d;color:#eef2f4}*{box-sizing:border-box}body{margin:0}.wrap{max-width:980px;margin:auto;padding:34px 22px}header{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;border-bottom:1px solid #394249;padding-bottom:22px;flex-wrap:wrap}h1{margin:0;font-size:25px;letter-spacing:0}p{color:#aeb9bf;margin:8px 0 0;line-height:1.55}.badge{white-space:nowrap;border:1px solid #3b805f;background:#173527;color:#9fe1b8;padding:7px 10px;border-radius:5px;font-size:13px}.badge.bad{border-color:#8b4945;background:#3b211f;color:#ffb4aa}.health-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-top:18px}.health-item{padding:11px 12px;border-top:2px solid #3b805f;background:#1b2125}.health-item.bad{border-color:#a4514b}.health-item b{display:block;font-size:13px}.health-item span{display:block;margin-top:4px;color:#97a4aa;font-size:12px}.panel{margin-top:22px;border:1px solid #394249;background:#20262b;border-radius:7px;padding:20px}h2{font-size:16px;margin:0 0 14px}.add{display:flex;gap:10px;align-items:center}input{background:#101417;border:1px solid #4b5961;color:#fff;border-radius:4px;padding:10px 12px;font-size:15px;width:220px}button{border:0;border-radius:4px;padding:10px 14px;font-weight:650;cursor:pointer;background:#62c77c;color:#092212;font-size:14px}button.remove{background:#2a3035;border:1px solid #626e75;color:#e4ebee}button:disabled{opacity:.5;cursor:default}.note{font-size:13px;margin-top:10px}.status{min-height:22px;margin-top:12px;font-size:14px}.error{color:#ffb4aa}.ok{color:#9fe1b8}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:13px 8px;border-top:1px solid #354048}th{color:#aeb9bf;font-weight:600}td:last-child{text-align:right}.muted{color:#94a1a8}.state{display:inline-block;font-size:12px;border:1px solid #4b5961;padding:3px 7px;border-radius:4px}.state.active{border-color:#3b805f;color:#9fe1b8}.state.wait{border-color:#8e7a44;color:#e7cd81}@media(max-width:650px){.wrap{padding:22px 14px}header{display:block}.badge{display:inline-block;margin-top:14px}.health-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.panel{padding:15px}.add{align-items:stretch;flex-direction:column}input{width:100%}table th:nth-child(2),table td:nth-child(2){display:none}table{font-size:13px}}</style><body><main class="wrap"><header><div><h1>家庭旁路设备管理</h1><p>加入、验证、撤出均按单台设备执行，不改全屋网关和公网服务。</p></div><span class="badge" id="health">连接检查中</span></header><div class="health-grid" id="healthChecks"></div><section class="panel"><h2>加入旁路</h2><div class="add"><input id="ip" inputmode="decimal" placeholder="__FAMILY_LAN_PREFIX__x"><button onclick="enableDevice()">加入并校验</button></div><p class="note">系统先检查 Z4Pro、DNS、策略组和冲突策略；失败会清理本次创建的规则。设备需已有 DHCP 租约。</p><div class="status" id="status"></div></section><section class="panel"><h2>设备列表</h2><table><thead><tr><th>设备</th><th>MAC 地址</th><th>在线</th><th>实际状态</th><th></th></tr></thead><tbody id="devices"></tbody></table></section></main><script>
+PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>家庭网络控制台设备管理</title><style>
+:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#15191d;color:#eef2f4}*{box-sizing:border-box}body{margin:0}.wrap{max-width:980px;margin:auto;padding:34px 22px}header{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;border-bottom:1px solid #394249;padding-bottom:22px;flex-wrap:wrap}h1{margin:0;font-size:25px;letter-spacing:0}p{color:#aeb9bf;margin:8px 0 0;line-height:1.55}.badge{white-space:nowrap;border:1px solid #3b805f;background:#173527;color:#9fe1b8;padding:7px 10px;border-radius:5px;font-size:13px}.badge.bad{border-color:#8b4945;background:#3b211f;color:#ffb4aa}.health-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-top:18px}.health-item{padding:11px 12px;border-top:2px solid #3b805f;background:#1b2125}.health-item.bad{border-color:#a4514b}.health-item b{display:block;font-size:13px}.health-item span{display:block;margin-top:4px;color:#97a4aa;font-size:12px}.panel{margin-top:22px;border:1px solid #394249;background:#20262b;border-radius:7px;padding:20px}h2{font-size:16px;margin:0 0 14px}.add{display:flex;gap:10px;align-items:center}input{background:#101417;border:1px solid #4b5961;color:#fff;border-radius:4px;padding:10px 12px;font-size:15px;width:220px}button{border:0;border-radius:4px;padding:10px 14px;font-weight:650;cursor:pointer;background:#62c77c;color:#092212;font-size:14px}button.remove{background:#2a3035;border:1px solid #626e75;color:#e4ebee}button:disabled{opacity:.5;cursor:default}.note{font-size:13px;margin-top:10px}.status{min-height:22px;margin-top:12px;font-size:14px}.error{color:#ffb4aa}.ok{color:#9fe1b8}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:13px 8px;border-top:1px solid #354048}th{color:#aeb9bf;font-weight:600}td:last-child{text-align:right}.muted{color:#94a1a8}.state{display:inline-block;font-size:12px;border:1px solid #4b5961;padding:3px 7px;border-radius:4px}.state.active{border-color:#3b805f;color:#9fe1b8}.state.wait{border-color:#8e7a44;color:#e7cd81}@media(max-width:650px){.wrap{padding:22px 14px}header{display:block}.badge{display:inline-block;margin-top:14px}.health-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.panel{padding:15px}.add{align-items:stretch;flex-direction:column}input{width:100%}table th:nth-child(2),table td:nth-child(2){display:none}table{font-size:13px}}</style><body><main class="wrap"><header><div><h1>家庭网络控制台设备管理</h1><p>加入、验证、撤出均按单台设备执行，不改全屋网关和公网服务。</p></div><span class="badge" id="health">连接检查中</span></header><div class="health-grid" id="healthChecks"></div><section class="panel"><h2>加入旁路</h2><div class="add"><input id="ip" inputmode="decimal" placeholder="__FAMILY_LAN_PREFIX__x"><button onclick="enableDevice()">加入并校验</button></div><p class="note">系统先检查 Z4Pro、DNS、策略组和冲突策略；失败会清理本次创建的规则。设备需已有 DHCP 租约。</p><div class="status" id="status"></div></section><section class="panel"><h2>设备列表</h2><table><thead><tr><th>设备</th><th>MAC 地址</th><th>在线</th><th>实际状态</th><th></th></tr></thead><tbody id="devices"></tbody></table></section></main><script>
 const csrf="__CSRF__",statusEl=document.querySelector('#status');function setStatus(msg,ok){statusEl.textContent=msg;statusEl.className='status '+(ok?'ok':'error')}async function api(path,opt={}){let r=await fetch(path,{...opt,headers:{'Content-Type':'application/json','X-CSRF':csrf,...(opt.headers||{})}}),b=await r.json();if(!r.ok)throw Error(b.error||'请求失败');return b}function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}function healthItem(name,ok,text){return `<div class="health-item ${ok?'':'bad'}"><b>${name}</b><span>${text}</span></div>`}async function load(){try{let data=await api('/api/devices'),s=data.summary,c=s.checks||{};let ready=s.ready&&s.netwatch==='up';let badge=document.querySelector('#health');badge.textContent=ready?'旁路平面正常':'旁路平面需检查';badge.className='badge '+(ready?'':'bad');document.querySelector('#healthChecks').innerHTML=healthItem('RB5009',s.router==='connected','管理连接')+healthItem('DNS',c.dns,'国内解析')+healthItem('Mihomo',c.mihomo,'控制接口')+healthItem('策略组',c.policy,s.detail?.proxy||'未就绪')+healthItem('自动回退',s.netwatch==='up',s.netwatch);let rows=data.devices.map(d=>{let label=!d.managed?'未接管':d.effective?'已生效':'等待新流量',state=!d.managed?'':d.effective?'active':'wait',action=d.fixed?'<span class="muted">固定灰度</span>':d.managed?`<button class="remove" onclick="removeDevice('${d.ip}')">恢复直连</button>`:`<button class="remove" onclick="choose('${d.ip}')">选择</button>`;return `<tr><td>${esc(d.name)}<div class="muted">${d.ip}${d.static?' · 固定':''}</div></td><td class="muted">${esc(d.mac)}</td><td>${esc(d.status)}</td><td><span class="state ${state}">${label}</span>${d.managed?`<div class="muted">${d.packets} 个包</div>`:''}</td><td>${action}</td></tr>`}).join('');document.querySelector('#devices').innerHTML=rows||'<tr><td colspan="5" class="muted">未发现 DHCP 设备</td></tr>'}catch(e){setStatus(e.message,false)}}function choose(ip){document.querySelector('#ip').value=ip;document.querySelector('#ip').focus()}async function enableDevice(){let ip=document.querySelector('#ip').value.trim();try{setStatus('正在执行健康检查、冲突检查和规则事务...',true);let r=await api('/api/enable',{method:'POST',body:JSON.stringify({ip})});setStatus(r.message,true);await load()}catch(e){setStatus(e.message,false)}}async function removeDevice(ip){if(!confirm('将 '+ip+' 恢复直连并清理旧连接？'))return;try{setStatus('正在恢复直连...',true);let r=await api('/api/remove',{method:'POST',body:JSON.stringify({ip})});setStatus(r.message,true);await load()}catch(e){setStatus(e.message,false)}}load();setInterval(load,30000)</script></body></html>"""
 
 
@@ -1645,12 +3496,17 @@ PAGE = (PAGE
 MIHOMO_PAGE = MIHOMO_PAGE.replace('<meta name="viewport" content="width=device-width,initial-scale=1">', '<meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,">', 1)
 
 
-PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>家庭旁路</title><style>
+PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>家庭网络控制台</title><style>
 :root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC","Segoe UI",sans-serif;background:#000;color:#f5f5f7;letter-spacing:0}*{box-sizing:border-box}body{margin:0;background:#000;color:#f5f5f7}.topbar{position:sticky;top:0;z-index:10;border-bottom:1px solid rgba(255,255,255,.1);background:rgba(18,18,20,.88);backdrop-filter:saturate(180%) blur(22px);-webkit-backdrop-filter:saturate(180%) blur(22px)}.topbar-inner{max-width:1040px;height:58px;margin:auto;padding:0 22px;display:flex;align-items:center;justify-content:space-between;gap:18px}.brand{font-size:17px;font-weight:650;color:#fff;white-space:nowrap}.nav{display:flex;align-items:center;gap:4px;padding:3px;background:#2c2c2e;border-radius:8px}.nav a{padding:7px 11px;border-radius:6px;color:#aeaeb2;text-decoration:none;font-size:13px;white-space:nowrap}.nav a.active{background:#636366;color:#fff}.wrap{max-width:1040px;margin:auto;padding:38px 22px 64px}.intro{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:25px}.eyebrow{font-size:13px;color:#8e8e93;margin-bottom:7px}.intro h1{font-size:30px;line-height:1.15;margin:0;font-weight:700;letter-spacing:0}.intro p{margin:9px 0 0;color:#98989d;font-size:14px}.overall{display:flex;align-items:center;gap:8px;padding:8px 11px;border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;color:#30d158;font-size:13px;white-space:nowrap}.overall.bad{color:#ff453a}.dot{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 0 3px color-mix(in srgb,currentColor 16%,transparent)}.section{margin-top:26px}.section-title{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:0 2px 9px}.section-title h2{font-size:13px;text-transform:none;color:#8e8e93;font-weight:600;margin:0}.group{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.health-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr))}.health-item{min-width:0;padding:16px;border-right:1px solid #38383a}.health-item:last-child{border-right:0}.health-item b{display:flex;align-items:center;gap:7px;font-size:14px;font-weight:600}.health-item b:before{content:"";width:7px;height:7px;border-radius:50%;background:#30d158;flex:0 0 auto}.health-item.bad b:before{background:#ff453a}.health-item span{display:block;margin:6px 0 0 14px;color:#8e8e93;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.add-row{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;padding:15px 16px}.field{min-width:0}.field label{display:block;font-size:14px;font-weight:600;margin-bottom:5px}.field input{width:100%;height:38px;border:1px solid #48484a;border-radius:7px;background:#2c2c2e;color:#fff;padding:0 11px;font:15px inherit;outline:none}.field input:focus{border-color:#0a84ff;box-shadow:0 0 0 3px rgba(10,132,255,.2)}button{font:600 14px inherit;letter-spacing:0;cursor:pointer}.primary{height:38px;border:0;border-radius:7px;background:#0a84ff;color:#fff;padding:0 15px}.primary:hover{background:#409cff}.secondary{border:0;background:transparent;color:#0a84ff;padding:7px 8px;border-radius:6px}.secondary:hover{background:rgba(10,132,255,.12)}.secondary:disabled{color:#636366;cursor:default;background:transparent}.danger{color:#ff453a}.help{padding:0 16px 15px;color:#8e8e93;font-size:12px;line-height:1.5}.status{min-height:0;margin:0 16px 15px;padding:10px 12px;border-radius:7px;background:#2c2c2e;color:#30d158;font-size:13px}.status:empty{display:none}.status.error{color:#ff6961}.device-controls{display:flex;align-items:center;gap:8px}.device-search{width:210px;height:32px;border:1px solid #48484a;border-radius:7px;background:#1c1c1e;color:#fff;padding:0 10px;font:13px inherit;outline:none}.device-search:focus{border-color:#0a84ff;box-shadow:0 0 0 3px rgba(10,132,255,.18)}.segment{display:flex;padding:2px;background:#2c2c2e;border-radius:7px}.segment button{border:0;background:transparent;color:#aeaeb2;border-radius:5px;padding:6px 9px;font-size:12px}.segment button.active{background:#636366;color:#fff}.device-list{min-height:54px}.device-row{display:grid;grid-template-columns:minmax(170px,1.3fr) minmax(130px,.9fr) 72px minmax(112px,.7fr) minmax(185px,auto);align-items:center;gap:12px;padding:13px 16px;border-top:1px solid #38383a}.device-row:first-child{border-top:0}.device-name{font-size:14px;font-weight:600;min-width:0}.device-meta,.muted{color:#8e8e93;font-size:12px;margin-top:4px;overflow-wrap:anywhere}.online{font-size:13px;color:#aeaeb2}.online.bound{color:#30d158}.state{font-size:13px;color:#aeaeb2}.state.active{color:#30d158}.state.wait{color:#ffd60a}.device-action{display:flex;justify-content:flex-end;align-items:center;gap:2px;flex-wrap:wrap}.empty{padding:24px 16px;text-align:center;color:#8e8e93;font-size:13px}dialog{width:min(420px,calc(100% - 28px));border:1px solid #48484a;border-radius:8px;background:#1c1c1e;color:#f5f5f7;padding:0;box-shadow:0 24px 70px rgba(0,0,0,.55)}dialog::backdrop{background:rgba(0,0,0,.68)}.dialog-body{padding:20px}.dialog-body h2{margin:0;font-size:18px}.dialog-body p{font-size:13px}.dialog-body input{width:100%;height:40px;margin-top:16px;border:1px solid #48484a;border-radius:7px;background:#2c2c2e;color:#fff;padding:0 11px;outline:none}.dialog-body input:focus{border-color:#0a84ff;box-shadow:0 0 0 3px rgba(10,132,255,.2)}.dialog-actions{display:flex;justify-content:flex-end;gap:8px;padding:12px 20px;border-top:1px solid #38383a}.dialog-actions button{height:36px;border:0;border-radius:7px;padding:0 14px}.dialog-cancel{background:#2c2c2e;color:#f5f5f7}.dialog-save{background:#0a84ff;color:#fff}@media(max-width:760px){.topbar-inner{height:auto;min-height:58px;padding:10px 14px;align-items:flex-start;flex-direction:column;gap:8px}.nav{width:100%;display:grid;grid-template-columns:repeat(3,1fr)}.nav a{text-align:center;padding:7px 5px}.wrap{padding:28px 14px 50px}.intro{align-items:flex-start;flex-direction:column}.health-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.health-item{border-bottom:1px solid #38383a}.health-item:nth-child(2n){border-right:0}.health-item:last-child{border-bottom:0}.add-row{grid-template-columns:1fr}.primary{width:100%}.device-row{grid-template-columns:1fr auto;gap:8px}.device-mac{display:none}.device-online{grid-column:1}.device-state{grid-column:1}.device-action{grid-column:2;grid-row:1/4;max-width:145px}.section-title{align-items:stretch;flex-direction:column}.device-controls{align-items:stretch;flex-direction:column}.device-search{width:100%}.segment{width:100%;display:grid;grid-template-columns:repeat(3,1fr)}.segment button{width:100%}}
-</style></head><body><header class="topbar"><div class="topbar-inner"><div class="brand">家庭旁路</div><nav class="nav"><a class="active" href="/">设备</a><a href="/rules">规则</a><a href="/airport/">机场与候选池</a></nav></div></header><main class="wrap"><div class="intro"><div><div class="eyebrow">SELECTIVE ROUTING</div><h1>设备管理</h1><p>只接管需要旁路的设备，其余家庭网络保持原样。</p></div><div class="overall" id="health"><span class="dot"></span><span>正在检查</span></div></div><section class="section"><div class="section-title"><h2>运行状态</h2></div><div class="group health-grid" id="healthChecks"></div></section><section class="section"><div class="section-title"><h2>加入旁路</h2></div><div class="group"><div class="add-row"><div class="field"><label for="ip">设备 IP 地址</label><input id="ip" inputmode="decimal" autocomplete="off" placeholder="__FAMILY_LAN_PREFIX__x"></div><button class="primary" onclick="enableDevice()">加入并校验</button></div><div class="help">系统会检查健康状态与规则冲突。也可以先在“全部在线”中找到设备，再加入旁路。</div><div class="status" id="status"></div></div></section><section class="section"><div class="section-title"><h2>设备</h2><div class="device-controls"><input id="deviceSearch" class="device-search" type="search" autocomplete="off" placeholder="搜索名称、IP 或 MAC"><div class="segment"><button data-filter="managed" class="active" onclick="setFilter('managed')">已接管</button><button data-filter="favorites" onclick="setFilter('favorites')">常用设备</button><button data-filter="online" onclick="setFilter('online')">全部在线</button></div></div></div><div class="group device-list" id="devices"><div class="empty">正在载入设备</div></div></section></main><dialog id="renameDialog"><form onsubmit="saveRename(event)"><div class="dialog-body"><h2>修改设备名称</h2><p>名称只保存在家庭旁路页面；留空保存可恢复路由器中的原名称。</p><input id="renameInput" maxlength="40" autocomplete="off" placeholder="输入设备名称"></div><div class="dialog-actions"><button type="button" class="dialog-cancel" onclick="closeRename()">取消</button><button type="submit" class="dialog-save">保存</button></div></form></dialog><script>
+</style></head><body><header class="topbar"><div class="topbar-inner"><div class="brand">家庭网络控制台</div><nav class="nav"><a class="active" href="/">设备</a><a href="/rules">规则</a><a href="/airport/">机场与候选池</a></nav></div></header><main class="wrap"><div class="intro"><div><div class="eyebrow">SELECTIVE ROUTING</div><h1>设备管理</h1><p>只接管需要旁路的设备，其余家庭网络保持原样。</p></div><div class="overall" id="health"><span class="dot"></span><span>正在检查</span></div></div><section class="section"><div class="section-title"><h2>运行状态</h2></div><div class="group health-grid" id="healthChecks"></div></section><section class="section"><div class="section-title"><h2>加入旁路</h2></div><div class="group"><div class="add-row"><div class="field"><label for="ip">设备 IP 地址</label><input id="ip" inputmode="decimal" autocomplete="off" placeholder="__FAMILY_LAN_PREFIX__x"></div><button class="primary" onclick="enableDevice()">加入并校验</button></div><div class="help">系统会检查健康状态与规则冲突。也可以先在“全部在线”中找到设备，再加入旁路。</div><div class="status" id="status"></div></div></section><section class="section"><div class="section-title"><h2>设备</h2><div class="device-controls"><input id="deviceSearch" class="device-search" type="search" autocomplete="off" placeholder="搜索名称、IP 或 MAC"><div class="segment"><button data-filter="managed" class="active" onclick="setFilter('managed')">已接管</button><button data-filter="favorites" onclick="setFilter('favorites')">常用设备</button><button data-filter="online" onclick="setFilter('online')">全部在线</button></div></div></div><div class="group device-list" id="devices"><div class="empty">正在载入设备</div></div></section></main><dialog id="renameDialog"><form onsubmit="saveRename(event)"><div class="dialog-body"><h2>修改设备名称</h2><p>名称只保存在家庭网络控制台页面；留空保存可恢复路由器中的原名称。</p><input id="renameInput" maxlength="40" autocomplete="off" placeholder="输入设备名称"></div><div class="dialog-actions"><button type="button" class="dialog-cancel" onclick="closeRename()">取消</button><button type="submit" class="dialog-save">保存</button></div></form></dialog><script>
 const csrf="__CSRF__",statusEl=document.querySelector('#status');let filter='managed',devices=[],deviceQuery='',editingMac='';function esc(s){return String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]))}function setStatus(message,ok=true){statusEl.textContent=message;statusEl.className='status '+(ok?'':'error')}async function api(path,opt={}){let response=await fetch(new URL(path,location.origin),{...opt,headers:{'Content-Type':'application/json','X-CSRF':csrf,...(opt.headers||{})}}),body=await response.json();if(!response.ok)throw Error(body.error||'请求失败');return body}function healthItem(name,ok,text){return `<div class="health-item ${ok?'':'bad'}"><b>${esc(name)}</b><span title="${esc(text)}">${esc(text)}</span></div>`}function deviceActions(d){let rename=`<button class="secondary" onclick="openRename('${d.mac}')">改名</button>`;if(d.managed)return rename+(d.fixed?'<span class="muted">固定设备</span>':`<button class="secondary danger" onclick="removeDevice('${d.ip}')">恢复直连</button>`);let join=`<button class="secondary" onclick="choose('${d.ip}')">加入旁路</button>`;if(filter==='favorites')return rename+join+`<button class="secondary danger" onclick="setFavorite('${d.mac}',false)">移出常用</button>`;let keep=d.favorite?`<button class="secondary danger" onclick="setFavorite('${d.mac}',false)">取消保留</button>`:`<button class="secondary" onclick="setFavorite('${d.mac}',true)">保留</button>`;return rename+join+keep}function render(){let q=deviceQuery.toLowerCase(),shown=devices.filter(d=>(filter==='managed'&&d.managed||filter==='favorites'&&d.favorite||filter==='online'&&d.status==='bound')&&(!q||`${d.name} ${d.ip} ${d.mac}`.toLowerCase().includes(q)));let empty={managed:'尚无已接管设备',favorites:'尚未保留常用设备，可在“全部在线”中添加',online:'当前没有可见的在线设备'}[filter];document.querySelector('#devices').innerHTML=shown.length?shown.map(d=>{let label=!d.managed?(d.favorite?'常用设备':'未接管'):d.effective?'已生效':'等待新流量',state=!d.managed?'':d.effective?'active':'wait';return `<div class="device-row"><div class="device-name">${esc(d.name)}<div class="device-meta">${esc(d.ip)}${d.static?' · 固定地址':''}${d.custom_name?' · 自定义名称':''}</div></div><div class="device-mac muted">${esc(d.mac)}</div><div class="device-online online ${d.status==='bound'?'bound':''}">${d.status==='bound'?'在线':'离线'}</div><div class="device-state state ${state}">${label}${d.managed?`<div class="device-meta">${d.packets} 个包</div>`:''}</div><div class="device-action">${deviceActions(d)}</div></div>`}).join(''):`<div class="empty">${empty}</div>`}function setFilter(value){filter=value;document.querySelectorAll('[data-filter]').forEach(b=>b.classList.toggle('active',b.dataset.filter===value));render()}async function load(){try{let data=await api('/api/devices'),summary=data.summary,checks=summary.checks||{},ready=summary.ready&&summary.netwatch==='up';devices=data.devices;let badge=document.querySelector('#health');badge.className='overall '+(ready?'':'bad');badge.innerHTML=`<span class="dot"></span><span>${ready?'旁路运行正常':'旁路需要检查'}</span>`;document.querySelector('#healthChecks').innerHTML=healthItem('RB5009',summary.router==='connected','管理连接')+healthItem('DNS',checks.dns,'国内解析')+healthItem('Mihomo',checks.mihomo,'控制接口')+healthItem('当前策略',checks.policy,summary.detail?.proxy||'未就绪')+healthItem('自动回退',summary.netwatch==='up',summary.netwatch==='up'?'已启用':'未就绪');render()}catch(e){setStatus(e.message,false)}}function choose(ip){document.querySelector('#ip').value=ip;document.querySelector('#ip').focus();window.scrollTo({top:document.querySelector('.add-row').offsetTop-90,behavior:'smooth'})}function openRename(mac){let d=devices.find(x=>x.mac===mac);if(!d)return;editingMac=mac;document.querySelector('#renameInput').value=d.name;document.querySelector('#renameDialog').showModal();requestAnimationFrame(()=>document.querySelector('#renameInput').select())}function closeRename(){document.querySelector('#renameDialog').close();editingMac=''}async function saveRename(event){event.preventDefault();let alias=document.querySelector('#renameInput').value.trim();try{await api('/api/device/preference',{method:'POST',body:JSON.stringify({mac:editingMac,alias})});closeRename();setStatus(alias?'设备名称已保存':'已恢复路由器原名称',true);await load()}catch(e){setStatus(e.message,false)}}async function setFavorite(mac,favorite){try{await api('/api/device/preference',{method:'POST',body:JSON.stringify({mac,favorite})});setStatus(favorite?'已加入常用设备':'已移出常用设备',true);await load()}catch(e){setStatus(e.message,false)}}async function enableDevice(){let ip=document.querySelector('#ip').value.trim();try{setStatus('正在检查并加入设备…',true);let result=await api('/api/enable',{method:'POST',body:JSON.stringify({ip})});setStatus(result.message,true);await load()}catch(e){setStatus(e.message,false)}}async function removeDevice(ip){if(!confirm(`将 ${ip} 恢复直连并清理旧连接？`))return;try{setStatus('正在恢复直连…',true);let result=await api('/api/remove',{method:'POST',body:JSON.stringify({ip})});setStatus(result.message,true);await load()}catch(e){setStatus(e.message,false)}}document.querySelector('#deviceSearch').addEventListener('input',event=>{deviceQuery=event.target.value.trim();render()});document.querySelector('#renameDialog').addEventListener('click',event=>{if(event.target.id==='renameDialog')closeRename()});load();setInterval(()=>{if(!document.querySelector('#renameDialog').open)load()},30000)
 </script></body></html>'''
 PAGE = PAGE.replace('<div class="eyebrow">SELECTIVE ROUTING</div>', '')
+PAGE = PAGE.replace(
+    '将 ${ip} 恢复直连并清理旧连接？',
+    '将 ${ip} 恢复为经 RB5009 直接上网，并清理旧连接？',
+    1,
+)
 PAGE = PAGE.replace(
     '.add-row{display:grid;',
     '.router-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}'
@@ -1661,6 +3517,7 @@ PAGE = PAGE.replace(
     '.system-item:nth-child(3n){border-right:0}.system-item:nth-last-child(-n+3){border-bottom:0}'
     '.system-label{color:#8e8e93;font-size:12px}.system-value{margin-top:8px;font-size:23px;line-height:1.15;font-weight:700;font-variant-numeric:tabular-nums}'
     '.system-detail{margin-top:8px;color:#8e8e93;font-size:12px;line-height:1.45;overflow-wrap:anywhere}'
+    '.thermal{padding-bottom:13px}.thermal-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:11px}.thermal-reading{display:flex;align-items:baseline;justify-content:space-between;gap:6px;padding:6px 7px;border-radius:6px;background:#2c2c2e}.thermal-reading span{min-width:0;color:#aeaeb2;font-size:11px;white-space:nowrap}.thermal-reading b{color:#f5f5f7;font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}.thermal.warn .thermal-reading b{color:#ffd60a}.thermal.bad .thermal-reading b{color:#ff453a}'
     '.system-item.warn .system-value{color:#ffd60a}.system-item.bad .system-value{color:#ff453a}'
     '.meter{height:4px;margin-top:10px;border-radius:2px;background:#38383a;overflow:hidden}.meter span{display:block;height:100%;background:#30d158}'
     '.system-item.warn .meter span{background:#ffd60a}.system-item.bad .meter span{background:#ff453a}'
@@ -1685,8 +3542,9 @@ function formatUptime(seconds){let total=Math.max(0,Math.floor(Number(seconds||0
 function formatRouterUptime(value){let units={w:'周',d:'天',h:'小时',m:'分钟',s:'秒'},parts=[];String(value||'').replace(/([0-9]+)(w|d|h|m|s)/g,(all,count,unit)=>{if(parts.length<3)parts.push(count+units[unit]);return all});return parts.join(' ')||'不可用'}
 function systemTone(value,warn,bad){return Number(value)>=bad?'bad':Number(value)>=warn?'warn':''}
 function systemItem(label,value,detail,tone='',percent=null){let meter=percent===null?'':`<div class="meter"><span style="width:${Math.max(0,Math.min(100,Number(percent)||0))}%"></span></div>`;return `<div class="system-item ${tone}"><div class="system-label">${esc(label)}</div><div class="system-value">${esc(value)}</div>${meter}<div class="system-detail">${esc(detail)}</div></div>`}
+function thermalItem(t,hdds){let values=[['CPU',t.cpu_c],['M.2 SSD',t.nvme_c],...hdds.slice().sort((a,b)=>String(a.name).localeCompare(String(b.name))).map((item,index)=>[`盘 ${index+1}`,item.temperature_c])],max=Math.max(...values.map(item=>Number(item[1])||0)),tone=systemTone(max,50,60);return `<div class="system-item thermal ${tone}"><div class="system-label">温度</div><div class="thermal-grid">${values.map(([label,value])=>`<div class="thermal-reading"><span>${esc(label)}</span><b>${value==null?'--':`${Number(value).toFixed(0)}°C`}</b></div>`).join('')}</div></div>`}
 function renderRouter(r){let target=document.querySelector('#routerStatus'),updated=document.querySelector('#routerUpdated');if(!r?.available){target.innerHTML='<div class="empty">路由器资源暂时不可读</div>';updated.textContent='读取失败';return}target.innerHTML=systemItem('RouterOS',r.version||'不可用',r.board_name||'RB5009')+systemItem('CPU',`${Number(r.cpu_percent).toFixed(0)}%`,`${r.cpu_count} 核 · ${r.cpu_frequency} MHz`,systemTone(r.cpu_percent,75,90),r.cpu_percent)+systemItem('可用内存',formatBytes(r.memory_free),`总计 ${formatBytes(r.memory_total)} · 已用 ${Number(r.memory_percent).toFixed(1)}%`,systemTone(r.memory_percent,75,90),r.memory_percent)+systemItem('运行时间',formatRouterUptime(r.uptime),'RouterOS 持续运行');updated.textContent=new Date().toLocaleTimeString('zh-CN',{hour12:false})}
-async function loadSystem(){try{let s=await api('/api/system/status'),c=s.cpu,m=s.memory,t=s.temperature,d=s.disk,x=s.docker,tempValue=t.cpu_c==null?'不可用':`${Number(t.cpu_c).toFixed(1)}°C`,tempDetail=t.nvme_c==null?'NVMe 温度不可用':`NVMe ${Number(t.nvme_c).toFixed(1)}°C`,dockerValue=x.running==null?'不可用':`${x.running} / ${x.total}`,dockerDetail=x.unhealthy==null?'状态不可用':x.unhealthy?`${x.unhealthy} 个容器异常`:x.total>x.running?`运行中均正常 · ${x.total-x.running} 个已停止`:'运行中容器均正常';document.querySelector('#systemStatus').innerHTML=systemItem('CPU',`${Number(c.percent).toFixed(1)}%`,`${c.cores} 核 · 负载 ${c.load_1m} / ${c.load_5m}`,systemTone(c.percent,75,90),c.percent)+systemItem('内存',`${Number(m.percent).toFixed(1)}%`,`${formatBytes(m.used)} / ${formatBytes(m.total)} · Swap ${Number(m.swap_percent).toFixed(1)}%`,systemTone(m.percent,75,90),m.percent)+systemItem('温度',tempValue,tempDetail,systemTone(t.cpu_c||0,70,85))+systemItem('M.2 Docker 盘',`${Number(d.percent).toFixed(1)}%`,`${formatBytes(d.used)} / ${formatBytes(d.total)}`,systemTone(d.percent,75,90),d.percent)+systemItem('Docker',dockerValue,dockerDetail,x.unhealthy?'bad':'')+systemItem('运行时间',formatUptime(s.uptime_seconds),`内核 ${s.kernel}`);document.querySelector('#systemUpdated').textContent=`${s.healthy?'状态正常':'需要检查'} · ${new Date(s.updated_at*1000).toLocaleTimeString('zh-CN',{hour12:false})}`}catch(e){document.querySelector('#systemStatus').innerHTML=`<div class="empty">读取失败：${esc(e.message)}</div>`;document.querySelector('#systemUpdated').textContent='读取失败'}}
+async function loadSystem(){try{let s=await api('/api/system/status'),c=s.cpu,m=s.memory,t=s.temperature,d=s.disk,x=s.docker,hdds=Array.isArray(t.hdd)?t.hdd:[],dockerValue=x.running==null?'不可用':`${x.running} / ${x.total}`,dockerDetail=x.unhealthy==null?'状态不可用':x.unhealthy?`${x.unhealthy} 个容器异常`:x.total>x.running?`运行中均正常 · ${x.total-x.running} 个已停止`:'运行中容器均正常';document.querySelector('#systemStatus').innerHTML=systemItem('CPU',`${Number(c.percent).toFixed(1)}%`,`${c.cores} 核 · 负载 ${c.load_1m} / ${c.load_5m}`,systemTone(c.percent,75,90),c.percent)+systemItem('内存',`${Number(m.percent).toFixed(1)}%`,`${formatBytes(m.used)} / ${formatBytes(m.total)} · Swap ${Number(m.swap_percent).toFixed(1)}%`,systemTone(m.percent,75,90),m.percent)+thermalItem(t,hdds)+systemItem('M.2 Docker 盘',`${Number(d.percent).toFixed(1)}%`,`${formatBytes(d.used)} / ${formatBytes(d.total)}`,systemTone(d.percent,75,90),d.percent)+systemItem('Docker',dockerValue,dockerDetail,x.unhealthy?'bad':'')+systemItem('运行时间',formatUptime(s.uptime_seconds),`内核 ${s.kernel}`);document.querySelector('#systemUpdated').textContent=`${s.healthy?'状态正常':'需要检查'} · ${new Date(s.updated_at*1000).toLocaleTimeString('zh-CN',{hour12:false})}`}catch(e){document.querySelector('#systemStatus').innerHTML=`<div class="empty">读取失败：${esc(e.message)}</div>`;document.querySelector('#systemUpdated').textContent='读取失败'}}
 function deviceActions(d){''',
     1,
 )
@@ -1696,17 +3554,62 @@ PAGE = PAGE.replace(
 function trafficBytes(value){let n=Number(value||0),units=['B','KB','MB','GB','TB'],i=0;while(n>=1024&&i<units.length-1){n/=1024;i++}return `${n.toFixed(i?1:0)} ${units[i]}`}
 function handshakeAge(seconds){if(seconds==null)return '从未';let n=Number(seconds);return n<60?`${n} 秒前`:n<3600?`${Math.floor(n/60)} 分钟前`:n<86400?`${Math.floor(n/3600)} 小时前`:`${Math.floor(n/86400)} 天前`}
 function wireguardStateText(item){return item.kind==='site'&&item.probe?.reachable?`${item.state_text} · ${item.probe.latency_ms} ms`:item.state_text}
-function renderWireGuard(){let target=document.querySelector('#wireguardStatus');target.innerHTML=wireguardData.interfaces.length?wireguardData.interfaces.map(item=>`<div class="wireguard-row"><div class="wg-identity"><span class="wg-dot ${esc(item.state)}"></span><div><b>${esc(item.label)}</b><div class="muted">${esc(item.name)} · UDP ${esc(item.listen_port||'--')}</div></div></div><div class="wg-metric"><span>状态</span><b class="wg-tone ${esc(item.state)}">${esc(wireguardStateText(item))}</b></div><div class="wg-metric"><span>最近握手</span><b>${esc(handshakeAge(item.last_handshake_seconds))}</b></div><div class="wg-metric"><span>对端</span><b>${item.peer_active} / ${item.peer_total} 活跃</b></div><div class="wg-metric"><span>累计流量</span><b>↓ ${trafficBytes(item.rx_bytes)} · ↑ ${trafficBytes(item.tx_bytes)}</b></div><button class="wg-detail" onclick="openWireGuard('${esc(item.name)}')" aria-label="查看 ${esc(item.label)} 详情">详情 <span>›</span></button></div>`).join(''):'<div class="empty">未发现 WireGuard 接口</div>'}
-function wireguardDetail(item){let routes=item.routes.length?item.routes.map(route=>`<div class="wg-detail-row"><span>${esc(route.destination)}</span><b class="${route.active?'good':'bad-text'}">${route.active?'路由生效':'路由未生效'}</b></div>`).join(''):'<div class="empty compact">该接口没有独立远端路由</div>',peers=item.peers.length?item.peers.map(peer=>`<div class="wg-peer"><div><b>${esc(peer.name)}</b><span>${esc(peer.allowed_address||'未声明地址')}</span></div><div><b class="${peer.active?'good':''}">${handshakeAge(peer.last_handshake_seconds)}</b><span>${esc(peer.endpoint)} · ↓ ${trafficBytes(peer.rx_bytes)} / ↑ ${trafficBytes(peer.tx_bytes)}</span></div></div>`).join(''):'<div class="empty compact">没有对端</div>',events=wireguardData.events.filter(event=>event.interface===item.name);document.querySelector('#wireguardDialogTitle').textContent=item.label;document.querySelector('#wireguardDialogBody').innerHTML=`<div class="wg-detail-summary"><div><span>当前状态</span><b class="wg-tone ${esc(item.state)}">${esc(wireguardStateText(item))}</b></div><div><span>接口</span><b>${esc(item.name)} · MTU ${esc(item.mtu||'--')}</b></div><div><span>NAT</span><b>${item.kind==='mobile'?(item.nat_ready?'已就绪':'需要检查'):'不适用'}</b></div></div><h3>对端</h3><div class="wg-detail-group">${peers}</div><h3>远端路由</h3><div class="wg-detail-group">${routes}</div><h3>最近状态变化</h3><div class="wg-detail-group">${events.length?events.slice().reverse().map(event=>`<div class="wg-detail-row"><span>${new Date(event.timestamp*1000).toLocaleString('zh-CN',{hour12:false})}</span><b>${esc(event.message)}</b></div>`).join(''):'<div class="empty compact">最近 7 天没有状态变化</div>'}</div>`}
+function wireguardEditButton(key,label,defaultLabel,alias){return `<button class="wg-edit" type="button" title="编辑" aria-label="编辑 ${esc(label)}" data-tooltip="编辑" data-wg-key="${esc(key)}" data-wg-label="${esc(label)}" data-wg-default-label="${esc(defaultLabel)}" data-wg-alias="${esc(alias||'')}">✎</button>`}
+function wireguardInterfaceRow(item){return `<div class="wireguard-row"><div class="wg-identity"><span class="wg-dot ${esc(item.state)}"></span><div class="wg-name"><b>${esc(item.label)}</b>${wireguardEditButton(item.alias_key,item.label,item.default_label,item.alias)}<div class="muted">${esc(item.name)} · UDP ${esc(item.listen_port||'--')}</div></div></div><div class="wg-metric"><span>状态</span><b class="wg-tone ${esc(item.state)}">${esc(wireguardStateText(item))}</b></div><div class="wg-metric"><span>最近握手</span><b>${esc(handshakeAge(item.last_handshake_seconds))}</b></div><div class="wg-metric"><span>对端</span><b>${item.peer_active} / ${item.peer_total} 活跃</b></div><div class="wg-metric"><span>累计流量</span><b>↓ ${trafficBytes(item.rx_bytes)} · ↑ ${trafficBytes(item.tx_bytes)}</b></div><button class="wg-detail" onclick="openWireGuard('${esc(item.name)}')" aria-label="查看 ${esc(item.label)} 详情">详情 <span>›</span></button></div>`}function wireguardMobilePeerRow(item,peer){return `<div class="wireguard-row wg-mobile-peer"><div class="wg-identity"><span class="wg-dot ${esc(peer.state)}"></span><div class="wg-name"><b>${esc(peer.display_name||peer.name)}</b>${wireguardEditButton(peer.alias_key,peer.display_name||peer.name,peer.default_label||peer.name,peer.alias)}<div class="muted">回家设备 · ${esc(peer.name)}</div></div></div><div class="wg-metric"><span>状态</span><b class="wg-tone ${esc(peer.state)}">${esc(peer.state_text)}</b></div><div class="wg-metric"><span>最近握手</span><b>${esc(handshakeAge(peer.last_handshake_seconds))}</b></div><div class="wg-metric"><span>分配地址</span><b>${esc(peer.allowed_address||'--')}</b></div><div class="wg-metric"><span>累计流量</span><b>↓ ${trafficBytes(peer.rx_bytes)} · ↑ ${trafficBytes(peer.tx_bytes)}</b></div><button class="wg-detail" onclick="openWireGuard('${esc(item.name)}')" aria-label="查看 ${esc(peer.display_name||peer.name)} 所在隧道详情">详情 <span>›</span></button></div>`}function renderWireGuard(){let target=document.querySelector('#wireguardStatus'),rows=[];wireguardData.interfaces.forEach(item=>{if(item.kind!=='mobile'){rows.push(wireguardInterfaceRow(item));return}let clients=(item.peers||[]).filter(peer=>peer.visible_mobile_client);if(clients.length)rows.push(...clients.map(peer=>wireguardMobilePeerRow(item,peer)));else rows.push(wireguardInterfaceRow(item))});target.innerHTML=rows.length?rows.join(''):'<div class="empty">未发现 WireGuard 接口</div>';target.querySelectorAll('.wg-edit').forEach(button=>button.addEventListener('click',()=>openWireGuardRename(button.dataset.wgKey,button.dataset.wgLabel,button.dataset.wgDefaultLabel,button.dataset.wgAlias)))}
+function wireguardDetail(item){let routes=item.routes.length?item.routes.map(route=>`<div class="wg-detail-row"><span>${esc(route.destination)}</span><b class="${route.active?'good':'bad-text'}">${route.active?'路由生效':'路由未生效'}</b></div>`).join(''):'<div class="empty compact">该接口没有独立远端路由</div>',peers=item.peers.length?item.peers.map(peer=>`<div class="wg-peer"><div><b>${esc(peer.display_name||peer.name)}</b><span>${esc(peer.name)} · ${esc(peer.allowed_address||'未声明地址')}</span></div><div><b class="wg-tone ${esc(peer.state)}">${esc(peer.state_text)} · ${handshakeAge(peer.last_handshake_seconds)}</b><span>${esc(peer.endpoint)} · ↓ ${trafficBytes(peer.rx_bytes)} / ↑ ${trafficBytes(peer.tx_bytes)}</span></div></div>`).join(''):'<div class="empty compact">没有对端</div>',events=wireguardData.events.filter(event=>event.interface===item.name);document.querySelector('#wireguardDialogTitle').textContent=item.label;document.querySelector('#wireguardDialogBody').innerHTML=`<div class="wg-detail-summary"><div><span>当前状态</span><b class="wg-tone ${esc(item.state)}">${esc(wireguardStateText(item))}</b></div><div><span>接口</span><b>${esc(item.name)} · MTU ${esc(item.mtu||'--')}</b></div><div><span>NAT</span><b>${item.kind==='mobile'?(item.nat_ready?'已就绪':'需要检查'):'不适用'}</b></div></div><h3>对端</h3><div class="wg-detail-group">${peers}</div><h3>远端路由</h3><div class="wg-detail-group">${routes}</div><h3>最近状态变化</h3><div class="wg-detail-group">${events.length?events.slice().reverse().map(event=>`<div class="wg-detail-row"><span>${new Date(event.timestamp*1000).toLocaleString('zh-CN',{hour12:false})}</span><b>${esc(event.message)}</b></div>`).join(''):'<div class="empty compact">最近 7 天没有状态变化</div>'}</div>`}
 function openWireGuard(name){let item=wireguardData.interfaces.find(value=>value.name===name);if(!item)return;wireguardSelected=name;wireguardDetail(item);document.querySelector('#wireguardDialog').showModal()}
 function closeWireGuard(){wireguardSelected='';document.querySelector('#wireguardDialog').close()}
+let editingWireGuardKey='';
+function openWireGuardRename(key,label,defaultLabel,alias){editingWireGuardKey=key;let input=document.querySelector('#wireguardRenameInput');input.value=alias||'';input.placeholder=defaultLabel||label;document.querySelector('#wireguardRenameHint').textContent=`当前显示：${label}；留空保存可恢复默认名称。`;document.querySelector('#wireguardRenameDialog').showModal();requestAnimationFrame(()=>input.focus())}
+function closeWireGuardRename(){document.querySelector('#wireguardRenameDialog').close();editingWireGuardKey=''}
+async function saveWireGuardRename(event){event.preventDefault();let alias=document.querySelector('#wireguardRenameInput').value.trim();try{let result=await api('/api/wireguard/preference',{method:'POST',body:JSON.stringify({key:editingWireGuardKey,alias})});closeWireGuardRename();setStatus(result.message,true);await loadWireGuard()}catch(e){setStatus(e.message,false)}}
 async function loadWireGuard(){try{wireguardData=await api('/api/wireguard/status');renderWireGuard();if(wireguardSelected){let item=wireguardData.interfaces.find(value=>value.name===wireguardSelected);if(item)wireguardDetail(item)}document.querySelector('#wireguardUpdated').textContent=new Date(wireguardData.updated_at*1000).toLocaleTimeString('zh-CN',{hour12:false})}catch(e){document.querySelector('#wireguardStatus').innerHTML=`<div class="empty">读取失败：${esc(e.message)}</div>`;document.querySelector('#wireguardUpdated').textContent='读取失败'}}
 function deviceActions(d){''',
     1,
 )
 PAGE = PAGE.replace(
     "load();setInterval(()=>{if(!document.querySelector('#renameDialog').open)load()},30000)",
-    "load();loadSystem();loadWireGuard();setInterval(loadSystem,10000);setInterval(loadWireGuard,10000);setInterval(()=>{if(!document.querySelector('#renameDialog').open)load()},30000)",
+    "setupRuntimeFold('bypassStatus');setupRuntimeFold('z4Status');load();loadSystem();loadWireGuard();setInterval(loadSystem,10000);setInterval(()=>{if(!document.querySelector('#wireguardRenameDialog').open)loadWireGuard()},10000);setInterval(()=>{if(!document.querySelector('#renameDialog').open)load()},30000)",
+    1,
+)
+PAGE = PAGE.replace(
+    "onclick=\"openWireGuard('${esc(item.name)}')\" aria-label=\"查看 ${esc(peer.display_name||peer.name)} 所在隧道详情\"",
+    "onclick=\"openWireGuardPeer('${esc(item.name)}','${esc(peer.name)}')\" aria-label=\"查看 ${esc(peer.display_name||peer.name)} 详情\"",
+    1,
+)
+PAGE = PAGE.replace(
+    "let wireguardData={interfaces:[],events:[]},wireguardSelected='';",
+    "let wireguardData={interfaces:[],events:[]},wireguardSelected=null;",
+    1,
+)
+PAGE = PAGE.replace(
+    "function openWireGuard(name){let item=wireguardData.interfaces.find(value=>value.name===name);if(!item)return;wireguardSelected=name;wireguardDetail(item);document.querySelector('#wireguardDialog').showModal()}",
+    "function openWireGuard(name){let item=wireguardData.interfaces.find(value=>value.name===name);if(!item)return;wireguardSelected={interface:name,peer:null};wireguardDetail(item);document.querySelector('#wireguardDialog').showModal()}function wireguardPeerDetail(item,peer){let routes=item.routes.length?item.routes.map(route=>`<div class=\"wg-detail-row\"><span>${esc(route.destination)}</span><b class=\"${route.active?'good':'bad-text'}\">${route.active?'路由生效':'路由未生效'}</b></div>`).join(''):'<div class=\"empty compact\">该接口没有独立远端路由</div>',events=wireguardData.events.filter(event=>event.interface===item.name);document.querySelector('#wireguardDialogTitle').textContent=peer.display_name||peer.name;document.querySelector('#wireguardDialogBody').innerHTML=`<div class=\"wg-detail-summary\"><div><span>当前状态</span><b class=\"wg-tone ${esc(peer.state)}\">${esc(peer.state_text)}</b></div><div><span>分配地址</span><b>${esc(peer.allowed_address||'未声明地址')}</b></div><div><span>所属接口</span><b>${esc(item.label)} · UDP ${esc(item.listen_port||'--')}</b></div></div><h3>本设备连接</h3><div class=\"wg-detail-group\"><div class=\"wg-detail-row\"><span>最近握手</span><b>${esc(handshakeAge(peer.last_handshake_seconds))}</b></div><div class=\"wg-detail-row\"><span>当前端点</span><b>${esc(peer.endpoint||'未建立')}</b></div><div class=\"wg-detail-row\"><span>累计流量</span><b>↓ ${trafficBytes(peer.rx_bytes)} / ↑ ${trafficBytes(peer.tx_bytes)}</b></div></div><h3>所属接口远端路由</h3><div class=\"wg-detail-group\">${routes}</div><h3>最近接口状态变化</h3><div class=\"wg-detail-group\">${events.length?events.slice().reverse().map(event=>`<div class=\"wg-detail-row\"><span>${new Date(event.timestamp*1000).toLocaleString('zh-CN',{hour12:false})}</span><b>${esc(event.message)}</b></div>`).join(''):'<div class=\"empty compact\">最近 7 天没有状态变化</div>'}</div>`}function openWireGuardPeer(interfaceName,peerName){let item=wireguardData.interfaces.find(value=>value.name===interfaceName),peer=item?.peers?.find(value=>value.name===peerName);if(!item||!peer)return;wireguardSelected={interface:interfaceName,peer:peerName};wireguardPeerDetail(item,peer);document.querySelector('#wireguardDialog').showModal()}",
+    1,
+)
+PAGE = PAGE.replace(
+    "function closeWireGuard(){wireguardSelected='';document.querySelector('#wireguardDialog').close()}",
+    "function closeWireGuard(){wireguardSelected=null;document.querySelector('#wireguardDialog').close()}",
+    1,
+)
+PAGE = PAGE.replace(
+    "if(wireguardSelected){let item=wireguardData.interfaces.find(value=>value.name===wireguardSelected);if(item)wireguardDetail(item)}",
+    "if(wireguardSelected){let item=wireguardData.interfaces.find(value=>value.name===wireguardSelected.interface),peer=item?.peers?.find(value=>value.name===wireguardSelected.peer);if(item&&peer)wireguardPeerDetail(item,peer);else if(item)wireguardDetail(item)}",
+    1,
+)
+PAGE = PAGE.replace(
+    "onclick=\"openWireGuardPeer('${esc(item.name)}','${esc(peer.name)}')\"",
+    "onclick=\"openWireGuardPeer('${esc(item.name)}','${esc(peer.id)}')\"",
+    1,
+)
+PAGE = PAGE.replace(
+    "function openWireGuardPeer(interfaceName,peerName){let item=wireguardData.interfaces.find(value=>value.name===interfaceName),peer=item?.peers?.find(value=>value.name===peerName);if(!item||!peer)return;wireguardSelected={interface:interfaceName,peer:peerName};wireguardPeerDetail(item,peer);document.querySelector('#wireguardDialog').showModal()}",
+    "function openWireGuardPeer(interfaceName,peerId){let item=wireguardData.interfaces.find(value=>value.name===interfaceName),peer=item?.peers?.find(value=>value.id===peerId);if(!item||!peer)return;wireguardSelected={interface:interfaceName,peer:peerId};wireguardPeerDetail(item,peer);document.querySelector('#wireguardDialog').showModal()}",
+    1,
+)
+PAGE = PAGE.replace(
+    "let item=wireguardData.interfaces.find(value=>value.name===wireguardSelected.interface),peer=item?.peers?.find(value=>value.name===wireguardSelected.peer);",
+    "let item=wireguardData.interfaces.find(value=>value.name===wireguardSelected.interface),peer=item?.peers?.find(value=>value.id===wireguardSelected.peer);",
     1,
 )
 PAGE = PAGE.replace(
@@ -1726,27 +3629,89 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     "badge.className='overall '+(ready?'':'bad');badge.innerHTML=`<span class=\"dot\"></span><span>${ready?'旁路运行正常':'旁路需要检查'}</span>`;",
-    "badge.className='overall '+(!ready?'bad':warn?'warn':'');badge.innerHTML=`<span class=\"dot\"></span><span>${!ready?'旁路需要检查':warn?'运行正常 · 配置需核对':'旁路运行正常'}</span>`;",
+    "badge.className='overall '+(!ready?'bad':warn?'warn':'');badge.innerHTML=`<span class=\"dot\"></span><span>${!ready?'旁路需要检查':warn?'运行正常 · 配置需核对':'旁路运行正常'}</span>`;let bypassSummary=document.querySelector('#bypassUpdated');if(bypassSummary){let critical=!ready||drift.length>0;bypassSummary.textContent=critical?'核心服务需要检查':'RB5009、Mihomo、自动回退正常';bypassSummary.className='summary-hint '+(critical?'runtime-bad':'runtime-good');autoOpenFold('bypassStatus',critical)}",
+    1,
+)
+PAGE = PAGE.replace(
+    "document.querySelector('#healthChecks').innerHTML=healthItem('RB5009',summary.router==='connected','管理连接')+healthItem('DNS',checks.dns,'国内解析')+healthItem('Mihomo',checks.mihomo,'控制接口')+healthItem('当前策略',checks.policy,summary.detail?.proxy||'未就绪')+healthItem('自动回退',summary.netwatch==='up',summary.netwatch==='up'?'已启用':'未就绪');render()",
+    "document.querySelector('#healthChecks').innerHTML=renderStatusDashboard(summary,checks,drift);render()",
     1,
 )
 PAGE = PAGE.replace(
     "healthItem('自动回退',summary.netwatch==='up',summary.netwatch==='up'?'已启用':'未就绪');render()",
-    "healthItem('自动回退',summary.netwatch==='up',summary.netwatch==='up'?'已启用，故障时自动切换':'未就绪')+healthItem('配置对账',!drift.length,drift.join('；')||'页面、路由与状态一致')+healthItem('IPv6',true,summary.ipv6_policy+' IPv6 绕行')+healthItem('备份',!!summary.backup,summary.backup?'最近备份 '+summary.backup.time:'尚未配置')+healthItem('UPnP',!summary.upnp_enabled,summary.upnp_enabled?'当前已开启 · '+summary.upnp_mappings+' 个动态映射':'已关闭 · '+summary.upnp_mappings+' 条历史映射等待自然过期')+healthItem('版本',true,summary.version);render()",
+    "healthItem('自动回退',summary.netwatch==='up',summary.netwatch==='up'?'已启用':'未就绪',summary.netwatch==='up'?'故障时自动切换':'等待探针恢复')+healthItem('配置对账',!drift.length,drift.length?'需核对':'一致',drift.join('；')||'页面、路由与状态一致')+healthItem('IPv6',true,summary.ipv6_policy,'纳管设备 IPv6 绕行')+healthItem('备份',!!summary.backup,summary.backup?summary.backup.time:'尚未配置',summary.backup?'最近完整备份':'需要先执行一次备份')+healthItem('UPnP',!summary.upnp_enabled,summary.upnp_enabled?'已开启':'已关闭',summary.upnp_enabled?summary.upnp_mappings+' 个动态映射':summary.upnp_mappings+' 条历史映射等待自然过期')+healthItem('版本',true,summary.version,'页面控制版本');render()",
     1,
 )
 PAGE = PAGE.replace(
     "healthItem('DNS',checks.dns,'国内解析')",
-    "healthItem('国内 DNS',checks.dns,dnsText(summary.dns_performance?.groups?.domestic,summary.dns_performance?.p95_ms))+healthItem('国外 DNS',checks.dns,dnsText(summary.dns_performance?.groups?.foreign,summary.dns_performance?.p95_ms))",
+    "dnsHealthItem('国内 DNS',checks.dns,summary.dns_performance?.groups?.domestic,summary.dns_performance?.p95_ms)+dnsHealthItem('国外 DNS',checks.dns,summary.dns_performance?.groups?.foreign,summary.dns_performance?.p95_ms)",
     1,
 )
 PAGE = PAGE.replace(
     "function healthItem(name,ok,text){",
-    "function dnsText(item,fallback){return item?`${item.name||'上游'} · 平均 ${Number(item.average_ms||0).toFixed(1)} ms · P95 ${Number(item.p95_ms||0).toFixed(1)} ms · 错误 ${Number(item.error_rate||0).toFixed(2)}%`:`整体 P95 ${Number(fallback||0).toFixed(1)} ms`}function healthItem(name,ok,text){",
+    "function dashMetric(value,unit='ms'){return `${Number(value||0).toFixed(1)}<small>${unit}</small>`}function dashDns(name,item){let avg=Number(item?.average_ms||0),p95=Number(item?.p95_ms||0),error=Number(item?.error_rate||0),source=item?.name||'当前上游',tone=error>=10?'bad':error>=1?'warn':'';return `<article class=\"dash-dns ${tone}\"><div class=\"dash-dns-head\"><b>${esc(name)}</b><span>${esc(source)}</span></div><div class=\"dash-metrics\"><div><span>平均</span><strong>${dashMetric(avg)}</strong></div><div><span>P95</span><strong>${dashMetric(p95)}</strong></div><div class=\"dash-error\"><span>错误率</span><strong>${Number(error).toFixed(2)}<small>%</small></strong></div></div></article>`}function dashSetting(name,detail,state,tone='good'){return `<div class=\"dash-setting\"><div><b>${esc(name)}</b><span title=\"${esc(detail)}\">${esc(detail)}</span></div><em class=\"${tone}\">${esc(state)}</em></div>`}function renderStatusDashboard(summary,checks,drift){let domestic=summary.dns_performance?.groups?.domestic,foreign=summary.dns_performance?.groups?.foreign,foreignError=Number(foreign?.error_rate||0),notice=foreignError>=1?`<div class=\"dash-alert ${foreignError>=10?'bad':'warn'}\"><i></i>国外 DNS 需关注 · 错误率 ${foreignError.toFixed(2)}%</div>`:'',routerOk=summary.router==='connected',mihomoOk=!!checks.mihomo,failoverOk=summary.netwatch==='up',policy=summary.detail?.proxy||'未就绪',backup=summary.backup?.time||'尚未配置';return `${notice}<section class=\"dash-panel dash-core\"><div class=\"dash-panel-head\"><b>核心服务</b><span>管理、代理与自动回退</span></div><div class=\"dash-core-grid\"><div class=\"dash-core-item ${routerOk?'':'bad'}\"><small>RB5009</small><strong>${routerOk?'已连接':'不可用'}</strong><span>${summary.router_resource?.available?'管理接口与资源读取正常':'管理接口需要检查'}</span></div><div class=\"dash-core-item ${mihomoOk?'':'bad'}\"><small>Mihomo</small><strong>${mihomoOk?'运行正常':'不可用'}</strong><span title=\"${esc(policy)}\">当前出口：${esc(policy)}</span></div><div class=\"dash-core-item ${failoverOk?'':'bad'}\"><small>自动回退</small><strong>${failoverOk?'已启用':'未就绪'}</strong><span>${failoverOk?'当前出口故障时自动切换':'等待探针恢复'}</span></div></div></section><div class=\"dash-dns-grid\">${dashDns('国内 DNS',domestic)}${dashDns('国外 DNS',foreign)}</div><section class=\"dash-panel dash-settings\"><div class=\"dash-panel-head\"><b>运行设置</b><span>配置与保护状态</span></div><div class=\"dash-settings-grid\">${dashSetting('当前策略',policy,'已生效')}${dashSetting('配置对账',drift.length?drift.join('；'):'页面、路由与状态一致',drift.length?'需核对':'一致',drift.length?'warn':'good')}${dashSetting('IPv6',summary.ipv6_policy||'纳管设备 IPv6 绕行','受控','neutral')}${dashSetting('UPnP',summary.upnp_enabled?`${summary.upnp_mappings||0} 个动态映射`:`${summary.upnp_mappings||0} 条动态映射`,summary.upnp_enabled?'已开启':'已关闭',summary.upnp_enabled?'warn':'neutral')}${dashSetting('备份',backup,summary.backup?'可恢复':'未配置',summary.backup?'good':'warn')}</div></section>`}function dnsHealthItem(name,ok,item,fallback){if(!item)return healthItem(name,ok,`整体 P95 ${Number(fallback||0).toFixed(1)} ms`);let avg=Number(item.average_ms||0),p95=Number(item.p95_ms||0),error=Number(item.error_rate||0),level=!ok?'bad':error>=10?'bad':error>=1?'warn':'';return `<div class=\"health-item dns-health ${level}\"><b>${esc(name)}</b><div class=\"dns-source\">${esc(item.name||'当前上游')}</div><div class=\"dns-metrics\"><div><span>平均</span><strong>${avg.toFixed(1)}<small> ms</small></strong></div><div><span>P95</span><strong>${p95.toFixed(1)}<small> ms</small></strong></div><div class=\"dns-error\"><span>错误率</span><strong>${error.toFixed(2)}<small>%</small></strong></div></div></div>`}function healthItem(name,ok,primary,detail=''){return `<div class=\"health-item ${ok?'':'bad'}\"><b>${esc(name)}</b><div class=\"status-primary\">${esc(primary)}</div>${detail?`<div class=\"status-detail\">${esc(detail)}</div>`:''}</div>`}function legacyHealthItem(name,ok,text){",
+    1,
+)
+PAGE = PAGE.replace(
+    "function dashDns(name,item){",
+    "function dashDns(name,item,notice=''){",
+    1,
+)
+PAGE = PAGE.replace(
+    "source=item?.name||'当前上游',tone=error>=10?'bad':error>=1?'warn':'';return `<article class=\"dash-dns ${tone}\"><div class=\"dash-dns-head\"><b>${esc(name)}</b>",
+    "source=item?.name||'当前上游',tone=error>=10?'bad':error>=1?'warn':'',warning=notice?`<span class=\"dash-warning\" tabindex=\"0\" data-tooltip=\"${esc(notice)}\" aria-label=\"${esc(notice)}\">!</span>`:'';return `<article class=\"dash-dns ${tone}\"><div class=\"dash-dns-head\"><b>${esc(name)}${warning}</b>",
+    1,
+)
+PAGE = PAGE.replace(
+    "foreignError=Number(foreign?.error_rate||0),notice=foreignError>=1?`<div class=\"dash-alert ${foreignError>=10?'bad':'warn'}\"><i></i>国外 DNS 累计尝试异常 ${foreignError.toFixed(2)}% · 双上游竞速不等于设备解析失败</div>`:'',routerOk",
+    "foreignError=Number(foreign?.error_rate||0),foreignNotice=foreignError>=1?`国外 DNS 累计尝试异常 ${foreignError.toFixed(2)}% · 双上游竞速不等于设备解析失败`:'',routerOk",
+    1,
+)
+PAGE = PAGE.replace("return `${notice}<section class=\"dash-panel dash-core\">", "return `<section class=\"dash-panel dash-core\">", 1)
+PAGE = PAGE.replace("${dashDns('国外 DNS',foreign)}</div>", "${dashDns('国外 DNS',foreign,foreignNotice)}</div>", 1)
+PAGE = PAGE.replace(
+    "</style></head>",
+    ".dash-warning{position:relative;display:inline-grid;place-items:center;width:15px;height:15px;margin-left:6px;border-radius:50%;background:#ffd60a;color:#2c2416;font-size:11px;font-weight:800;vertical-align:1px;cursor:help;overflow:visible!important;white-space:normal!important}.dash-warning:after{position:absolute;z-index:12;bottom:calc(100% + 8px);left:50%;width:max-content;max-width:min(300px,70vw);padding:7px 9px;border:1px solid #73521c;border-radius:6px;background:#2c2416;color:#ffd08a;box-shadow:0 8px 20px rgba(0,0,0,.35);content:attr(data-tooltip);font-size:12px;font-weight:500;line-height:1.45;opacity:0;pointer-events:none;transform:translate(-50%,4px);transition:opacity .08s ease,transform .08s ease;white-space:normal}.dash-warning:hover:after,.dash-warning:focus-visible:after{opacity:1;transform:translate(-50%,0)}.dash-dns.bad .dash-warning{background:#ff6961;color:#2c1d1d}</style></head>",
+    1,
+)
+PAGE = PAGE.replace(
+    "DNS ${foreignError.toFixed(1)}% 提醒",
+    "DNS ${foreignError.toFixed(1)}% 尝试异常（累计）",
+    1,
+)
+PAGE = PAGE.replace(
+    "国外 DNS 需关注 · 错误率 ${foreignError.toFixed(2)}%",
+    "国外 DNS 累计尝试异常 ${foreignError.toFixed(2)}% · 双上游竞速不等于设备解析失败",
+    1,
+)
+PAGE = PAGE.replace(
+    "foreignError=Number(foreign?.error_rate||0),notice=foreignError>=1?`<div class=\"dash-alert ${foreignError>=10?'bad':'warn'}\"><i></i>国外 DNS 累计尝试异常 ${foreignError.toFixed(2)}% · 双上游竞速不等于设备解析失败</div>`:'',routerOk",
+    "foreignError=Number(foreign?.error_rate||0),foreignNotice=foreignError>=1?`国外 DNS 累计尝试异常 ${foreignError.toFixed(2)}% · 双上游竞速不等于设备解析失败`:'',routerOk",
+    1,
+)
+PAGE = PAGE.replace(
+    "<span>错误率</span>",
+    "<span title=\"容器启动以来的单上游尝试异常；双上游竞速时不等于设备 DNS 失败\">上游尝试异常</span>",
+    1,
+)
+PAGE = PAGE.replace(
+    "</style></head>",
+    ".dash-settings-grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr));grid-auto-rows:1fr}.dash-setting{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;min-height:118px;height:100%}.dash-setting>div{min-width:0}.dash-setting b{min-width:0;overflow:visible!important;text-overflow:clip!important;white-space:normal!important}.dash-setting span{display:block;max-width:none!important;min-width:0;overflow:visible!important;text-overflow:clip!important;overflow-wrap:anywhere;white-space:normal!important;line-height:1.5}.dash-setting em{margin-left:10px;white-space:nowrap}</style></head>",
     1,
 )
 PAGE = PAGE.replace(
     "healthItem('RB5009',summary.router==='connected','管理连接')",
-    "healthItem('RB5009',summary.router==='connected',summary.router_resource?.available?'管理连接 · 资源可读':'管理连接')",
+    "healthItem('RB5009',summary.router==='connected',summary.router==='connected'?'已连接':'不可用',summary.router_resource?.available?'资源可读':'管理接口')",
+    1,
+)
+PAGE = PAGE.replace(
+    "healthItem('Mihomo',checks.mihomo,'控制接口')",
+    "healthItem('Mihomo',checks.mihomo,checks.mihomo?'运行正常':'不可用','控制接口')",
+    1,
+)
+PAGE = PAGE.replace(
+    "healthItem('当前策略',checks.policy,summary.detail?.proxy||'未就绪')",
+    "healthItem('当前策略',checks.policy,summary.detail?.proxy||'未就绪','当前出口')",
     1,
 )
 PAGE = PAGE.replace(
@@ -1762,10 +3727,16 @@ PAGE = PAGE.replace(
 PAGE = PAGE.replace(
     '</style></head>',
     '''.health-grid{display:flex;flex-wrap:wrap;background:#1c1c1e}
-.health-item,.health-item:last-child{flex:1 1 220px;min-width:220px;border:0;background:#1c1c1e;min-height:92px;box-shadow:inset -1px -1px 0 #38383a}
-.health-item span{white-space:normal;overflow:visible;text-overflow:clip;line-height:1.45;overflow-wrap:anywhere}
+.health-item,.health-item:last-child{flex:1 1 220px;min-width:220px;border:0;background:#1c1c1e;min-height:116px;box-shadow:inset -1px -1px 0 #38383a}
+.status-primary{margin:9px 0 0 14px;color:#f5f5f7;font-size:16px;font-weight:650;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.status-detail{margin:5px 0 0 14px;color:#8e8e93;font-size:12px;line-height:1.4;overflow-wrap:anywhere}.health-item.bad .status-primary{color:#ff6961}
+.health-item.warn b:before{background:#ffd60a}.dns-health{min-height:132px}.dns-source{margin:7px 0 10px 14px;color:#aeaeb2;font-size:13px;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dns-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-left:14px}.dns-metrics div{min-width:0}.dns-metrics span{display:block;margin:0;color:#8e8e93;font-size:11px;line-height:1.2}.dns-metrics strong{display:block;margin-top:3px;color:#f5f5f7;font-size:17px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.15;white-space:nowrap}.dns-metrics small{font-size:11px;font-weight:500;color:#aeaeb2}.dns-error strong{color:#30d158}.dns-health.warn .dns-error strong{color:#ffd60a}.dns-health.bad .dns-error strong{color:#ff6961}
 @media(max-width:760px){.health-item,.health-item:nth-child(2n),.health-item:last-child{flex-basis:calc(50% - 1px);min-width:calc(50% - 1px);border:0}}
-@media(max-width:420px){.health-item,.health-item:nth-child(2n),.health-item:last-child{flex-basis:100%;min-width:100%;min-height:0}}</style></head>''',
+@media(max-width:600px){.dns-metrics{gap:6px}.dns-metrics strong{font-size:16px}}@media(max-width:420px){.health-item,.health-item:nth-child(2n),.health-item:last-child{flex-basis:100%;min-width:100%;min-height:0}}</style></head>''',
+    1,
+)
+PAGE = PAGE.replace(
+    '</style></head>',
+    '''.health-grid{display:block!important;background:transparent!important;border:0!important;overflow:visible!important}.dash-alert{display:flex;align-items:center;gap:8px;width:max-content;max-width:100%;margin:0 0 12px auto;padding:8px 11px;border:1px solid #73521c;border-radius:7px;background:#2c2416;color:#ffd08a;font-size:12px;font-weight:600}.dash-alert i{width:7px;height:7px;border-radius:50%;background:currentColor;flex:0 0 auto}.dash-alert.bad{border-color:#703631;background:#2c1d1d;color:#ff9f96}.dash-panel{border:1px solid #38383a;border-radius:8px;background:#1c1c1e;overflow:hidden}.dash-panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 17px;border-bottom:1px solid #38383a}.dash-panel-head b{font-size:14px}.dash-panel-head span{color:#8e8e93;font-size:12px}.dash-core-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}.dash-core-item{min-width:0;padding:18px 17px;border-right:1px solid #38383a}.dash-core-item:last-child{border-right:0}.dash-core-item small{display:flex;align-items:center;gap:7px;color:#aeaeb2;font-size:13px}.dash-core-item small:before{content:"";width:7px;height:7px;border-radius:50%;background:#30d158;flex:0 0 auto}.dash-core-item.bad small:before{background:#ff453a}.dash-core-item strong{display:block;margin-top:10px;color:#f5f5f7;font-size:22px;line-height:1.15}.dash-core-item.bad strong{color:#ff6961}.dash-core-item span{display:block;margin-top:7px;color:#8e8e93;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dash-dns-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:14px}.dash-dns{min-width:0;padding:16px 17px;border:1px solid #38383a;border-radius:8px;background:#1c1c1e}.dash-dns-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.dash-dns-head b{font-size:14px}.dash-dns-head span{min-width:0;color:#8e8e93;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dash-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:16px}.dash-metrics span{display:block;color:#8e8e93;font-size:11px}.dash-metrics strong{display:block;margin-top:4px;color:#f5f5f7;font-size:21px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}.dash-metrics small{margin-left:2px;color:#8e8e93;font-size:11px;font-weight:500}.dash-error strong{color:#30d158}.dash-dns.warn .dash-error strong{color:#ffd60a}.dash-dns.bad .dash-error strong{color:#ff6961}.dash-settings{margin-top:14px}.dash-settings-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:1px;background:#38383a}.dash-setting{display:flex;min-width:0;align-items:flex-start;justify-content:space-between;gap:8px;padding:14px 15px;background:#1c1c1e}.dash-setting b{display:block;color:#aeaeb2;font-size:13px}.dash-setting span{display:block;max-width:100%;margin-top:8px;color:#8e8e93;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dash-setting em{flex:0 0 auto;border-radius:999px;padding:4px 8px;background:#173527;color:#30d158;font-size:12px;font-style:normal;font-weight:650;line-height:1}.dash-setting em.neutral{background:#2c2c2e;color:#d1d1d6}.dash-setting em.warn{background:#332b16;color:#ffd60a}@media (min-width:721px) and (max-width:900px){.dash-settings-grid{grid-template-columns:repeat(6,minmax(0,1fr))}.dash-setting{grid-column:span 2}.dash-setting:nth-child(n+4){grid-column:span 3}}@media(max-width:720px){.dash-alert{margin-left:0}.dash-core-grid{grid-template-columns:1fr}.dash-core-item{border-right:0;border-bottom:1px solid #38383a}.dash-core-item:last-child{border-bottom:0}.dash-dns-grid{grid-template-columns:1fr}.dash-settings-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.dash-setting:nth-child(n+4){border-top:1px solid #38383a}}@media(max-width:480px){.dash-panel-head{align-items:flex-start;flex-direction:column}.dash-settings-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.dash-setting:nth-child(n+3){border-top:1px solid #38383a}.dash-setting:last-child{grid-column:span 2}}</style></head>''',
     1,
 )
 PAGE = PAGE.replace(
@@ -1777,7 +3748,7 @@ PAGE = PAGE.replace(
 PAGE = PAGE.replace('@media(max-width:760px)', '@media(max-width:820px)')
 PAGE = PAGE.replace(
     '</style></head>',
-    '''.manual-add>summary{display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:46px;padding:0 14px;border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;color:#0a84ff;font-size:13px;font-weight:600;cursor:pointer;list-style:none}.manual-add>summary::-webkit-details-marker{display:none}.manual-add>summary:after{content:"›";font-size:21px;line-height:1;color:#636366;transform:rotate(90deg);transition:transform .16s ease}.manual-add[open]>summary{margin-bottom:9px}.manual-add[open]>summary:after{transform:rotate(-90deg)}.summary-hint{color:#8e8e93;font-size:12px;font-weight:400}@media(max-width:420px){.summary-hint{display:none}}</style></head>''',
+    '''.manual-add{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.manual-add .add-row{padding-top:14px}.summary-hint{color:#8e8e93;font-size:12px;font-weight:400}.manual-add .group{border:0;border-radius:0}.manual-add .help,.manual-add .status{margin-left:16px;margin-right:16px}.diagnostic-section{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.diagnostic-section>summary{display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:46px;padding:0 14px;color:#0a84ff;font-size:13px;font-weight:600;cursor:pointer;list-style:none}.diagnostic-section>summary::-webkit-details-marker{display:none}.diagnostic-section>summary:after{content:"›";font-size:21px;line-height:1;color:#636366;transform:rotate(90deg);transition:transform .16s ease}.diagnostic-section[open]>summary{border-bottom:1px solid #38383a}.diagnostic-section[open]>summary:after{transform:rotate(-90deg)}.diagnostic-content{margin:0}.diagnostic-section .group{border:0;border-radius:0}.diagnostic-section .status{margin-left:16px;margin-right:16px}@media(max-width:420px){.summary-hint{display:none}}</style></head>''',
     1,
 )
 
@@ -1795,25 +3766,67 @@ sections = {heading: page_section(PAGE, heading) for heading in (
 region_start = min(section[0] for section in sections.values())
 region_end = max(section[1] for section in sections.values())
 ordered_sections = "".join(sections[heading][2] for heading in (
-    "设备", "加入旁路", "旁路运行状态", "RB5009 运行状态", "WireGuard 远程互联", "Z4Pro 运行状态"))
+    "设备", "加入旁路", "旁路运行状态", "Z4Pro 运行状态", "RB5009 运行状态", "WireGuard 远程互联"))
 PAGE = PAGE[:region_start] + ordered_sections + PAGE[region_end:]
 
 add_start, add_end, add_section = page_section(PAGE, "加入旁路")
 add_section = add_section.replace(
     '<section class="section"><div class="section-title"><h2>加入旁路</h2></div>',
-    '<details class="section manual-add" id="manualAdd"><summary><span>按 IP 手动加入</span><span class="summary-hint">适用于已知地址的设备</span></summary>',
+    '<section class="section manual-add" id="manualAdd">',
     1,
 )
-add_section = add_section[:-len("</section>")] + "</details>"
 PAGE = PAGE[:add_start] + add_section + PAGE[add_end:]
 PAGE = PAGE.replace(
-    "function choose(ip){document.querySelector('#ip').value=ip;",
-    "function choose(ip){document.querySelector('#manualAdd').open=true;document.querySelector('#ip').value=ip;",
+    '系统会检查健康状态与规则冲突。也可以先在“全部在线”中找到设备，再加入旁路。',
+    '系统会检查健康状态与规则冲突。也可以先在“全部在线”中找到设备，再加入旁路，适用于已知地址的设备。',
+    1,
+)
+
+
+def collapse_diagnostic_section(page, heading, hint, updated_id):
+    start, end, section = page_section(page, heading)
+    prefix = (f'<section class="section"><div class="section-title"><h2>{heading}</h2>'
+              f'<span class="muted" id="{updated_id}">正在读取</span></div>')
+    replacement = (f'<details class="section diagnostic-section"><summary><span>{heading}</span>'
+                   f'<span class="summary-hint" id="{updated_id}">{hint}</span></summary>'
+                   '<div class="diagnostic-content">')
+    if prefix not in section:
+        raise RuntimeError(f"cannot collapse section: {heading}")
+    section = section.replace(prefix, replacement, 1)
+    section = section[:-len("</section>")] + "</div></details>"
+    return page[:start] + section + page[end:]
+
+
+PAGE = collapse_diagnostic_section(PAGE, "RB5009 运行状态", "按需查看路由器资源", "routerUpdated")
+PAGE = collapse_diagnostic_section(PAGE, "WireGuard 远程互联", "按需查看远程连接", "wireguardUpdated")
+
+
+def collapse_runtime_section(page, heading, section_id, summary_id):
+    start, end, section = page_section(page, heading)
+    title_start = section.index('<div class="section-title">')
+    title_end = section.index('</div>', title_start) + len('</div>')
+    content = section[title_end:-len('</section>')]
+    replacement = (f'<details class="section diagnostic-section runtime-section" id="{section_id}">'
+                   f'<summary><span>{heading}</span><span class="summary-hint" id="{summary_id}">正在读取</span></summary>'
+                   f'<div class="diagnostic-content">{content}</div></details>')
+    return page[:start] + replacement + page[end:]
+
+
+PAGE = collapse_runtime_section(PAGE, "旁路运行状态", "bypassStatus", "bypassUpdated")
+PAGE = collapse_runtime_section(PAGE, "Z4Pro 运行状态", "z4Status", "systemUpdated")
+PAGE = PAGE.replace(
+    '</style></head>',
+    '''.runtime-section>summary{color:#f5f5f7}.runtime-section>summary .summary-hint{display:block;min-width:0;margin-left:auto;color:#8e8e93;font-size:12px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.runtime-section>summary .summary-hint.runtime-good{color:#30d158}.runtime-section>summary .summary-hint.runtime-warn{color:#ffd60a}.runtime-section>summary .summary-hint.runtime-bad{color:#ff6961}@media(max-width:600px){.runtime-section>summary .summary-hint{max-width:52%;font-size:11px}}</style></head>''',
     1,
 )
 PAGE = PAGE.replace(
-    "function setStatus(message,ok=true){statusEl.textContent=message;statusEl.className='status '+(ok?'':'error')}",
-    "function setStatus(message,ok=true){statusEl.textContent=message;statusEl.className='status '+(ok?'':'error');if(!ok)document.querySelector('#manualAdd').open=true}",
+    'function deviceActions(d){',
+    '''function runtimeFoldKey(id){return `family-proxy-fold-${id}`}function setupRuntimeFold(id){let section=document.querySelector(`#${id}`);if(!section||section.dataset.foldReady)return;section.dataset.foldReady='1';let saved=localStorage.getItem(runtimeFoldKey(id));if(saved!==null)section.open=saved==='open';section.addEventListener('toggle',()=>localStorage.setItem(runtimeFoldKey(id),section.open?'open':'closed'))}function autoOpenFold(id,critical){let section=document.querySelector(`#${id}`);if(section&&critical&&localStorage.getItem(runtimeFoldKey(id))===null)section.open=true}function deviceActions(d){''',
+    1,
+)
+PAGE = PAGE.replace(
+    "document.querySelector('#systemUpdated').textContent=`${s.healthy?'状态正常':'需要检查'} · ${new Date(s.updated_at*1000).toLocaleTimeString('zh-CN',{hour12:false})}`",
+    "let systemCritical=!s.healthy||Number(c.percent)>=90||Number(m.percent)>=90||Number(d.percent)>=90||Number(t.cpu_c)>=60||Number(t.nvme_c)>=60||Number(x.unhealthy||0)>0,systemSummary=document.querySelector('#systemUpdated');systemSummary.textContent=`${s.healthy?'状态正常':'需要检查'} · CPU ${Number(c.percent).toFixed(1)}% · 内存 ${Number(m.percent).toFixed(1)}% · M.2 ${t.nvme_c==null?'--':`${Number(t.nvme_c).toFixed(0)}°C`} · Docker ${dockerValue}`;systemSummary.className='summary-hint '+(systemCritical?'runtime-bad':'runtime-good');autoOpenFold('z4Status',systemCritical)",
     1,
 )
 PAGE = PAGE.replace(
@@ -1861,7 +3874,7 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     '</style></head>',
-    '''.wireguard-list{overflow:hidden}.wireguard-row{display:grid;grid-template-columns:minmax(185px,1.35fr) repeat(4,minmax(110px,1fr)) auto;align-items:center;gap:15px;padding:15px 16px;border-top:1px solid #38383a}.wireguard-row:first-child{border-top:0}.wg-identity{display:flex;align-items:center;gap:11px;min-width:0}.wg-identity b{font-size:14px}.wg-dot{width:9px;height:9px;border-radius:50%;background:#8e8e93;box-shadow:0 0 0 3px rgba(142,142,147,.14);flex:0 0 auto}.wg-dot.up{background:#30d158}.wg-dot.warn{background:#ffd60a}.wg-dot.down{background:#ff453a}.wg-metric{min-width:0}.wg-metric span,.wg-detail-summary span{display:block;color:#8e8e93;font-size:11px}.wg-metric b,.wg-detail-summary b{display:block;margin-top:5px;font-size:12px;line-height:1.35;overflow-wrap:anywhere}.wg-tone.up,.good{color:#30d158}.wg-tone.warn{color:#ffd60a}.wg-tone.down,.bad-text{color:#ff453a}.wg-tone.idle{color:#aeaeb2}.wg-detail{border:0;background:transparent;color:#0a84ff;padding:8px;font:600 13px inherit;white-space:nowrap;cursor:pointer}.wg-detail span{font-size:18px;margin-left:3px}.wireguard-dialog{width:min(720px,calc(100% - 28px))}.wireguard-dialog h3{margin:20px 0 8px;color:#8e8e93;font-size:12px;font-weight:600}.wg-detail-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;margin-top:17px;border:1px solid #38383a;border-radius:7px;background:#38383a;overflow:hidden}.wg-detail-summary>div{padding:12px;background:#242426}.wg-detail-group{border:1px solid #38383a;border-radius:7px;overflow:hidden}.wg-peer,.wg-detail-row{display:grid;grid-template-columns:1fr 1.4fr;gap:12px;padding:11px 12px;border-top:1px solid #38383a;font-size:12px}.wg-peer:first-child,.wg-detail-row:first-child{border-top:0}.wg-peer>div:last-child{text-align:right}.wg-peer b,.wg-peer span{display:block}.wg-peer span{margin-top:4px;color:#8e8e93;overflow-wrap:anywhere}.wg-detail-row b{text-align:right}.empty.compact{padding:15px}@media(max-width:820px){.wireguard-row{grid-template-columns:minmax(155px,1.3fr) 1fr 1fr auto}.wg-metric:nth-of-type(4),.wg-metric:nth-of-type(5){display:none}}@media(max-width:520px){.wireguard-row{grid-template-columns:1fr auto;gap:10px}.wg-metric{grid-column:1}.wg-metric:nth-of-type(3){display:block}.wg-detail{grid-column:2;grid-row:1/4}.wg-detail-summary{grid-template-columns:1fr}.wg-peer,.wg-detail-row{grid-template-columns:1fr}.wg-peer>div:last-child,.wg-detail-row b{text-align:left}}</style></head>''',
+    '''.wireguard-list{overflow:hidden}.wireguard-row{display:grid;grid-template-columns:minmax(185px,1.35fr) repeat(4,minmax(110px,1fr)) auto;align-items:center;gap:15px;padding:15px 16px;border-top:1px solid #38383a}.wireguard-row:first-child{border-top:0}.wg-identity{display:flex;align-items:center;gap:11px;min-width:0}.wg-name{min-width:0}.wg-identity b{font-size:14px}.wg-edit{position:relative;width:26px;height:26px;margin-left:5px;padding:0;border:0;border-radius:5px;background:transparent;color:#0a84ff;font:600 17px/1 inherit;vertical-align:middle}.wg-edit:hover,.wg-edit:focus-visible{background:rgba(10,132,255,.16);outline:0}.wg-edit::after{content:attr(data-tooltip);position:absolute;z-index:12;left:50%;top:calc(100% + 6px);transform:translateX(-50%);padding:4px 7px;border-radius:4px;background:#3a3a3c;color:#fff;font:12px inherit;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .08s ease}.wg-edit:hover::after,.wg-edit:focus-visible::after{opacity:1}.wg-dot{width:9px;height:9px;border-radius:50%;background:#8e8e93;box-shadow:0 0 0 3px rgba(142,142,147,.14);flex:0 0 auto}.wg-dot.up{background:#30d158}.wg-dot.warn{background:#ffd60a}.wg-dot.down{background:#ff453a}.wg-metric{min-width:0}.wg-metric span,.wg-detail-summary span{display:block;color:#8e8e93;font-size:11px}.wg-metric b,.wg-detail-summary b{display:block;margin-top:5px;font-size:12px;line-height:1.35;overflow-wrap:anywhere}.wg-tone.up,.good{color:#30d158}.wg-tone.warn{color:#ffd60a}.wg-tone.down,.bad-text{color:#ff453a}.wg-tone.idle{color:#aeaeb2}.wg-detail{border:0;background:transparent;color:#0a84ff;padding:8px;font:600 13px inherit;white-space:nowrap;cursor:pointer}.wg-detail span{font-size:18px;margin-left:3px}.wireguard-dialog{width:min(720px,calc(100% - 28px))}.wireguard-dialog h3{margin:20px 0 8px;color:#8e8e93;font-size:12px;font-weight:600}.wg-detail-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;margin-top:17px;border:1px solid #38383a;border-radius:7px;background:#38383a;overflow:hidden}.wg-detail-summary>div{padding:12px;background:#242426}.wg-detail-group{border:1px solid #38383a;border-radius:7px;overflow:hidden}.wg-peer,.wg-detail-row{display:grid;grid-template-columns:1fr 1.4fr;gap:12px;padding:11px 12px;border-top:1px solid #38383a;font-size:12px}.wg-peer:first-child,.wg-detail-row:first-child{border-top:0}.wg-peer>div:last-child{text-align:right}.wg-peer b,.wg-peer span{display:block}.wg-peer span{margin-top:4px;color:#8e8e93;overflow-wrap:anywhere}.wg-detail-row b{text-align:right}.empty.compact{padding:15px}@media(max-width:820px){.wireguard-row{grid-template-columns:minmax(155px,1.3fr) 1fr 1fr auto}.wg-metric:nth-of-type(4),.wg-metric:nth-of-type(5){display:none}}@media(max-width:520px){.wireguard-row{grid-template-columns:1fr auto;gap:10px}.wg-metric{grid-column:1}.wg-metric:nth-of-type(3){display:block}.wg-detail{grid-column:2;grid-row:1/4}.wg-detail-summary{grid-template-columns:1fr}.wg-peer,.wg-detail-row{grid-template-columns:1fr}.wg-peer>div:last-child,.wg-detail-row b{text-align:left}}</style></head>''',
     1,
 )
 PAGE = PAGE.replace(
@@ -1875,9 +3888,177 @@ PAGE = PAGE.replace(
     1,
 )
 
+# Device egress is deliberately a read-only explanation of the current shared
+# policy. It makes the non-obvious Z4Pro return path inspectable without
+# adding a second routing decision or changing any RouterOS rule.
+PAGE = PAGE.replace(
+    '</main><dialog id="wireguardDialog"',
+    '''</main><dialog id="egressDialog" class="egress-dialog"><div class="dialog-body"><h2>设备出站链路</h2><p id="egressSubtitle">正在读取设备状态</p><div id="egressBody"></div></div><div class="dialog-actions"><button type="button" class="dialog-cancel" onclick="closeEgress()">关闭</button></div></dialog><dialog id="wireguardDialog"''',
+    1,
+)
+PAGE = PAGE.replace(
+    '</style></head>',
+    '''.egress-dialog{width:min(760px,calc(100% - 28px))}.egress-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;margin-top:17px;border:1px solid #38383a;border-radius:7px;background:#38383a;overflow:hidden}.egress-summary>div{min-width:0;padding:12px;background:#242426}.egress-summary span,.egress-checks span{display:block;color:#8e8e93;font-size:11px}.egress-summary b{display:block;margin-top:5px;font-size:13px;line-height:1.35;overflow-wrap:anywhere}.egress-summary b.good{color:#30d158}.egress-summary b.bad{color:#ff6961}.egress-observation{margin-top:12px;padding:10px 12px;border-radius:7px;background:#2c2c2e;color:#aeaeb2;font-size:12px;line-height:1.55}.egress-heading{margin:20px 0 8px;color:#8e8e93;font-size:12px;font-weight:600}.egress-steps,.egress-checks{border:1px solid #38383a;border-radius:7px;overflow:hidden}.egress-step{display:grid;grid-template-columns:27px minmax(0,1fr);gap:10px;padding:12px;border-top:1px solid #38383a}.egress-step:first-child,.egress-check:first-child{border-top:0}.egress-step i{display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:#173527;color:#30d158;font-size:11px;font-style:normal;font-weight:700}.egress-step b{display:block;font-size:13px}.egress-step span{display:block;margin-top:4px;color:#8e8e93;font-size:12px;line-height:1.5;overflow-wrap:anywhere}.egress-check{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 12px;border-top:1px solid #38383a}.egress-check b{font-size:12px}.egress-check em{border-radius:999px;padding:4px 8px;background:#173527;color:#30d158;font-size:12px;font-style:normal;font-weight:650}.egress-check em.bad{background:#35201f;color:#ff6961}@media(max-width:520px){.egress-summary{grid-template-columns:1fr}.egress-summary>div{border-top:1px solid #38383a}.egress-summary>div:first-child{border-top:0}}</style></head>''',
+    1,
+)
+PAGE = PAGE.replace(
+    'function deviceActions(d){',
+    r'''let egressIp='';
+function egressCheck(label,ok){return `<div class="egress-check"><b>${esc(label)}</b><em class="${ok?'':'bad'}">${ok?'已校验':'需要检查'}</em></div>`}
+function egressStep(number,title,detail){return `<div class="egress-step"><i>${number}</i><div><b>${esc(title)}</b><span>${esc(detail)}</span></div></div>`}
+function openEgress(ip){let device=devices.find(item=>item.ip===ip),egress=device?.egress;if(!device||!egress)return;egressIp=ip;let managed=device.managed,checks=egress.checks||{},good=egress.mode==='managed',summary=managed?`当前经 Z4Pro 分流${good?'，规则校验完整':'，但有规则需要核对'}`:'未接管，保持 RB5009 直连';document.querySelector('#egressSubtitle').textContent=`${device.name} · ${device.ip}。${summary}`;let details=managed?`${egressStep('1','局域网访问','设备 → RB5009。局域网地址不进入旁路，不经 Z4Pro。')}${egressStep('2','DNS 解析','设备 → RB5009 DNS 重定向 → Z4Pro MosDNS；国内与国外上游按现有规则分流。')}${egressStep('3','国内 IPv4','设备 → RB5009 → Z4Pro → RB5009 → WAN。Z4Pro 识别中国 IP 后直连返回路由器，不进入 Mihomo。')}${egressStep('4','国外 TCP/UDP','设备 → RB5009 → Z4Pro TPROXY → Mihomo 业务策略与候选池 → 当前节点。')}${egressStep('5','IPv6','RouterOS 拒绝纳管设备的外网 IPv6，客户端回退至受控 IPv4 路径。')}`:egressStep('1','当前状态','该设备未加入旁路，所有访问继续由 RB5009 按原有网络配置直接处理。');let verification=managed?`${egressCheck('设备已在 RouterOS 旁路名单',checks.membership)}${egressCheck('连接标记与去 Z4Pro 的策略路由',checks.mark_rule&&checks.route_rule)}${egressCheck('DNS TCP / UDP 重定向',checks.dns_redirect)}${egressCheck('IPv6 防漏规则',checks.ipv6_guard)}`:'';document.querySelector('#egressBody').innerHTML=`<div class="egress-summary"><div><span>路径状态</span><b class="${good?'good':'bad'}">${esc(egress.headline||summary)}</b></div><div><span>当前连接</span><b>${Number(egress.active_connections||0)} 条</b></div><div><span>已标记连接</span><b>${Number(egress.marked_connections||0)} 条</b></div></div><div class="egress-observation">“已标记连接”是 RouterOS 此刻观察到、已命中旁路连接标记的会话数；为 0 通常表示设备暂时没有新的外网连接，不代表规则失效。</div><h3 class="egress-heading">实际策略路径</h3><div class="egress-steps">${details}</div>${managed?`<h3 class="egress-heading">RouterOS 规则校验</h3><div class="egress-checks">${verification}</div>`:''}`;document.querySelector('#egressDialog').showModal()}
+function closeEgress(){egressIp='';document.querySelector('#egressDialog').close()}
+document.querySelector('#egressDialog').addEventListener('click',event=>{if(event.target.id==='egressDialog')closeEgress()});
+function deviceActions(d){''',
+    1,
+)
+PAGE = PAGE.replace(
+    '''if(d.managed)return rename+`<button class="secondary" onclick="openCapture('${d.ip}')">诊断</button>`+''',
+    '''if(d.managed)return rename+`<button class="secondary" onclick="openEgress('${d.ip}')">链路</button>`+`<button class="secondary" onclick="openCapture('${d.ip}')">诊断</button>`+''',
+    1,
+)
+PAGE = PAGE.replace(
+    "!document.querySelector('#captureDialog').open&&!document.querySelector('#wireguardDialog').open)load()",
+    "!document.querySelector('#captureDialog').open&&!document.querySelector('#wireguardDialog').open&&!document.querySelector('#egressDialog').open)load()",
+    1,
+)
+PAGE = PAGE.replace(
+    '</main><dialog id="egressDialog"',
+    '''</main><dialog id="wireguardRenameDialog"><form onsubmit="saveWireGuardRename(event)"><div class="dialog-body"><h2>编辑 WireGuard 设备名称</h2><p id="wireguardRenameHint">留空保存可恢复默认名称。</p><input id="wireguardRenameInput" maxlength="40" autocomplete="off" placeholder="输入设备名称"></div><div class="dialog-actions"><button type="button" class="dialog-cancel" onclick="closeWireGuardRename()">取消</button><button type="submit" class="dialog-save">保存</button></div></form></dialog><dialog id="egressDialog"''',
+    1,
+)
+PAGE = PAGE.replace(
+    "document.querySelector('#egressDialog').addEventListener('click',event=>{if(event.target.id==='egressDialog')closeEgress()});",
+    "document.querySelector('#egressDialog').addEventListener('click',event=>{if(event.target.id==='egressDialog')closeEgress()});document.querySelector('#wireguardRenameDialog').addEventListener('click',event=>{if(event.target.id==='wireguardRenameDialog')closeWireGuardRename()});",
+    1,
+)
+
+# The observation panel deliberately consumes the controller's existing
+# read-only snapshots. It does not inspect packet contents, create a RouterOS
+# counter, or alter Mihomo's choice of node.
+_TRAFFIC_OBSERVATION = r'''<details class="section diagnostic-section" id="trafficObservation"><summary><span>流量观察</span><span class="summary-hint" id="trafficUpdated">默认收起 · 展开后读取当前快照</span></summary><div class="diagnostic-content"><div class="traffic-observation"><div class="traffic-summary" id="trafficSummary"><div class="empty compact">正在读取流量快照</div></div><div class="traffic-heading"><b>已接管设备</b><span>按当前连接数排序</span></div><div class="traffic-device-list" id="trafficDevices"><div class="empty compact">展开后显示当前设备状态</div></div><div class="traffic-heading"><b>业务策略快照</b><span>只显示运行中策略，不触发测速</span></div><div class="traffic-policy-list" id="trafficPolicies"><div class="empty compact">正在读取 Mihomo 策略组</div></div><p class="traffic-note">连接数和旁路标记来自 RouterOS 的当前连接表；国内直连、局域网访问和短连接可能不会长期出现。页面不记录访问内容、完整域名或订阅信息。</p></div></div></details>'''
+
+PAGE = PAGE.replace(
+    '<details class="section diagnostic-section runtime-section" id="z4Status">',
+    _TRAFFIC_OBSERVATION + '<details class="section diagnostic-section runtime-section" id="z4Status">',
+    1,
+)
+PAGE = PAGE.replace(
+    '</style></head>',
+    '''.traffic-observation{border:1px solid #38383a;border-radius:8px;background:#1c1c1e;overflow:hidden}.traffic-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));background:#38383a;gap:1px}.traffic-stat{min-width:0;padding:15px 16px;background:#1c1c1e}.traffic-stat span{display:block;color:#8e8e93;font-size:11px}.traffic-stat b{display:block;margin-top:7px;font-size:21px;line-height:1.15;font-variant-numeric:tabular-nums}.traffic-stat small{display:block;margin-top:6px;color:#aeaeb2;font-size:11px;line-height:1.4}.traffic-stat.good b{color:#30d158}.traffic-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px 16px 9px}.traffic-heading b{font-size:13px}.traffic-heading span{color:#8e8e93;font-size:11px}.traffic-device-list,.traffic-policy-list{border-top:1px solid #38383a}.traffic-device-row{display:grid;grid-template-columns:minmax(160px,1.25fr) repeat(3,minmax(78px,.55fr)) auto;align-items:center;gap:12px;padding:12px 16px;border-top:1px solid #38383a}.traffic-device-row:first-child,.traffic-policy-row:first-child{border-top:0}.traffic-device-name{min-width:0}.traffic-device-name b{display:block;font-size:13px}.traffic-device-name span{display:block;margin-top:4px;color:#8e8e93;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.traffic-metric span,.traffic-policy-meta span{display:block;color:#8e8e93;font-size:11px}.traffic-metric b,.traffic-policy-meta b{display:block;margin-top:4px;font-size:13px;font-variant-numeric:tabular-nums}.traffic-metric b.good{color:#30d158}.traffic-link{border:0;background:transparent;color:#0a84ff;padding:7px 2px;font:600 12px inherit;cursor:pointer;white-space:nowrap}.traffic-policy-row{display:grid;grid-template-columns:120px minmax(0,1fr) minmax(105px,.55fr);gap:12px;align-items:center;padding:12px 16px;border-top:1px solid #38383a}.traffic-policy-name{font-size:13px;font-weight:650}.traffic-policy-now{min-width:0;color:#f5f5f7;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.traffic-policy-meta{text-align:right}.traffic-note{margin:0;padding:12px 16px;color:#8e8e93;font-size:11px;line-height:1.55;border-top:1px solid #38383a}@media(max-width:760px){.traffic-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.traffic-stat:nth-child(n+3){border-top:1px solid #38383a}.traffic-device-row{grid-template-columns:minmax(0,1fr) repeat(2,minmax(72px,.6fr));gap:9px}.traffic-device-row .traffic-metric:last-of-type{display:none}.traffic-link{justify-self:end}.traffic-policy-row{grid-template-columns:92px minmax(0,1fr)}.traffic-policy-meta{display:none}}@media(max-width:420px){.traffic-summary{grid-template-columns:1fr}.traffic-stat:nth-child(n+2){border-top:1px solid #38383a}.traffic-device-row{grid-template-columns:minmax(0,1fr) 1fr}.traffic-device-row .traffic-metric:nth-of-type(2){display:none}.traffic-policy-row{grid-template-columns:1fr}.traffic-policy-now{white-space:normal;overflow:visible}.traffic-link{grid-column:2;grid-row:1}}</style></head>''',
+    1,
+)
+PAGE = PAGE.replace(
+    "let egressIp='';",
+    r'''let trafficGroups=null,trafficGroupsAt=0,trafficSnapshot=null;
+function trafficNumber(value){return Number(value||0).toLocaleString('zh-CN')}
+function trafficPolicyLabel(name){return {AI:'AI',Youtube:'YouTube',Telegram:'Telegram',Google:'Google',Others:'Others'}[name]||name}
+function renderTrafficObservation(data){let panel=document.querySelector('#trafficObservation');if(!panel?.open)return;trafficSnapshot=data;let managed=(data.devices||[]).filter(device=>device.managed),active=managed.filter(device=>device.effective),connections=managed.reduce((total,device)=>total+Number(device.connections||0),0),marked=managed.reduce((total,device)=>total+Number(device.egress?.marked_connections||0),0),summary=data.summary||{};document.querySelector('#trafficSummary').innerHTML=`<div class="traffic-stat good"><span>旁路状态</span><b>${summary.ready&&summary.netwatch==='up'?'正常':'需检查'}</b><small>${summary.ready&&summary.netwatch==='up'?'核心服务与自动回退可用':'请查看旁路运行状态'}</small></div><div class="traffic-stat"><span>已接管设备</span><b>${trafficNumber(managed.length)}</b><small>${trafficNumber(active.length)} 台有新连接</small></div><div class="traffic-stat"><span>当前连接</span><b>${trafficNumber(connections)}</b><small>RouterOS 当前可见会话</small></div><div class="traffic-stat"><span>旁路标记</span><b>${trafficNumber(marked)}</b><small>当前命中 Z4Pro 策略路由</small></div>`;let devices=managed.slice().sort((left,right)=>Number(right.connections||0)-Number(left.connections||0));document.querySelector('#trafficDevices').innerHTML=devices.length?devices.map(device=>{let egress=device.egress||{},headline=egress.headline||'经 Z4Pro 分流';return `<div class="traffic-device-row"><div class="traffic-device-name"><b>${esc(device.name)}</b><span>${esc(device.ip)} · ${esc(headline)}</span></div><div class="traffic-metric"><span>当前连接</span><b>${trafficNumber(device.connections)}</b></div><div class="traffic-metric"><span>旁路标记</span><b class="${Number(egress.marked_connections||0)>0?'good':''}">${trafficNumber(egress.marked_connections)}</b></div><div class="traffic-metric"><span>累计包数</span><b>${trafficNumber(device.packets)}</b></div><button class="traffic-link" onclick="openEgress('${device.ip}')">查看链路</button></div>`}).join(''):'<div class="empty compact">尚无已接管设备</div>';let updated=document.querySelector('#trafficUpdated');updated.textContent=`${new Date().toLocaleTimeString('zh-CN',{hour12:false})} · ${trafficGroups?'策略已读取':'正在读取策略'}`;if(trafficGroups)renderTrafficPolicies(trafficGroups)}
+function renderTrafficPolicies(data){let target=document.querySelector('#trafficPolicies');if(!target)return;let groups=Array.isArray(data?.groups)?data.groups:[];target.innerHTML=groups.length?groups.map(group=>`<div class="traffic-policy-row"><div class="traffic-policy-name">${esc(trafficPolicyLabel(group.name))}</div><div class="traffic-policy-now" title="${esc(group.now||'未选择')}">${esc(group.now||'未选择')}</div><div class="traffic-policy-meta"><span>可选候选</span><b>${trafficNumber((group.all||[]).length)} 个</b></div></div>`).join(''):'<div class="empty compact">Mihomo 策略组暂时不可读</div>'}
+async function loadTrafficPolicies(force=false){let panel=document.querySelector('#trafficObservation');if(!panel?.open)return;if(!force&&trafficGroups&&Date.now()-trafficGroupsAt<15000)return;try{trafficGroups=await api('/api/mihomo');trafficGroupsAt=Date.now();renderTrafficPolicies(trafficGroups);if(trafficSnapshot)renderTrafficObservation(trafficSnapshot)}catch(error){let target=document.querySelector('#trafficPolicies');if(target)target.innerHTML=`<div class="empty compact">策略读取失败：${esc(error.message)}</div>`;let updated=document.querySelector('#trafficUpdated');if(updated)updated.textContent='策略读取失败'}}
+function setupTrafficObservation(){let panel=document.querySelector('#trafficObservation');if(!panel||panel.dataset.ready)return;panel.dataset.ready='1';let saved=localStorage.getItem('family-proxy-fold-trafficObservation');if(saved!==null)panel.open=saved==='open';panel.addEventListener('toggle',()=>{localStorage.setItem('family-proxy-fold-trafficObservation',panel.open?'open':'closed');if(panel.open){if(trafficSnapshot)renderTrafficObservation(trafficSnapshot);loadTrafficPolicies(true)}})}
+let egressIp='';''',
+    1,
+)
+PAGE = PAGE.replace(
+    "ready=summary.ready&&summary.netwatch==='up',drift=summary.drift||[],warn=ready&&drift.length;devices=data.devices;renderRouter(summary.router_resource);",
+    "ready=summary.ready&&summary.netwatch==='up',drift=summary.drift||[],warn=ready&&drift.length;devices=data.devices;trafficSnapshot=data;renderTrafficObservation(data);renderRouter(summary.router_resource);",
+    1,
+)
+PAGE = PAGE.replace(
+    "setupRuntimeFold('bypassStatus');setupRuntimeFold('z4Status');load();",
+    "setupRuntimeFold('bypassStatus');setupRuntimeFold('z4Status');setupTrafficObservation();load();",
+    1,
+)
+PAGE = PAGE.replace(
+    "function deviceActions(d){let rename=`<button class=\"secondary\" onclick=\"openRename('${d.mac}')\">改名</button>`;if(d.managed)return rename+`<button class=\"secondary\" onclick=\"openEgress('${d.ip}')\">链路</button>`+`<button class=\"secondary\" onclick=\"openCapture('${d.ip}')\">诊断</button>`+(d.fixed?'<span class=\"muted\">固定设备</span>':`<button class=\"secondary danger\" onclick=\"removeDevice('${d.ip}')\">恢复直连</button>`);let join=`<button class=\"secondary\" onclick=\"choose('${d.ip}')\">加入旁路</button>`;if(filter==='favorites')return rename+join+`<button class=\"secondary danger\" onclick=\"setFavorite('${d.mac}',false)\">移出常用</button>`;let keep=d.favorite?`<button class=\"secondary danger\" onclick=\"setFavorite('${d.mac}',false)\">取消保留</button>`:`<button class=\"secondary\" onclick=\"setFavorite('${d.mac}',true)\">保留</button>`;return rename+join+keep}",
+    "function deviceActions(d){let rename=`<button class=\"secondary\" onclick=\"openRename('${d.mac}')\">改名</button>`,homekit=d.homekit_direct?`<button class=\"secondary danger\" onclick=\"setHomeKitDirect('${d.mac}',false)\">移除 HomeKit 直连</button>`:(filter==='online'||d.managed||d.favorite?`<button class=\"secondary\" onclick=\"setHomeKitDirect('${d.mac}',true)\">HomeKit 直连</button>`:'');if(d.managed)return rename+homekit+`<button class=\"secondary\" onclick=\"openEgress('${d.ip}')\">链路</button>`+`<button class=\"secondary\" onclick=\"openCapture('${d.ip}')\">诊断</button>`+(d.fixed?'<span class=\"muted\">固定设备</span>':`<button class=\"secondary danger\" onclick=\"removeDevice('${d.ip}')\">恢复直连</button>`);let join=`<button class=\"secondary\" onclick=\"choose('${d.ip}')\">加入旁路</button>`;if(filter==='favorites')return rename+homekit+join+`<button class=\"secondary danger\" onclick=\"setFavorite('${d.mac}',false)\">移出常用</button>`;let keep=d.favorite?`<button class=\"secondary danger\" onclick=\"setFavorite('${d.mac}',false)\">取消保留</button>`:`<button class=\"secondary\" onclick=\"setFavorite('${d.mac}',true)\">保留</button>`;return rename+homekit+join+keep}",
+    1,
+)
+PAGE = PAGE.replace(
+    "async function setFavorite(mac,favorite){",
+    "async function setHomeKitDirect(mac,enabled){if(enabled&&!confirm('仅用于摄像头、Apple TV、iPhone 或 iPad 的 HomeKit 本地视频直连；不会改变该设备的外网旁路。继续吗？'))return;try{let result=await api('/api/device/preference',{method:'POST',body:JSON.stringify({mac,homekit_direct:enabled})});setStatus(result.message,true);await load()}catch(e){setStatus(e.message,false)}}async function setFavorite(mac,favorite){",
+    1,
+)
+PAGE = PAGE.replace(
+    "${d.static?' · 固定地址':''}${d.custom_name?' · 自定义名称':''}",
+    "${d.static?' · 固定地址':''}${d.custom_name?' · 自定义名称':''}${d.homekit_direct?' · HomeKit 本地直连':''}${d.homekit_direct&&!d.homekit_route_active?' · 等待租约':''}",
+    1,
+)
+PAGE = PAGE.replace(
+    "function deviceActions(d){let rename=`<button class=\"secondary\" onclick=\"openRename('${d.mac}')\">改名</button>`,homekit=d.homekit_direct?`<button class=\"secondary danger\" onclick=\"setHomeKitDirect('${d.mac}',false)\">移除 HomeKit 直连</button>`:(filter==='online'||d.managed||d.favorite?`<button class=\"secondary\" onclick=\"setHomeKitDirect('${d.mac}',true)\">HomeKit 直连</button>`:'');if(d.managed)return rename+homekit+`<button class=\"secondary\" onclick=\"openEgress('${d.ip}')\">链路</button>`+`<button class=\"secondary\" onclick=\"openCapture('${d.ip}')\">诊断</button>`+(d.fixed?'<span class=\"muted\">固定设备</span>':`<button class=\"secondary danger\" onclick=\"removeDevice('${d.ip}')\">恢复直连</button>`);let join=`<button class=\"secondary\" onclick=\"choose('${d.ip}')\">加入旁路</button>`;if(filter==='favorites')return rename+homekit+join+`<button class=\"secondary danger\" onclick=\"setFavorite('${d.mac}',false)\">移出常用</button>`;let keep=d.favorite?`<button class=\"secondary danger\" onclick=\"setFavorite('${d.mac}',false)\">取消保留</button>`:`<button class=\"secondary\" onclick=\"setFavorite('${d.mac}',true)\">保留</button>`;return rename+homekit+join+keep}",
+    "function deviceActions(d){let rename=`<button class=\"secondary action-rename\" onclick=\"openRename('${d.mac}')\">改名</button>`,homekit=d.homekit_direct?`<button class=\"secondary danger action-homekit\" onclick=\"setHomeKitDirect('${d.mac}',false)\">关闭 HomeKit</button>`:(filter==='online'||d.managed||d.favorite?`<button class=\"secondary action-homekit\" onclick=\"setHomeKitDirect('${d.mac}',true)\">启用 HomeKit</button>`:'');if(d.managed)return rename+homekit+`<button class=\"secondary action-link\" onclick=\"openEgress('${d.ip}')\">链路</button>`+`<button class=\"secondary action-diagnose\" onclick=\"openCapture('${d.ip}')\">诊断</button>`+(d.fixed?'<span class=\"action-fixed\">固定</span>':`<button class=\"secondary danger action-remove\" onclick=\"removeDevice('${d.ip}')\">恢复直连</button>`);let join=`<button class=\"secondary action-join\" onclick=\"choose('${d.ip}')\">加入旁路</button>`;if(filter==='favorites')return rename+homekit+join+`<button class=\"secondary danger action-remove\" onclick=\"setFavorite('${d.mac}',false)\">移出常用</button>`;let keep=d.favorite?`<button class=\"secondary danger action-remove\" onclick=\"setFavorite('${d.mac}',false)\">取消保留</button>`:`<button class=\"secondary action-join\" onclick=\"setFavorite('${d.mac}',true)\">保留</button>`;return rename+homekit+join+keep}",
+    1,
+)
+PAGE = PAGE.replace(
+    "return `<div class=\"device-row\"><div class=\"device-name\">${esc(d.name)}<div class=\"device-meta\">${esc(d.ip)}${d.static?' · 固定地址':''}${d.custom_name?' · 自定义名称':''}${d.homekit_direct?' · HomeKit 本地直连':''}${d.homekit_direct&&!d.homekit_route_active?' · 等待租约':''}</div></div><div class=\"device-mac muted\">${esc(d.mac)}</div><div class=\"device-online online ${d.status==='bound'?'bound':''}\">${d.status==='bound'?'在线':'离线'}</div><div class=\"device-state state ${state}\">${label}${d.managed?`<div class=\"device-meta\">${d.connections} 条连接 · ${d.packets} 个包</div>`:''}</div><div class=\"device-action\">${deviceActions(d)}</div></div>`",
+    "return `<div class=\"device-row\"><div class=\"device-name\"><b class=\"device-title\">${esc(d.name)}</b><div class=\"device-meta\">${esc(d.ip)}${d.static?' · 固定地址':''}${d.custom_name?' · 自定义名称':''}</div><div class=\"device-note ${d.homekit_direct?'is-active':''}\">${d.homekit_direct?(d.homekit_route_active?'HomeKit 本地直连':'HomeKit 等待租约'):'&nbsp;'}</div></div><div class=\"device-mac muted\">${esc(d.mac)}</div><div class=\"device-online online ${d.status==='bound'?'bound':''}\">${d.status==='bound'?'在线':'离线'}</div><div class=\"device-state state ${state}\"><b>${label}</b><div class=\"device-meta\">${d.managed?`${d.connections} 条连接 · ${d.packets} 个包`:'未加入旁路'}</div></div><div class=\"device-action\">${deviceActions(d)}</div></div>`",
+    1,
+)
+PAGE = PAGE.replace(
+    '</style></head>',
+    '''.device-row{grid-template-columns:minmax(260px,1.35fr) minmax(185px,.82fr) 82px minmax(160px,.78fr) minmax(340px,1.1fr);align-items:stretch;gap:0;min-height:98px;padding:0}.device-row>div{min-width:0;padding:17px 20px}.device-name{display:flex;flex-direction:column;justify-content:center;font-size:14px;font-weight:400}.device-title{display:block;overflow:hidden;color:#f5f5f7;font-size:16px;font-weight:650;line-height:1.22;text-overflow:ellipsis;white-space:nowrap}.device-name .device-meta,.device-state .device-meta{min-height:18px;margin-top:6px;overflow:hidden;line-height:18px;text-overflow:ellipsis;white-space:nowrap}.device-note{min-height:18px;margin-top:3px;color:transparent;font-size:12px;line-height:18px;white-space:nowrap}.device-note.is-active{color:#8e8e93}.device-mac{display:flex;align-items:center;margin:0!important;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px!important;font-variant-numeric:tabular-nums;white-space:nowrap}.device-online{display:flex;align-items:center;font-weight:650;white-space:nowrap}.device-state{display:flex;flex-direction:column;justify-content:center}.device-state b{font-size:15px;font-weight:650;line-height:1.22}.device-action{display:grid;grid-template-columns:44px 116px 44px 44px 78px;align-content:center;align-items:center;justify-content:end;gap:0;min-width:0;padding-left:8px!important;padding-right:16px!important}.device-action .secondary,.device-action .action-fixed{min-width:0;padding:7px 5px;text-align:center;white-space:nowrap}.device-action .action-fixed{color:#8e8e93;font-size:12px}.device-action .action-homekit{font-size:12px}.device-action .action-remove{font-size:12px}@media(max-width:1180px){.device-row{grid-template-columns:minmax(230px,1.3fr) minmax(155px,.75fr) 72px minmax(145px,.72fr) 330px}.device-row>div{padding-left:15px;padding-right:15px}.device-action{grid-template-columns:40px 110px 40px 40px 72px;padding-left:4px!important;padding-right:10px!important}}@media(max-width:860px){.device-row{grid-template-columns:minmax(0,1fr) auto;gap:8px;min-height:0;padding:13px 15px}.device-row>div{padding:0}.device-mac{display:none}.device-online{grid-column:1}.device-state{grid-column:1}.device-action{grid-column:2;grid-row:1/4;display:flex;max-width:150px;padding:0!important}.device-action .secondary,.device-action .action-fixed{padding:7px 6px}.device-note{min-height:0}.device-note:not(.is-active){display:none}}@media(max-width:460px){.device-row{padding:13px 12px}.device-action{max-width:138px}.device-action .action-homekit{font-size:11px}.device-action .action-remove{font-size:11px}}</style></head>''',
+    1,
+)
+PAGE = PAGE.replace(
+    "document.querySelector('#devices').innerHTML=shown.length?shown.map(d=>{",
+    "document.querySelector('#devices').innerHTML=shown.length?`<div class=\"device-header\"><span>设备</span><span>MAC 地址</span><span>在线</span><span>旁路</span><span>操作</span></div>`+shown.map(d=>{",
+    1,
+)
+PAGE = PAGE.replace(
+    '</style></head>',
+    '''.device-header,.device-row{grid-template-columns:minmax(260px,1.35fr) minmax(185px,.82fr) 82px minmax(160px,.78fr) minmax(292px,1.08fr)}.device-header{display:grid;gap:0;border-bottom:1px solid #38383a;background:#171719;color:#8e8e93;font-size:11px;font-weight:650}.device-header span{padding:10px 20px}.device-header span:last-child{text-align:right}.device-action{grid-template-columns:36px 104px 36px 36px 66px;padding-left:6px!important;padding-right:10px!important}.device-action .secondary,.device-action .action-fixed{padding-left:4px;padding-right:4px}@media(max-width:1180px){.device-header,.device-row{grid-template-columns:minmax(220px,1.3fr) minmax(150px,.75fr) 68px minmax(135px,.72fr) 278px}.device-header span,.device-row>div{padding-left:14px;padding-right:14px}.device-action{grid-template-columns:34px 96px 34px 34px 62px;padding-left:3px!important;padding-right:7px!important}}@media(max-width:860px){.device-header{display:none}}</style></head>''',
+    1,
+)
+
+# Keep the device table readable with compact text actions.  A menu was less
+# predictable on touch devices, so secondary diagnostics stay off this screen.
+PAGE = PAGE.replace(
+    "function deviceActions(d){let rename=`<button class=\"secondary action-rename\" onclick=\"openRename('${d.mac}')\">改名</button>`,homekit=d.homekit_direct?`<button class=\"secondary danger action-homekit\" onclick=\"setHomeKitDirect('${d.mac}',false)\">关闭 HomeKit</button>`:(filter==='online'||d.managed||d.favorite?`<button class=\"secondary action-homekit\" onclick=\"setHomeKitDirect('${d.mac}',true)\">启用 HomeKit</button>`:'');if(d.managed)return rename+homekit+`<button class=\"secondary action-link\" onclick=\"openEgress('${d.ip}')\">链路</button>`+`<button class=\"secondary action-diagnose\" onclick=\"openCapture('${d.ip}')\">诊断</button>`+(d.fixed?'<span class=\"action-fixed\">固定</span>':`<button class=\"secondary danger action-remove\" onclick=\"removeDevice('${d.ip}')\">恢复直连</button>`);let join=`<button class=\"secondary action-join\" onclick=\"choose('${d.ip}')\">加入旁路</button>`;if(filter==='favorites')return rename+homekit+join+`<button class=\"secondary danger action-remove\" onclick=\"setFavorite('${d.mac}',false)\">移出常用</button>`;let keep=d.favorite?`<button class=\"secondary danger action-remove\" onclick=\"setFavorite('${d.mac}',false)\">取消保留</button>`:`<button class=\"secondary action-join\" onclick=\"setFavorite('${d.mac}',true)\">保留</button>`;return rename+homekit+join+keep}",
+    "function deviceActions(d){let rename=`<button class=\"secondary action-rename\" onclick=\"openRename('${d.mac}')\">改名</button>`,homekit=d.homekit_direct?`<button class=\"secondary action-homekit is-on\" title=\"关闭 HomeKit 本地直连\" aria-label=\"关闭 HomeKit 本地直连\" onclick=\"setHomeKitDirect('${d.mac}',false)\">HomeKit</button>`:(filter==='online'||d.managed||d.favorite?`<button class=\"secondary action-homekit is-off\" title=\"启用 HomeKit 本地直连\" aria-label=\"启用 HomeKit 本地直连\" onclick=\"setHomeKitDirect('${d.mac}',true)\">HomeKit</button>`:'');if(d.managed)return rename+homekit+`<button class=\"secondary action-link\" onclick=\"openEgress('${d.ip}')\">链路</button>`+(d.fixed?'<span class=\"action-fixed\">固定</span>':`<button class=\"secondary action-remove\" onclick=\"removeDevice('${d.ip}')\">恢复直连</button>`);let join=`<button class=\"secondary action-join\" onclick=\"choose('${d.ip}')\">加入旁路</button>`;if(filter==='favorites')return rename+homekit+join+`<button class=\"secondary action-remove\" onclick=\"setFavorite('${d.mac}',false)\">移出常用</button>`;let keep=d.favorite?`<button class=\"secondary action-remove\" onclick=\"setFavorite('${d.mac}',false)\">取消保留</button>`:`<button class=\"secondary action-join\" onclick=\"setFavorite('${d.mac}',true)\">保留</button>`;return rename+homekit+join+keep}",
+    1,
+)
+PAGE = PAGE.replace(
+    '</style></head>',
+    '''.device-header,.device-row{grid-template-columns:minmax(275px,1.42fr) minmax(180px,.86fr) 78px minmax(175px,.86fr) 220px}.device-row{min-height:88px}.device-row>div{padding-top:14px;padding-bottom:14px}.device-title,.device-state b,.device-online{font-size:13px}.device-name .device-meta,.device-state .device-meta,.device-note,.device-mac{font-size:11px!important}.device-header span:last-child{text-align:right}.device-action{display:grid;grid-template-columns:38px 57px 38px 66px;align-items:center;justify-content:end;gap:0;padding:0 16px!important}.device-action .secondary{min-width:0;padding:7px 4px;background:transparent;color:#0a84ff;font-size:12px;white-space:nowrap}.device-action .secondary:hover{background:rgba(10,132,255,.12)}.device-action .action-homekit.is-on,.device-action .action-remove{color:#ff6961}.device-action .action-homekit.is-on:hover,.device-action .action-remove:hover{background:rgba(255,69,58,.12)}.device-action .action-fixed{padding:7px 4px;color:#8e8e93;font-size:12px;text-align:center;white-space:nowrap}@media(max-width:1180px){.device-header,.device-row{grid-template-columns:minmax(225px,1.32fr) minmax(150px,.8fr) 66px minmax(145px,.78fr) 202px}.device-header span,.device-row>div{padding-left:14px;padding-right:14px}.device-action{grid-template-columns:36px 55px 36px 62px;padding-left:5px!important;padding-right:9px!important}}@media(max-width:860px){.device-header{display:none}.device-action{display:flex;padding:0!important;justify-content:flex-end;flex-wrap:wrap;max-width:180px}.device-action .secondary,.device-action .action-fixed{padding:5px 6px}}@media(max-width:460px){.device-action{max-width:150px}.device-action .secondary,.device-action .action-fixed{font-size:11px}}</style></head>''',
+    1,
+)
+
+
+def legacy_page():
+    if not standalone_mode():
+        return PAGE
+    page = PAGE.replace(
+        '</style>',
+        '.standalone-banner{margin-bottom:20px;padding:14px 16px;border:1px solid rgba(10,132,255,.35);border-radius:8px;background:#151c29;color:#d6e7ff;font-size:13px;line-height:1.55}.standalone-banner strong{display:block;margin-bottom:4px;color:#fff}.standalone-hidden{display:none!important}</style>',
+        1,
+    )
+    page = page.replace(
+        '<main class="wrap">',
+        '<main class="wrap"><div class="standalone-banner"><strong>独立旁路模式</strong>本机不连接 RouterOS，也不会自动接管家庭设备。请使用 7890 HTTP/SOCKS5 代理，或由家庭网关将指定流量送入 7893。</div>',
+        1,
+    )
+    page = page.replace('<div class="eyebrow">SELECTIVE ROUTING</div>', '<div class="eyebrow">STANDALONE ROUTING</div>', 1)
+    page = page.replace('<h1>设备管理</h1>', '<h1>代理设备</h1>', 1)
+    page = page.replace('只接管需要旁路的设备，其余家庭网络保持原样。', '不连接家庭网关，不自动接管设备；按需使用本机代理入口。', 1)
+    page = page.replace(
+        '<section class="section"><div class="section-title"><h2>加入旁路</h2>',
+        '<section class="section standalone-hidden"><div class="section-title"><h2>加入旁路</h2>',
+        1,
+    )
+    page = page.replace('<div class="section-title"><h2>设备</h2>', '<div class="section-title"><h2>代理设备</h2>', 1)
+    page = page.replace("ready=summary.ready&&summary.netwatch==='up'", "ready=summary.ready&&(summary.mode==='standalone'||summary.netwatch==='up')", 1)
+    page = page.replace(
+        "healthItem('RB5009',summary.router==='connected','管理连接')+healthItem('DNS',checks.dns,'国内解析')+healthItem('Mihomo',checks.mihomo,'控制接口')+healthItem('当前策略',checks.policy,summary.detail?.proxy||'未就绪')+healthItem('自动回退',summary.netwatch==='up',summary.netwatch==='up'?'已启用':'未就绪')",
+        "healthItem(summary.mode==='standalone'?'运行模式':'RB5009',summary.mode==='standalone'||summary.router==='connected',summary.mode==='standalone'?'独立旁路':'管理连接')+healthItem('DNS',checks.dns,'本机解析')+healthItem('Mihomo',checks.mihomo,'代理入口')+healthItem(summary.mode==='standalone'?'设备接管':'当前策略',summary.mode==='standalone'||checks.policy,summary.mode==='standalone'?'未启用':summary.detail?.proxy||'未就绪')+healthItem(summary.mode==='standalone'?'路由策略':'自动回退',summary.mode==='standalone'||summary.netwatch==='up',summary.mode==='standalone'?'由家庭网关或客户端配置':summary.netwatch==='up'?'已启用':'未就绪')",
+        1,
+    )
+    page = page.replace("managed:'尚无已接管设备'", "managed:'独立模式不读取家庭网关设备'", 1)
+    return page
+
 RULES_PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>代理规则</title><style>
 :root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC","Segoe UI",sans-serif;background:#000;color:#f5f5f7;letter-spacing:0}*{box-sizing:border-box}body{margin:0;background:#000;color:#f5f5f7}.topbar{position:sticky;top:0;z-index:10;border-bottom:1px solid rgba(255,255,255,.1);background:rgba(18,18,20,.88);backdrop-filter:saturate(180%) blur(22px);-webkit-backdrop-filter:saturate(180%) blur(22px)}.topbar-inner{max-width:1040px;min-height:58px;margin:auto;padding:0 22px;display:flex;align-items:center;justify-content:space-between;gap:18px}.brand{font-size:17px;font-weight:650;color:#fff;white-space:nowrap}.nav{display:flex;align-items:center;gap:4px;padding:3px;background:#2c2c2e;border-radius:8px}.nav a{padding:7px 11px;border-radius:6px;color:#aeaeb2;text-decoration:none;font-size:13px;white-space:nowrap}.nav a.active{background:#636366;color:#fff}.wrap{max-width:1040px;margin:auto;padding:38px 22px 64px}.intro{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:25px}.intro h1{font-size:30px;line-height:1.15;margin:0;font-weight:700}.intro p{margin:9px 0 0;color:#98989d;font-size:14px}.count{padding:8px 11px;border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;color:#30d158;font-size:13px;white-space:nowrap}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:9px}.toolbar h2{font-size:13px;color:#8e8e93;font-weight:600;margin:0}.actions{display:flex;gap:7px}.group{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.rule-row{display:grid;grid-template-columns:34px minmax(0,1fr) auto;align-items:center;gap:9px;padding:9px 12px;border-top:1px solid #38383a}.rule-row:first-child{border-top:0}.rule-index{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#636366;text-align:right}.rule-input{min-width:0;width:100%;height:38px;border:1px solid transparent;border-radius:7px;background:#2c2c2e;color:#f5f5f7;padding:0 10px;font:13px ui-monospace,SFMono-Regular,Menlo,monospace;outline:none}.rule-input:focus{border-color:#0a84ff;box-shadow:0 0 0 3px rgba(10,132,255,.18)}.rule-input.protected{color:#aeaeb2}.icon-set{display:flex;gap:3px}.icon{width:34px;height:34px;border:0;border-radius:6px;background:transparent;color:#0a84ff;font-size:17px;cursor:pointer}.icon:hover{background:rgba(10,132,255,.12)}.icon.danger{color:#ff453a}.icon:disabled{color:#48484a;cursor:default;background:transparent}.button{height:36px;border:0;border-radius:7px;padding:0 13px;font:600 13px inherit;cursor:pointer}.primary{background:#0a84ff;color:#fff}.secondary{background:#2c2c2e;color:#f5f5f7}.button:disabled{opacity:.5;cursor:default}.footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px}.status{min-height:20px;color:#30d158;font-size:13px}.status.error{color:#ff6961}.empty{padding:28px;text-align:center;color:#8e8e93}.dirty .count{color:#ffd60a}@media(max-width:760px){.topbar-inner{height:auto;padding:10px 14px;align-items:flex-start;flex-direction:column;gap:8px}.nav{width:100%;display:grid;grid-template-columns:repeat(4,1fr)}.nav a{text-align:center;padding:7px 5px;white-space:normal}.wrap{padding:28px 14px 50px}.intro{align-items:flex-start;flex-direction:column}.rule-row{grid-template-columns:28px minmax(0,1fr);padding:9px}.icon-set{grid-column:2;justify-content:flex-end}.footer{align-items:stretch;flex-direction:column}.footer .button{width:100%}.actions{width:100%}.actions .button{flex:1}}
-</style></head><body><header class="topbar"><div class="topbar-inner"><div class="brand">家庭旁路</div><nav class="nav"><a href="/">设备</a><a class="active" href="/rules">规则</a><a href="/airport/">机场与候选池</a><a href="http://__FAMILY_PROXY_IP__:18091/">DNS</a></nav></div></header><main class="wrap" id="app"><div class="intro"><div><h1>代理规则</h1><p>按顺序匹配流量，国内直连与最终兜底受到保护。</p></div><div class="count" id="count">正在载入</div></div><div class="toolbar"><h2>规则顺序</h2><div class="actions"><button class="button secondary" onclick="reloadRules()">重新载入</button><button class="button primary" id="save" onclick="saveRules()" disabled>应用更改</button></div></div><div class="group" id="rules"><div class="empty">正在读取 Mihomo 配置</div></div><div class="footer"><div class="status" id="status"></div><button class="button secondary" onclick="addRule()">添加规则</button></div></main><script>
+</style></head><body><header class="topbar"><div class="topbar-inner"><div class="brand">家庭网络控制台</div><nav class="nav"><a href="/">设备</a><a class="active" href="/rules">规则</a><a href="/airport/">机场与候选池</a><a href="http://__FAMILY_PROXY_IP__:18091/">DNS</a></nav></div></header><main class="wrap" id="app"><div class="intro"><div><h1>代理规则</h1><p>按顺序匹配流量，国内直连与最终兜底受到保护。</p></div><div class="count" id="count">正在载入</div></div><div class="toolbar"><h2>规则顺序</h2><div class="actions"><button class="button secondary" onclick="reloadRules()">重新载入</button><button class="button primary" id="save" onclick="saveRules()" disabled>应用更改</button></div></div><div class="group" id="rules"><div class="empty">正在读取 Mihomo 配置</div></div><div class="footer"><div class="status" id="status"></div><button class="button secondary" onclick="addRule()">添加规则</button></div></main><script>
 const csrf="__CSRF__",app=document.querySelector('#app'),list=document.querySelector('#rules'),statusEl=document.querySelector('#status'),saveButton=document.querySelector('#save'),countEl=document.querySelector('#count');let rules=[],version='',protectedRules=new Set(),dirty=false;function esc(s){return String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]))}async function api(path,opt={}){let response=await fetch(path,{...opt,headers:{'Content-Type':'application/json','X-CSRF':csrf,...(opt.headers||{})}}),body=await response.json();if(!response.ok)throw Error(body.error||'请求失败');return body}function setStatus(message,ok=true){statusEl.textContent=message;statusEl.className='status '+(ok?'':'error')}function setDirty(value=true){dirty=value;app.classList.toggle('dirty',dirty);saveButton.disabled=!dirty;countEl.textContent=`${rules.length} 条${dirty?' · 未应用':''}`}function render(){list.innerHTML=rules.length?rules.map((rule,index)=>{let terminal=rule.toUpperCase().startsWith('MATCH,'),locked=protectedRules.has(rule)||terminal,blockDown=index===rules.length-1||rules[index+1]?.toUpperCase().startsWith('MATCH,');return `<div class="rule-row"><div class="rule-index">${index+1}</div><input class="rule-input ${locked?'protected':''}" value="${esc(rule)}" oninput="editRule(${index},this.value)" aria-label="第 ${index+1} 条规则" ${locked?'readonly':''}><div class="icon-set"><button class="icon" title="上移" aria-label="上移" onclick="moveRule(${index},-1)" ${index===0||terminal?'disabled':''}>↑</button><button class="icon" title="下移" aria-label="下移" onclick="moveRule(${index},1)" ${blockDown||terminal?'disabled':''}>↓</button><button class="icon danger" title="删除" aria-label="删除" onclick="removeRule(${index})" ${locked?'disabled':''}>×</button></div></div>`}).join(''):'<div class="empty">没有规则</div>';setDirty(dirty)}function applyData(data){rules=[...data.rules];version=data.version;protectedRules=new Set(data.protected||[]);dirty=false;render();setStatus('规则已载入')}async function reloadRules(){if(dirty&&!confirm('放弃尚未应用的修改？'))return;try{applyData(await api('/api/rules'))}catch(error){setStatus(error.message,false)}}function editRule(index,value){rules[index]=value;setDirty()}function moveRule(index,delta){let target=index+delta;if(target<0||target>=rules.length||rules[target].toUpperCase().startsWith('MATCH,'))return;[rules[index],rules[target]]=[rules[target],rules[index]];dirty=true;render()}function removeRule(index){rules.splice(index,1);dirty=true;render()}function addRule(){let matchIndex=rules.findIndex(rule=>rule.toUpperCase().startsWith('MATCH,')),insertAt=matchIndex<0?rules.length:matchIndex;rules.splice(insertAt,0,'DOMAIN-SUFFIX,example.com,Others');dirty=true;render();requestAnimationFrame(()=>document.querySelectorAll('.rule-input')[insertAt]?.focus())}async function saveRules(){if(!dirty)return;if(!confirm(`应用当前 ${rules.length} 条代理规则？`))return;saveButton.disabled=true;setStatus('正在校验并应用…');try{applyData(await api('/api/rules',{method:'POST',body:JSON.stringify({rules,version})}));setStatus('规则已通过校验并生效')}catch(error){setStatus(error.message,false);saveButton.disabled=false}}reloadRules()
 </script></body></html>'''
 RULES_PAGE = RULES_PAGE.replace(
@@ -1888,12 +4069,13 @@ RULES_PAGE = RULES_PAGE.replace(
 RULES_PAGE = RULES_PAGE.replace('href="http://__FAMILY_PROXY_IP__:18091/"', 'href="/dns/"')
 PAGE = PAGE.replace(
     '<a class="active" href="/">设备</a><a href="/rules">规则</a><a href="/airport/">机场与候选池</a></nav>',
-    '<a class="active" href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a></nav>',
+    '<a class="active" href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav>',
     1,
 )
+PAGE = PAGE.replace('</style>', '@media(max-width:760px){.nav{grid-template-columns:repeat(5,1fr)}}</style>', 1)
 RULES_PAGE = RULES_PAGE.replace(
     '<a href="/">设备</a><a class="active" href="/rules">规则</a><a href="/airport/">机场与候选池</a><a href="/dns/">DNS</a>',
-    '<a href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a class="active" href="/rules">规则</a>',
+    '<a href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a class="active" href="/rules">规则</a><a href="/mihomo-maintenance">维护</a>',
     1,
 )
 PAGE = PAGE.replace(
@@ -1901,9 +4083,102 @@ PAGE = PAGE.replace(
     "fetch(new URL(path,location.origin),{...opt,headers:",
     1,
 )
+PAGE = PAGE.replace(
+    '<nav class="nav"><a class="active" href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav>',
+    '<nav class="nav"><a class="active" href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a href="/mihomo-maintenance">维护</a></nav><a class="topbar-console-switch" href="/console">新版控制台</a>',
+    1,
+)
+PAGE = PAGE.replace(
+    '</style></head>',
+    '.topbar-console-switch{display:inline-flex;align-items:center;min-height:36px;margin-left:auto;padding:0 13px;border:1px solid #48484a;border-radius:7px;background:#1c1c1e;color:#f5f5f7;text-decoration:none;font-size:13px;font-weight:650;white-space:nowrap}.topbar-console-switch:hover{background:#2c2c2e;border-color:#636366}.topbar-inner{position:relative}.nav{position:absolute;left:50%;transform:translateX(-50%)}@media(max-width:760px){.topbar-console-switch{align-self:flex-end}.topbar-inner{position:static}.nav{position:static;transform:none}}</style></head>',
+    1,
+)
 
 
 MIHOMO_PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>Mihomo 节点</title><style>:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#000;color:#f5f5f7}*{box-sizing:border-box}body{margin:0;background:#000}.wrap{max-width:820px;margin:auto;padding:36px 18px 60px}a{color:#0a84ff;text-decoration:none}h1{font-size:30px;margin:24px 0 7px;letter-spacing:0}.sub{color:#8e8e93;margin:0 0 24px}.group{border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e;overflow:hidden}.row{display:grid;grid-template-columns:160px 1fr auto;align-items:center;gap:14px;padding:14px 16px;border-top:1px solid #38383a}.row:first-child{border-top:0}h2{font-size:15px;margin:0}.current{color:#8e8e93;font-size:12px;margin-top:4px;overflow-wrap:anywhere}select{min-width:0;width:100%;height:38px;padding:0 10px;border:1px solid #48484a;border-radius:7px;background:#2c2c2e;color:#fff;font:14px inherit}button{height:38px;border:0;border-radius:7px;background:#0a84ff;color:#fff;padding:0 15px;font-weight:600}.status{margin-top:14px;color:#30d158}.error{color:#ff453a}@media(max-width:620px){.row{grid-template-columns:1fr}.wrap{padding-top:24px}button{width:100%}}</style></head><body><main class="wrap"><a href="/">返回设备管理</a><h1>节点管理</h1><p class="sub">手动选择只影响对应业务组；AI 组不使用香港节点。</p><div class="group" id="groups"></div><div class="status" id="status"></div></main><script>const csrf="__CSRF__",status=document.querySelector('#status');function esc(s){return String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]))}async function req(path,opt={}){let r=await fetch(path,{...opt,headers:{'Content-Type':'application/json','X-CSRF':csrf}}),d=await r.json();if(!r.ok)throw Error(d.error||'请求失败');return d}async function load(){try{let d=await req('/api/mihomo');document.querySelector('#groups').innerHTML=d.groups.map(g=>`<section class="row"><div><h2>${esc(g.name)}</h2><div class="current">当前：${esc(g.now||'未选择')}</div></div><select id="group-${esc(g.name)}">${g.all.map(n=>`<option ${n===g.now?'selected':''}>${esc(n)}</option>`).join('')}</select><button onclick="choose('${esc(g.name)}')">应用</button></section>`).join('')}catch(e){status.textContent=e.message;status.className='status error'}}async function choose(group){try{let node=document.querySelector('#group-'+group).value,d=await req('/api/mihomo/select',{method:'POST',body:JSON.stringify({group,node})});status.textContent=d.message;status.className='status';await load()}catch(e){status.textContent=e.message;status.className='status error'}}load()</script></body></html>'''
+
+MIHOMO_MAINTENANCE_PAGE = r'''<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mihomo 维护</title><style>:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#000;color:#f5f5f7}*{box-sizing:border-box}body{margin:0}.wrap{max-width:760px;margin:auto;padding:34px 18px}a{color:#0a84ff;text-decoration:none}h1{font-size:30px;margin:24px 0 7px}.sub,.detail{color:#8e8e93;line-height:1.55}.panel{margin-top:22px;padding:18px;border:1px solid #2c2c2e;border-radius:8px;background:#1c1c1e}.state{font-weight:650;color:#30d158}.state.bad{color:#ff453a}.state.warn{color:#ffd60a}.actions{display:flex;gap:9px;margin-top:16px;flex-wrap:wrap}button{height:38px;border:0;border-radius:7px;padding:0 14px;background:#2c2c2e;color:#f5f5f7;font:600 14px inherit}.primary{background:#0a84ff}.meta{margin-top:14px;font:12px ui-monospace,monospace;color:#8e8e93;overflow-wrap:anywhere}.release{margin-top:14px;padding:11px;border-radius:7px;background:#2c2c2e;color:#aeaeb2;font-size:13px;line-height:1.55}@media(max-width:520px){.actions button{width:100%}}</style><main class="wrap"><a href="/">返回设备管理</a><h1>Mihomo 维护</h1><p class="sub">不自动升级。检查不会拉取镜像或重启容器；升级只重建 Mihomo，并在失败时自动恢复旧镜像。</p><section class="panel"><div class="state" id="state">正在读取状态</div><p class="detail" id="message"></p><div class="actions"><button onclick="check()">检查更新</button><button class="primary" id="upgrade" onclick="upgrade()">升级并验证</button></div><div class="meta" id="meta"></div><div class="release" id="release">尚未取得发布说明</div></section></main><script>const csrf="__CSRF__",state=document.querySelector('#state'),message=document.querySelector('#message'),meta=document.querySelector('#meta'),release=document.querySelector('#release'),upgradeButton=document.querySelector('#upgrade');async function api(path,opt={}){let r=await fetch(path,{...opt,headers:{'Content-Type':'application/json','X-CSRF':csrf}}),d=await r.json();if(!r.ok)throw Error(d.error||'请求失败');return d}function render(d){let busy=['applying','busy'].includes(d.state),bad=['failed','check_failed','rolled_back'].includes(d.state),warn=['update_available','applying','busy'].includes(d.state);state.textContent=({unknown:'尚未检查',checked:'检查完成',current:'当前已是最新',update_available:'发现可用更新',applying:'正在升级',success:'升级完成',rolled_back:'已自动回退',failed:'维护失败',check_failed:'检查失败',busy:'维护任务进行中'})[d.state]||d.state;state.className='state '+(bad?'bad':warn?'warn':'');message.textContent=d.message||'';meta.textContent=[d.current_version?`当前内核：${d.current_version}`:'',d.latest_version?`最新通道：${d.latest_version}`:'',d.latest_published?`最新构建说明时间：${d.latest_published}`:'',d.old_image_id?`当前镜像：${d.old_image_id.slice(0,19)}`:'',d.new_image_id?`最新镜像：${d.new_image_id.slice(0,19)}`:''].filter(Boolean).join(' · ');release.textContent=(d.release_notes_zh||'官方未提供可翻译的逐项变更说明。')+(d.docker_proxy_ready?'':' Docker 守护进程没有代理，已禁止执行升级。');upgradeButton.disabled=busy||d.docker_proxy_ready===false}async function load(){try{render(await api('/api/mihomo/upgrade'))}catch(e){state.textContent=e.message;state.className='state bad'}}async function check(){try{await api('/api/mihomo/upgrade/check',{method:'POST'});state.textContent='正在检查镜像仓库';state.className='state warn';setTimeout(load,1500)}catch(e){state.textContent=e.message;state.className='state bad'}}async function upgrade(){if(!confirm('升级将短暂重建 Mihomo 容器。系统会备份当前配置、保留旧镜像并在验证失败时自动回退。继续？'))return;try{await api('/api/mihomo/upgrade/apply',{method:'POST'});state.textContent='正在升级并验证';state.className='state warn';upgradeButton.disabled=true;poll()}catch(e){state.textContent=e.message;state.className='state bad'}}async function poll(){await load();let text=state.textContent;if(['正在升级','维护任务进行中'].includes(text))setTimeout(poll,2000)}load()</script>'''
+
+
+MIHOMO_MAINTENANCE_PAGE = r'''<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>系统维护</title>
+<style>
+:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#000;color:#f5f5f7}*{box-sizing:border-box}body{margin:0;background:#000}.topbar{position:sticky;top:0;z-index:5;border-bottom:1px solid rgba(255,255,255,.1);background:rgba(18,18,20,.88);backdrop-filter:saturate(180%) blur(22px)}.topbar-inner,.wrap{width:min(1040px,calc(100% - 44px));margin:auto}.topbar-inner{min-height:58px;display:flex;align-items:center;justify-content:space-between;gap:18px}.brand{font-size:17px;font-weight:650}.nav{display:flex;gap:4px;padding:3px;border-radius:8px;background:#2c2c2e}.nav a{padding:7px 11px;border-radius:6px;color:#aeaeb2;text-decoration:none;font-size:13px;white-space:nowrap}.nav a.active{background:#636366;color:#fff}.wrap{padding:38px 0 64px}.intro{margin-bottom:24px}.intro h1{margin:0;font-size:30px;line-height:1.15}.intro p{margin:9px 0 0;color:#98989d;line-height:1.55}.summary{display:flex;gap:8px;flex-wrap:wrap;margin-top:17px}.summary-item{display:flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid #2c2c2e;border-radius:7px;background:#1c1c1e;color:#aeaeb2;font-size:12px}.dot{width:8px;height:8px;border-radius:50%;background:#636366}.dot.ok{background:#30d158}.dot.warn{background:#ffd60a}.dot.bad{background:#ff453a}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.card{overflow:hidden;border:1px solid #38383a;border-radius:8px;background:#1c1c1e}.card-head{display:flex;justify-content:space-between;gap:14px;padding:16px;border-bottom:1px solid #38383a}.card h2{margin:0;font-size:17px}.card-head p{margin:5px 0 0;color:#8e8e93;font-size:12px;line-height:1.5}.badge{align-self:flex-start;padding:4px 7px;border-radius:6px;background:rgba(48,209,88,.12);color:#30d158;font-size:12px;font-weight:650;white-space:nowrap}.badge.warn{background:rgba(255,214,10,.12);color:#ffd60a}.badge.bad{background:rgba(255,69,58,.12);color:#ff6961}.facts{display:grid;grid-template-columns:1fr 1fr}.fact{min-height:74px;padding:14px;border-left:1px solid #38383a;border-bottom:1px solid #38383a}.fact:nth-child(odd){border-left:0}.label{display:block;color:#8e8e93;font-size:12px}.value{display:block;margin-top:8px;font-size:13px;font-weight:650;overflow-wrap:anywhere}.detail{min-height:78px;padding:14px;border-bottom:1px solid #38383a;color:#aeaeb2;font-size:13px;line-height:1.55}.actions{display:flex;gap:8px;flex-wrap:wrap;padding:14px}button{height:36px;padding:0 13px;border:0;border-radius:7px;background:#3a3a3c;color:#f5f5f7;font:600 13px inherit;cursor:pointer}button.primary{background:#0a84ff}button:disabled{cursor:default;opacity:.45}.notice{margin-top:18px;padding:12px 14px;border-left:3px solid #636366;border-radius:0 7px 7px 0;background:#1c1c1e;color:#98989d;font-size:12px;line-height:1.6}@media(max-width:760px){.topbar-inner{min-height:auto;padding:10px 0;align-items:flex-start;flex-direction:column;gap:8px}.nav{width:100%;display:grid;grid-template-columns:repeat(5,1fr)}.nav a{text-align:center;padding:7px 4px;white-space:normal}.grid{grid-template-columns:1fr}.wrap{padding:28px 0 50px}}@media(max-width:420px){.facts{grid-template-columns:1fr}.fact{border-left:0}.actions button{flex:1 1 100%}}
+</style></head><body><header class="topbar"><div class="topbar-inner"><div class="brand">家庭网络控制台</div><nav class="nav"><a href="/">设备</a><a href="/dns/">DNS</a><a href="/airport/">机场与候选池</a><a href="/rules">规则</a><a class="active" href="/mihomo-maintenance">维护</a></nav></div></header><main class="wrap"><section class="intro"><h1>系统维护</h1><p>仅在手动确认后更新组件。检查不重启服务；升级会先备份并在健康检查失败时自动回退。</p><div class="summary"><span class="summary-item"><i id="mihomo-dot" class="dot"></i><span>Mihomo</span></span><span class="summary-item"><i id="mosdns-dot" class="dot"></i><span>MosDNS</span></span><span class="summary-item"><i id="routeros-dot" class="dot"></i><span>RouterOS</span></span><span class="summary-item"><i id="z4pro-dot" class="dot"></i><span>Z4Pro ZOS</span></span></div></section><section class="grid"><article class="card"><div class="card-head"><div><h2>Mihomo</h2><p>透明代理内核与候选池运行环境</p></div><span id="mihomo-badge" class="badge">读取中</span></div><div class="facts"><div class="fact"><span class="label">当前版本</span><span id="mihomo-current" class="value">--</span></div><div class="fact"><span class="label">可用版本</span><span id="mihomo-latest" class="value">--</span></div><div class="fact"><span class="label">检查时间</span><span id="mihomo-time" class="value">--</span></div><div class="fact"><span class="label">升级条件</span><span id="mihomo-ready" class="value">--</span></div></div><div id="mihomo-detail" class="detail">正在读取维护状态。</div><div class="actions"><button id="mihomo-check">检查更新</button><button id="mihomo-apply" class="primary">升级并验证</button></div></article><article class="card"><div class="card-head"><div><h2>MosDNS</h2><p>DNS 解析内核，不改变现有分流规则</p></div><span id="mosdns-badge" class="badge">读取中</span></div><div class="facts"><div class="fact"><span class="label">当前版本</span><span id="mosdns-current" class="value">--</span></div><div class="fact"><span class="label">官方镜像</span><span id="mosdns-latest" class="value">等待检查</span></div><div class="fact"><span class="label">检查时间</span><span id="mosdns-time" class="value">--</span></div><div class="fact"><span class="label">自动更新</span><span id="mosdns-auto" class="value">--</span></div></div><div id="mosdns-detail" class="detail">正在读取维护状态。</div><div class="actions"><button id="mosdns-check">检查更新</button><button id="mosdns-apply" class="primary" disabled>升级并验证</button></div></article></section><p class="notice">维护页只汇总组件软件更新。DNS 上游、规则数据、广告过滤、候选池和 RouterOS 设置仍在各自页面管理，保持原有行为不变。</p></main><script>
+let csrf='__CSRF__'; const $=s=>document.querySelector(s); const labels={unknown:'尚未检查',checked:'检查完成',current:'已是最新',update_available:'有可用更新',applying:'升级中',success:'升级完成',rolled_back:'已自动回退',failed:'维护失败',check_failed:'检查失败',busy:'任务进行中',idle:'尚未检查',checking:'检查中',available:'有可用更新',up_to_date:'已是最新',updating:'升级中',updated:'升级完成',rolling_back:'正在回退',error:'需要检查'};
+function stamp(value){if(!value)return '尚无记录';let numeric=Number(value),normalized=Number.isFinite(numeric)&&numeric>0&&numeric<100000000000?numeric*1000:value,d=new Date(normalized);return Number.isNaN(d.getTime())?String(value):d.toLocaleString('zh-CN',{hour12:false})}function shortImage(value){let text=String(value||'');return text.startsWith('sha256:')?'sha256:'+text.slice(7,19):text||'等待检查'}function setState(name,phase,bad,warn){let text=labels[phase]||phase||'尚未检查',klass=bad?'bad':warn?'warn':'';$('#'+name+'-badge').textContent=text;$('#'+name+'-badge').className='badge '+klass;$('#'+name+'-dot').className='dot '+(bad?'bad':warn?'warn':'ok')}
+async function renewCsrf(){let r=await fetch('/api/csrf',{cache:'no-store'}),d=await r.json().catch(()=>({}));if(!r.ok||!d.csrf)throw Error('页面安全状态已过期，请重新打开本页');csrf=d.csrf}async function api(path,options={},retried=false){let r=await fetch(path,{cache:'no-store',...options,headers:{'Content-Type':'application/json','X-CSRF':csrf,'X-Requested-With':'family-dns',...(options.headers||{})}}),d=await r.json().catch(()=>({}));if(r.status===403&&d.error==='request rejected'&&!retried){await renewCsrf();return api(path,options,true)}if(!r.ok)throw Error(d.error||d.message||'请求失败');return d}
+function renderMihomo(d){let busy=['applying','busy'].includes(d.state),bad=['failed','check_failed','rolled_back'].includes(d.state),available=d.state==='update_available',warn=busy||available;setState('mihomo',d.state,bad,warn);$('#mihomo-current').textContent=d.current_version||'--';$('#mihomo-latest').textContent=d.latest_version||'等待检查';$('#mihomo-time').textContent=stamp(d.updated_at||d.latest_published);$('#mihomo-ready').textContent=d.docker_proxy_ready===false?'Docker 代理未就绪':available?'正式版可升级':'等待正式版';$('#mihomo-detail').textContent=(d.message||'尚未检查更新')+(d.release_notes_zh?' · '+d.release_notes_zh:'');$('#mihomo-check').disabled=busy;$('#mihomo-apply').disabled=busy||!available||d.docker_proxy_ready===false}
+function renderMosdns(d){let busy=Boolean(d.busy)||['checking','updating','rolling_back'].includes(d.phase),bad=['error','rolled_back'].includes(d.phase),warn=busy||Boolean(d.update_available);setState('mosdns',d.phase,bad,warn);$('#mosdns-current').textContent=d.current_version||'--';$('#mosdns-latest').textContent=shortImage(d.latest_image);$('#mosdns-time').textContent=stamp(d.completed_at||d.checked_at||d.updated_at);$('#mosdns-auto').textContent=d.config?.auto_enabled?'已开启':'已关闭';$('#mosdns-detail').textContent=(d.message||'尚未检查软件更新')+'。升级前会备份，验证失败将自动回退。';$('#mosdns-check').disabled=busy;$('#mosdns-apply').disabled=busy||!d.update_available}
+async function loadMihomo(){try{renderMihomo(await api('/api/mihomo/upgrade'))}catch(e){setState('mihomo','维护失败',true,false);$('#mihomo-detail').textContent=e.message}}async function loadMosdns(){try{renderMosdns(await api('/dns/maintenance-api/status'))}catch(e){setState('mosdns','维护失败',true,false);$('#mosdns-detail').textContent=e.message}}
+async function poll(load,selector){for(let n=0;n<180;n++){await new Promise(r=>setTimeout(r,2000));await load();if(!$(selector).textContent.match(/检查中|升级中|正在回退|任务进行中/))break}}
+async function runAction(button,detail,text,success,action,load,selector){let original=button.textContent;button.disabled=true;button.textContent=text;detail.textContent=text+'，请稍候…';try{await action();await poll(load,selector);detail.textContent=success+'。'+detail.textContent}catch(e){detail.textContent='操作失败：'+e.message;button.disabled=false;button.textContent=original;return}button.textContent=original;button.disabled=false}$('#mihomo-check').onclick=()=>runAction($('#mihomo-check'),$('#mihomo-detail'),'正在检查更新','检查完成，已刷新版本信息',()=>api('/api/mihomo/upgrade/check',{method:'POST'}),loadMihomo,'#mihomo-badge');$('#mihomo-apply').onclick=()=>{if(confirm('升级将短暂重建 Mihomo。系统会保留旧镜像，验证失败自动回退。继续？'))runAction($('#mihomo-apply'),$('#mihomo-detail'),'正在升级并验证','升级流程已完成',()=>api('/api/mihomo/upgrade/apply',{method:'POST'}),loadMihomo,'#mihomo-badge')};$('#mosdns-check').onclick=()=>runAction($('#mosdns-check'),$('#mosdns-detail'),'正在检查更新','检查完成，已刷新版本信息',()=>api('/dns/maintenance-api/check',{method:'POST'}),loadMosdns,'#mosdns-badge');$('#mosdns-apply').onclick=()=>{if(confirm('升级将短暂重启 MosDNS。配置会先备份，验证失败自动回退。继续？'))runAction($('#mosdns-apply'),$('#mosdns-detail'),'正在升级并验证','升级流程已完成',()=>api('/dns/maintenance-api/update',{method:'POST'}),loadMosdns,'#mosdns-badge')};Promise.all([loadMihomo(),loadMosdns()]);
+</script></body></html>'''
+
+MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
+    '>官方镜像</span><span id="mosdns-latest"',
+    '>整合镜像源</span><span id="mosdns-latest"',
+)
+
+MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
+    '<span id="mihomo-badge" class="badge">读取中</span>',
+    '<div class="card-head-tools"><button id="mihomo-release-open" class="info-button" type="button" title="查看更新内容" aria-label="查看 Mihomo 更新内容" disabled><span aria-hidden="true">i</span></button><span id="mihomo-badge" class="badge">读取中</span></div>',
+    1,
+).replace(
+    '</main><script>',
+    '''<dialog id="mihomo-release-dialog" class="release-dialog"><div class="release-dialog-head"><div><h2 id="mihomo-release-title">Mihomo 更新内容</h2><p id="mihomo-release-meta">正在读取版本信息</p></div><button id="mihomo-release-close" class="dialog-close" type="button" title="关闭" aria-label="关闭更新内容">&times;</button></div><pre id="mihomo-release-body">尚未取得正式版发布说明。</pre><div class="release-dialog-actions"><a id="mihomo-release-link" class="release-link" target="_blank" rel="noopener" hidden>查看官方发布页</a><button id="mihomo-release-done" type="button">关闭</button></div></dialog></main><script>''',
+    1,
+).replace(
+    '</style>',
+    '''.card-head-tools{display:flex;align-items:flex-start;gap:8px}.info-button,.dialog-close{width:30px;height:30px;padding:0;border:1px solid #48484a;border-radius:50%;background:#2c2c2e;color:#d1d1d6;font:700 14px/1 inherit}.info-button span{display:block;font-family:Georgia,serif}.info-button:not(:disabled):hover,.dialog-close:hover{background:#3a3a3c;color:#fff}.release-dialog{width:min(700px,calc(100vw - 28px));max-height:min(78vh,760px);padding:0;border:1px solid #48484a;border-radius:8px;background:#1c1c1e;color:#f5f5f7;box-shadow:0 22px 70px rgba(0,0,0,.65)}.release-dialog::backdrop{background:rgba(0,0,0,.68)}.release-dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:18px;border-bottom:1px solid #38383a}.release-dialog-head h2{margin:0;font-size:18px}.release-dialog-head p{margin:6px 0 0;color:#8e8e93;font-size:12px;line-height:1.5}.release-dialog pre{max-height:calc(78vh - 150px);margin:0;padding:18px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;color:#d1d1d6;font:13px/1.65 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}.release-dialog-actions{display:flex;justify-content:flex-end;align-items:center;gap:9px;padding:14px 18px;border-top:1px solid #38383a}.release-link{margin-right:auto;color:#0a84ff;font-size:13px;font-weight:650;text-decoration:none}@media(max-width:520px){.release-dialog{max-height:86vh}.release-dialog pre{max-height:calc(86vh - 162px)}.release-dialog-actions{align-items:stretch;flex-direction:column}.release-link{margin:0;padding:9px 0;text-align:center}.release-dialog-actions button{width:100%}}</style>''',
+    1,
+).replace(
+    "let csrf='__CSRF__'; const $=s=>document.querySelector(s);",
+    "let csrf='__CSRF__',mihomoRelease={}; const $=s=>document.querySelector(s);",
+    1,
+).replace(
+    "function renderMihomo(d){",
+    r'''function safeOfficialReleaseUrl(value){let text=String(value||'');return /^https:\/\/github\.com\/MetaCubeX\/mihomo\/releases\//.test(text)?text:''}function openMihomoRelease(){let d=mihomoRelease||{},version=d.latest_version||d.current_version||'未知版本',url=safeOfficialReleaseUrl(d.release_url);$('#mihomo-release-title').textContent='Mihomo '+version+' 更新内容';$('#mihomo-release-meta').textContent=[d.current_version?'当前 '+d.current_version:'',d.latest_version?'正式通道 '+d.latest_version:'',d.latest_published?'发布 '+stamp(d.latest_published):''].filter(Boolean).join(' · ')||'尚无版本信息';$('#mihomo-release-body').textContent=d.release_notes||'该正式 Docker 标签尚未提供对应的 GitHub Release 逐项说明。\n\n'+(d.release_notes_zh||'系统仍会仅跟踪已确认的 Mihomo 正式版镜像。');$('#mihomo-release-link').hidden=!url;if(url)$('#mihomo-release-link').href=url;$('#mihomo-release-dialog').showModal()}function closeMihomoRelease(){$('#mihomo-release-dialog').close()}function renderMihomo(d){''',
+    1,
+).replace(
+    "$('#mihomo-detail').textContent=(d.message||'尚未检查更新')+(d.release_notes_zh?' · '+d.release_notes_zh:'');$('#mihomo-check').disabled=busy;",
+    "mihomoRelease=d||{};$('#mihomo-detail').textContent=(d.message||'尚未检查更新')+(d.release_notes_zh?' · '+d.release_notes_zh:'');$('#mihomo-release-open').disabled=!(d.latest_version||d.current_version||d.release_notes);$('#mihomo-check').disabled=busy;",
+    1,
+).replace(
+    "$('#mihomo-check').onclick=()=>runAction",
+    "$('#mihomo-release-open').onclick=openMihomoRelease;$('#mihomo-release-close').onclick=closeMihomoRelease;$('#mihomo-release-done').onclick=closeMihomoRelease;$('#mihomo-release-dialog').addEventListener('click',event=>{if(event.target===event.currentTarget)closeMihomoRelease()});$('#mihomo-check').onclick=()=>runAction",
+    1,
+)
+
+_ALERT_CARD = r'''<section class="card alert-card"><div class="card-head"><div><h2>Telegram 告警</h2><p>所选机场来源在某业务池的候选节点全部连续两轮不可用时通知；恢复后可选发送恢复消息。</p></div><span id="alert-badge" class="badge">读取中</span></div><div class="alert-form"><label><span>Bot Token</span><input id="alert-token" type="password" autocomplete="new-password" placeholder="留空则保持已保存的 Token"></label><label><span>Chat ID</span><input id="alert-chat" autocomplete="off" placeholder="填写接收通知的 Chat ID"></label><div class="source-select"><span>告警机场来源</span><div id="alert-sources" class="source-options"></div></div><label class="toggle"><input id="alert-enabled" type="checkbox"><span>启用候选池故障告警</span></label><label class="toggle"><input id="alert-recovery" type="checkbox" checked><span>节点恢复时发送恢复通知</span></label></div><div id="alert-detail" class="detail">正在读取告警设置。</div><div class="actions"><button id="alert-save" class="primary">保存告警设置</button><button id="alert-test">发送测试消息</button></div></section>'''
+
+_ALERT_SCRIPT = r'''function renderAlerts(d){let enabled=Boolean(d.enabled),configured=Boolean(d.configured),selected=new Set(d.source_slots||[]);$('#alert-badge').textContent=enabled&&configured?'已启用':configured?'已配置':'未配置';$('#alert-badge').className='badge '+(enabled&&configured?'':'warn');$('#alert-enabled').checked=enabled;$('#alert-recovery').checked=d.notify_recovery!==false;$('#alert-chat').placeholder=d.chat_id_masked?`已保存：${d.chat_id_masked}；留空保持不变`:'填写接收通知的 Chat ID';$('#alert-sources').innerHTML=(d.available_sources||[]).map(s=>`<label class="source-option"><input type="checkbox" value="${s.slot}" ${selected.has(s.slot)?'checked':''}><span>${s.label}</span></label>`).join('')||'<span class="muted">尚无可选机场</span>';$('#alert-detail').textContent=enabled&&configured?'所选机场来源的候选节点全部不可用时推送；同一故障只通知一次。':configured?'凭据已保存，选择机场来源并启用后开始监控。':'请填写 Bot Token 与 Chat ID 后保存。'}async function loadAlerts(){try{renderAlerts(await api('/api/alerts'))}catch(e){$('#alert-badge').textContent='读取失败';$('#alert-badge').className='badge bad';$('#alert-detail').textContent=e.message}}async function runAlertAction(button,working,action){let original=button.textContent;button.disabled=true;button.textContent=working;$('#alert-detail').textContent=working+'，请稍候…';try{let result=await action();await loadAlerts();$('#alert-detail').textContent=result.message||'操作已完成'}catch(e){$('#alert-detail').textContent='操作失败：'+e.message}finally{button.disabled=false;button.textContent=original}}$('#alert-save').onclick=()=>runAlertAction($('#alert-save'),'正在保存',async()=>{let sources=[...document.querySelectorAll('#alert-sources input:checked')].map(x=>x.value),d=await api('/api/alerts',{method:'POST',body:JSON.stringify({enabled:$('#alert-enabled').checked,notify_recovery:$('#alert-recovery').checked,source_slots:sources,token:$('#alert-token').value.trim(),chat_id:$('#alert-chat').value.trim()})});$('#alert-token').value='';$('#alert-chat').value='';return {...d,message:'告警设置已保存'}});$('#alert-test').onclick=()=>runAlertAction($('#alert-test'),'正在发送',()=>api('/api/alerts/test',{method:'POST'}));'''
+
+MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
+    '</section><p class="notice">', '</section>' + _ALERT_CARD + '<p class="notice">', 1,
+).replace(
+    '</style>', '.alert-card{margin-top:14px}.alert-form{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:14px;border-bottom:1px solid #38383a}.alert-form label,.source-select{display:grid;gap:6px;color:#aeaeb2;font-size:12px}.alert-form input[type="password"],.alert-form input:not([type]){height:36px;padding:0 10px;border:1px solid #48484a;border-radius:7px;background:#2c2c2e;color:#f5f5f7;font:14px inherit}.source-options{display:flex;flex-wrap:wrap;gap:7px}.source-options .source-option{display:flex;align-items:center;gap:6px;padding:7px 8px;border:1px solid #48484a;border-radius:6px;background:#2c2c2e;font-size:13px}.source-option input{width:15px;height:15px;accent-color:#0a84ff}.alert-form .toggle{display:flex;align-items:center;gap:8px;font-size:13px}.alert-form .toggle input{width:16px;height:16px;accent-color:#0a84ff}@media(max-width:760px){.alert-form{grid-template-columns:1fr}}</style>', 1,
+).replace(
+    'Promise.all([loadMihomo(),loadMosdns()]);', _ALERT_SCRIPT + 'Promise.all([loadMihomo(),loadMosdns(),loadAlerts()]);', 1,
+)
+
+_PLATFORM_UPDATE_CARD = r'''<section class="platform-update-section"><div class="platform-update-head"><div><h2>系统与平台</h2><p>RouterOS 与 Z4Pro 的状态卡只读取官方通道；确认升级仍在各自官方管理界面完成。</p></div><button id="platform-check">检查系统更新</button></div><div class="platform-update-grid"><article class="card"><div class="card-head"><div><h2>RouterOS</h2><p>路由器官方长期支持通道</p></div><span id="routeros-update-badge" class="badge">读取中</span></div><div class="facts"><div class="fact"><span class="label">当前版本</span><span id="routeros-update-current" class="value">--</span></div><div class="fact"><span class="label">可用版本</span><span id="routeros-update-latest" class="value">--</span></div><div class="fact"><span class="label">更新通道</span><span id="routeros-update-channel" class="value">--</span></div><div class="fact"><span class="label">检查时间</span><span id="routeros-update-time" class="value">--</span></div></div><div id="routeros-update-detail" class="detail">正在读取 RouterOS 官方通道。</div></article><article class="card"><div class="card-head"><div><h2>Z4Pro ZOS</h2><p>极空间官方系统升级服务</p></div><span id="z4pro-update-badge" class="badge">读取中</span></div><div class="facts"><div class="fact"><span class="label">当前版本</span><span id="z4pro-update-current" class="value">--</span></div><div class="fact"><span class="label">可用版本</span><span id="z4pro-update-latest" class="value">--</span></div><div class="fact"><span class="label">通知状态</span><span id="platform-update-notice" class="value">--</span></div><div class="fact"><span class="label">检查时间</span><span id="z4pro-update-time" class="value">--</span></div></div><div id="z4pro-update-detail" class="detail">正在读取极空间官方升级服务。</div></article></div><div class="platform-update-foot" id="platform-update-foot">每日自动检查一次；Mihomo 仅正式发布版、MosDNS 更新纳入相同的去重通知。</div></section>'''
+
+_PLATFORM_UPDATE_SCRIPT = r'''function platformTime(value){let n=Number(value||0);if(!n)return '尚无记录';if(n<100000000000)n*=1000;let d=new Date(n);return isNaN(d.getTime())?'尚无记录':d.toLocaleString('zh-CN',{hour12:false})}function setPlatformState(prefix,item){item=item||{};let state={current:'已是最新',update_available:'有可用更新',check_failed:'检查失败',unknown:'等待检查'}[item.state]||'等待检查',bad=item.state==='check_failed',warn=item.state==='update_available';$('#'+prefix+'-update-badge').textContent=state;$('#'+prefix+'-update-badge').className='badge '+(bad?'bad':warn?'warn':'');$('#'+prefix+'-dot').className='dot '+(bad?'bad':warn?'warn':'ok');$('#'+prefix+'-update-current').textContent=item.current_version||'--';$('#'+prefix+'-update-latest').textContent=item.latest_version||'--';if(prefix==='routeros')$('#routeros-update-channel').textContent=item.channel||'--';$('#'+prefix+'-update-time').textContent=platformTime(item.checked_at);$('#'+prefix+'-update-detail').textContent=item.detail||'尚无可用信息'}function renderPlatformUpdates(data){setPlatformState('routeros',data.routeros);setPlatformState('z4pro',data.z4pro);let note=data.notification||{},notice={sent:'已推送 Telegram',already_sent:'已提醒',pending:'等待 Telegram 推送',not_needed:'无需推送'}[note.state]||'尚未推送';$('#platform-update-notice').textContent=notice;let mihomo=data.mihomo?.state==='preview_ignored'?'Mihomo 预发布已忽略':data.mihomo?.available?'Mihomo 有正式版更新':'Mihomo 已检查',components=[mihomo,data.mosdns?.available?'MosDNS 有更新':'MosDNS 已检查'].join(' · ');$('#platform-update-foot').textContent=(note.message||'每日自动检查一次；Mihomo 仅正式发布版、MosDNS 更新纳入相同的去重通知。')+'。'+components+'；自动检查每天 09:15 左右运行，不会自动升级。'}async function loadPlatformUpdates(){try{renderPlatformUpdates(await api('/api/platform/updates'))}catch(e){$('#platform-update-foot').textContent='系统更新读取失败：'+e.message}}async function checkPlatformUpdates(){let button=$('#platform-check'),original=button.textContent;button.disabled=true;button.textContent='正在检查';$('#platform-update-foot').textContent='正在执行四项只读更新检查，请稍候…';try{await api('/api/platform/updates/check',{method:'POST'});for(let n=0;n<70;n++){await new Promise(r=>setTimeout(r,1000));let d=await api('/api/platform/updates');if(Number(d.checked_at||0)*1000>Date.now()-90000){renderPlatformUpdates(d);break}}}catch(e){$('#platform-update-foot').textContent='检查失败：'+e.message}finally{button.disabled=false;button.textContent=original}}$('#platform-check').onclick=checkPlatformUpdates;'''
+
+MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
+    _ALERT_CARD,
+    _PLATFORM_UPDATE_CARD + _ALERT_CARD,
+    1,
+).replace(
+    '</style>',
+    '.platform-update-section{margin-top:14px}.platform-update-head{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:10px}.platform-update-head h2{margin:0;font-size:16px}.platform-update-head p{margin:6px 0 0;max-width:670px;color:#8e8e93;font-size:12px;line-height:1.55}.platform-update-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.platform-update-foot{margin-top:12px;padding:11px 14px;border-left:3px solid #636366;border-radius:0 7px 7px 0;background:#1c1c1e;color:#8e8e93;font-size:12px;line-height:1.55}@media(max-width:760px){.platform-update-head{align-items:flex-start;flex-direction:column}.platform-update-grid{grid-template-columns:1fr}.platform-update-head button{width:100%}}</style>',
+    1,
+).replace(
+    'Promise.all([loadMihomo(),loadMosdns(),loadAlerts()]);',
+    _PLATFORM_UPDATE_SCRIPT + 'Promise.all([loadMihomo(),loadMosdns(),loadAlerts(),loadPlatformUpdates()]);',
+    1,
+)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1938,6 +4213,32 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         return False
 
+    def send_frontend_file(self, relative_path, cache=False):
+        root = FRONTEND_ROOT.resolve()
+        try:
+            candidate = (root / relative_path).resolve()
+            candidate.relative_to(root)
+        except (OSError, ValueError):
+            self.reply(HTTPStatus.NOT_FOUND, {"error": "frontend asset not found"})
+            return
+        if not candidate.is_file():
+            self.reply(HTTPStatus.NOT_FOUND, {"error": "frontend asset not found"})
+            return
+        try:
+            data = candidate.read_bytes()
+        except OSError:
+            self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "frontend asset unavailable"})
+            return
+        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type + ("; charset=utf-8" if content_type.startswith("text/") else ""))
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable" if cache else "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.end_headers()
+        self.wfile.write(data)
+
     def send_capture_file(self, capture_id):
         try:
             capture_path, metadata_path = capture_paths(capture_id)
@@ -1971,8 +4272,31 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self.require_auth():
             return
-        if path == "/":
-            data = PAGE.replace("__CSRF__", CSRF_TOKEN).encode()
+        if path == "/favicon.ico":
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            return
+        if path == "/favicon.svg":
+            self.send_frontend_file("favicon.svg", cache=True)
+            return
+        if path.startswith("/assets/"):
+            self.send_frontend_file("assets/" + path[len("/assets/"):], cache=True)
+            return
+        if path == "/console":
+            if FRONTEND_INDEX_PATH.is_file():
+                self.send_frontend_file("index.html")
+                return
+            data = "新版控制台资源未安装，请先部署 frontend/dist。".encode("utf-8")
+            self.send_response(HTTPStatus.SERVICE_UNAVAILABLE)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if path in {"/", "/legacy"}:
+            data = legacy_page().replace("__CSRF__", CSRF_TOKEN).encode()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
@@ -1991,7 +4315,8 @@ class Handler(BaseHTTPRequestHandler):
             if nav_start >= 0 and nav_end >= 0:
                 navigation = ('<nav class="nav"><a href="/">设备</a><a href="/dns/">DNS</a>'
                               '<a href="/airport/">机场与候选池</a>'
-                              '<a class="active" href="/rules">规则</a></nav>')
+                              '<a class="active" href="/rules">规则</a>'
+                              '<a href="/mihomo-maintenance">维护</a></nav>')
                 template = template[:nav_start] + navigation + template[nav_end + len("</nav>"):]
             data = template.replace("__CSRF__", CSRF_TOKEN).encode()
             self.send_response(HTTPStatus.OK)
@@ -2004,6 +4329,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/mihomo":
             data = MIHOMO_PAGE.replace("__CSRF__", CSRF_TOKEN).encode()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Frame-Options", "DENY")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if path == "/mihomo-maintenance":
+            data = MIHOMO_MAINTENANCE_PAGE.replace("__CSRF__", CSRF_TOKEN).encode()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
@@ -2030,6 +4365,15 @@ class Handler(BaseHTTPRequestHandler):
                     {"error": f"WireGuard 状态读取失败：{exc}"},
                 )
             return
+        if path == "/api/wireguard/remote-access":
+            try:
+                self.reply(HTTPStatus.OK, remote_wireguard_status())
+            except (RouterError, OSError, ValueError) as exc:
+                self.reply(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": f"WireGuard 远程接入状态读取失败：{exc}"},
+                )
+            return
         if path == "/api/captures":
             try:
                 query = parse_qs(parsed.query)
@@ -2051,9 +4395,42 @@ class Handler(BaseHTTPRequestHandler):
             health = local_health()
             self.reply(HTTPStatus.OK if health["ready"] else HTTPStatus.SERVICE_UNAVAILABLE, health)
             return
+        if path == "/api/csrf":
+            self.reply(HTTPStatus.OK, {"csrf": CSRF_TOKEN})
+            return
+        if path == "/api/setup-status":
+            try:
+                self.reply(HTTPStatus.OK, setup_status())
+            except RouterError as exc:
+                self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+            return
+        if path == "/api/page-layout":
+            try:
+                self.reply(HTTPStatus.OK, load_page_layout_preferences())
+            except RouterError as exc:
+                self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+            return
         if path == "/api/mihomo":
             try:
                 self.reply(HTTPStatus.OK, mihomo_groups())
+            except RouterError as exc:
+                self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+            return
+        if path == "/api/mihomo/upgrade":
+            try:
+                self.reply(HTTPStatus.OK, mihomo_upgrade_status())
+            except (RouterError, OSError, subprocess.SubprocessError) as exc:
+                self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+            return
+        if path == "/api/platform/updates":
+            try:
+                self.reply(HTTPStatus.OK, read_platform_update_status())
+            except RouterError as exc:
+                self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+            return
+        if path == "/api/alerts":
+            try:
+                self.reply(HTTPStatus.OK, load_alert_settings())
             except RouterError as exc:
                 self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
             return
@@ -2071,7 +4448,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self.require_auth():
             return
-        if self.headers.get("X-CSRF") != CSRF_TOKEN:
+        gateway_request = hmac.compare_digest(self.headers.get("X-Family-Gateway", ""), GATEWAY_SECRET_PATH.read_text(encoding="utf-8").strip())
+        if self.headers.get("X-CSRF") != CSRF_TOKEN and not gateway_request:
             self.reply(HTTPStatus.FORBIDDEN, {"error": "request rejected"})
             return
         try:
@@ -2088,7 +4466,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(HTTPStatus.OK, update_device_preference(
                     body.get("mac", ""), body.get("alias") if "alias" in body else None,
                     body.get("favorite") if "favorite" in body else None,
+                    body.get("homekit_direct") if "homekit_direct" in body else None,
+                    body.get("icon") if "icon" in body else None,
                 ))
+            elif path == "/api/wireguard/preference":
+                self.reply(HTTPStatus.OK, update_wireguard_alias(body.get("key", ""), body.get("alias", "")))
+            elif path == "/api/wireguard/remote-access/generate":
+                self.reply(HTTPStatus.OK, create_remote_wireguard_client(body))
+            elif path == "/api/wireguard/remote-access/revoke":
+                self.reply(HTTPStatus.OK, revoke_remote_wireguard_client(body.get("id", "")))
+            elif path == "/api/page-layout":
+                self.reply(HTTPStatus.OK, update_page_layout_preferences(
+                    body.get("page", ""), body.get("hidden", []), body.get("order"), body.get("expanded")))
             elif path == "/api/capture/start":
                 self.reply(HTTPStatus.OK, start_capture(
                     body.get("ip", ""), body.get("duration", 60), body.get("scope", "all")))
@@ -2098,8 +4487,30 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(HTTPStatus.OK, delete_capture(body.get("id", "")))
             elif path == "/api/mihomo/select":
                 self.reply(HTTPStatus.OK, select_mihomo_node(body.get("group", ""), body.get("node", "")))
+            elif path == "/api/mihomo/upgrade/check":
+                self.reply(HTTPStatus.OK, start_mihomo_upgrade("family-mihomo-upgrade-check.service"))
+            elif path == "/api/mihomo/upgrade/apply":
+                self.reply(HTTPStatus.OK, start_mihomo_upgrade("family-mihomo-upgrade.service"))
+            elif path == "/api/platform/updates/check":
+                result = subprocess.run(
+                    ["systemctl", "start", "--no-block", "family-platform-update-check.service"],
+                    text=True, capture_output=True, timeout=8,
+                )
+                if result.returncode:
+                    raise RouterError("设备系统更新检查任务无法启动")
+                self.reply(HTTPStatus.OK, {"message": "设备系统更新检查已启动"})
+            elif path == "/api/alerts":
+                self.reply(HTTPStatus.OK, save_alert_settings(body))
+            elif path == "/api/alerts/test":
+                self.reply(HTTPStatus.OK, send_alert_test())
             elif path == "/api/rules":
-                self.reply(HTTPStatus.OK, save_mihomo_rules(body.get("rules"), body.get("version", "")))
+                self.reply(HTTPStatus.OK, save_mihomo_rules(
+                    body.get("rules"), body.get("version", ""),
+                    body.get("rule_sets") if "rule_sets" in body else None,
+                    body.get("rule_sets_version"),
+                    body.get("rule_card_labels") if "rule_card_labels" in body else None,
+                    body.get("rule_card_labels_version"),
+                ))
             else:
                 self.reply(HTTPStatus.NOT_FOUND, {"error": "not found"})
         except (RouterError, ValueError, OSError, json.JSONDecodeError) as exc:
@@ -2107,6 +4518,15 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 2 and sys.argv[1] == "platform-update-check":
+        print(json.dumps(check_platform_updates(), ensure_ascii=False))
+        raise SystemExit(0)
+    if len(sys.argv) == 2 and sys.argv[1] == "migrate-overseas-ai-rule-set":
+        print(json.dumps(migrate_overseas_ai_rule_set(), ensure_ascii=False))
+        raise SystemExit(0)
+    if len(sys.argv) == 2 and sys.argv[1] == "homekit-direct-routes":
+        print(json.dumps(homekit_direct_route_sync(), ensure_ascii=False))
+        raise SystemExit(0)
     with CAPTURE_LOCK:
         cleanup_captures()
     threading.Thread(target=capture_cleanup_loop, daemon=True).start()

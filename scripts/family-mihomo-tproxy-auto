@@ -8,9 +8,10 @@ STATE=/etc/family-proxy-ui/managed-ips
 CN_LIST=/etc/family-proxy-ui/cn-ipv4.txt
 NFT_TABLE=family_mihomo_direct
 LEGACY_CHAIN=FAMILY_MIHOMO_AUTO
-TABLE=family_mihomo_shared
+TABLE_ID=3000
 PREF=3000
 MARK=0x2000
+RETURN_PROTO=186
 
 source_config() {
   while IFS='=' read -r key value; do
@@ -18,10 +19,12 @@ source_config() {
     case "$key" in
       FAMILY_LAN_PREFIX) FAMILY_LAN_PREFIX=$value;;
       FAMILY_PROXY_IP) FAMILY_PROXY_IP=$value;;
+      FAMILY_ROUTER_IP) FAMILY_ROUTER_IP=$value;;
     esac
   done < "$CONFIG"
   [[ ${FAMILY_LAN_PREFIX:-} == *\. ]] || { echo "FAMILY_LAN_PREFIX invalid" >&2; exit 1; }
   [[ ${FAMILY_PROXY_IP:-} =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { echo "FAMILY_PROXY_IP invalid" >&2; exit 1; }
+  [[ ${FAMILY_ROUTER_IP:-} =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { echo "FAMILY_ROUTER_IP invalid" >&2; exit 1; }
 }
 
 valid_ip() {
@@ -40,14 +43,30 @@ clear_legacy_runtime() {
 }
 
 clear_policy_route() {
-  ip -o rule show | awk '/lookup family_mihomo_(shared|auto_[0-9]+)/ {gsub(/:/,"",$1); print $1}' | while read -r pref; do
+  ip -o rule show | awk -v table_id="$TABLE_ID" '$0 ~ /lookup family_mihomo_(shared|auto_[0-9]+)/ || $0 ~ ("lookup " table_id "([[:space:]]|$)") {gsub(/:/,"",$1); print $1}' | while read -r pref; do
     ip rule del pref "$pref" 2>/dev/null || true
   done
   awk '$2 ~ /^family_mihomo_auto_/ {print $2}' /etc/iproute2/rt_tables 2>/dev/null | while read -r table; do
     ip route flush table "$table" 2>/dev/null || true
   done
-  ip route flush table "$TABLE" 2>/dev/null || true
-  sed -i -E '/[[:space:]]family_mihomo_(auto_)?[0-9]+$/d' /etc/iproute2/rt_tables
+  ip route flush table "$TABLE_ID" 2>/dev/null || true
+}
+
+clear_return_routes() {
+  ip -4 route flush table main proto "$RETURN_PROTO" 2>/dev/null || true
+}
+
+sync_return_routes() {
+  local ip return_dev
+  return_dev=$(ip -4 route get "$FAMILY_ROUTER_IP" | awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}')
+  [[ -n "$return_dev" ]] || { echo "Cannot resolve LAN interface for $FAMILY_ROUTER_IP" >&2; exit 1; }
+  clear_return_routes
+  while IFS= read -r ip; do
+    valid_ip "$ip" || continue
+    # TPROXY requests arrive through RouterOS. Return through the same gateway
+    # so Wi-Fi clients do not discard or delay direct same-LAN SYN-ACK frames.
+    ip -4 route replace "$ip/32" via "$FAMILY_ROUTER_IP" dev "$return_dev" proto "$RETURN_PROTO"
+  done < "$STATE"
 }
 
 write_nft_rules() {
@@ -104,22 +123,25 @@ sync_rules() {
   nft add table inet "$NFT_TABLE" 2>/dev/null || true
   local rules
   rules=$(mktemp /etc/family-proxy-ui/.family-mihomo-direct.XXXXXX.nft)
-  trap 'rm -f "$rules"' RETURN
+  trap 'rm -f "$rules"' EXIT
   write_nft_rules "$rules"
   nft -c -f "$rules"
 
   clear_legacy_runtime
   clear_policy_route
-  grep -q "[[:space:]]$TABLE$" /etc/iproute2/rt_tables || printf '%s %s\n' "$PREF" "$TABLE" >> /etc/iproute2/rt_tables
-  ip route replace local 0.0.0.0/0 dev lo table "$TABLE"
-  ip rule add pref "$PREF" fwmark "$MARK/0xffffffff" lookup "$TABLE"
+  ip route replace local 0.0.0.0/0 dev lo table "$TABLE_ID"
+  ip rule add pref "$PREF" fwmark "$MARK/0xffffffff" lookup "$TABLE_ID"
   nft -f "$rules"
+  sync_return_routes
+  rm -f "$rules"
+  trap - EXIT
 }
 
 stop_rules() {
   clear_legacy_runtime
   nft delete table inet "$NFT_TABLE" 2>/dev/null || true
   clear_policy_route
+  clear_return_routes
 }
 
 case "${1:-sync}" in

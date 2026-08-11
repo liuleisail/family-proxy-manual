@@ -3,10 +3,18 @@ set -Eeuo pipefail
 for unit in family-proxy-ui family-mihomo-sub-import family-proxy-gateway; do
   systemctl is-active --quiet "$unit" || { echo "$unit is not active" >&2; exit 1; }
 done
-for executable in /usr/local/sbin/sync-routeros-cn-ipv4 /usr/local/sbin/refresh-mihomo-geodata; do
+for executable in /usr/local/sbin/sync-routeros-cn-ipv4 /usr/local/sbin/refresh-mihomo-geodata /usr/local/sbin/family-mihomo-upgrade /usr/local/sbin/homekit-direct-routes /usr/local/sbin/apply-family-proxy-mode; do
   [[ -x $executable ]] || { echo "$executable is missing" >&2; exit 1; }
 done
 systemctl is-enabled --quiet family-cn-ipv4-refresh.timer || { echo "CN refresh timer is disabled" >&2; exit 1; }
+systemctl is-enabled --quiet family-platform-update-check.timer || { echo "platform update check timer is disabled" >&2; exit 1; }
+router_mode=$(awk -F= '$1 == "ROUTER_MODE" { print tolower($2); exit }' /etc/family-proxy-ui/router.env)
+if [[ ${router_mode:-routeros} == routeros ]]; then
+  systemctl is-enabled --quiet homekit-direct-routes.timer || { echo "HomeKit direct route timer is disabled" >&2; exit 1; }
+else
+  [[ ${router_mode:-} == standalone ]] || { echo "Router mode is unresolved: ${router_mode:-missing}" >&2; exit 1; }
+  systemctl is-enabled --quiet homekit-direct-routes.timer && { echo "HomeKit timer must be disabled in standalone mode" >&2; exit 1; } || true
+fi
 if grep -qx 'MIHOMO_GEODATA_AUTO_UPDATE=true' /etc/family-proxy-ui/router.env; then
   systemctl is-enabled --quiet family-mihomo-geodata-refresh.timer || { echo "Mihomo geodata auto-update is configured but its timer is disabled" >&2; exit 1; }
 fi
@@ -23,6 +31,7 @@ checks = (
     (18093, '/api/health'),
     (18093, '/api/system/status'),
     (18093, '/api/wireguard/status'),
+    (18093, '/api/wireguard/remote-access'),
     (18093, '/api/captures'),
     (18090, '/api/state'),
 )
@@ -55,6 +64,15 @@ for port, path in checks:
             for interface in payload['interfaces']:
                 if forbidden & interface.keys() or any(forbidden & peer.keys() for peer in interface.get('peers', [])):
                     raise SystemExit('WireGuard status exposes key material')
+        if path == '/api/wireguard/remote-access':
+            if not {'mode', 'supported', 'clients'} <= payload.keys():
+                raise SystemExit('remote WireGuard payload is incomplete')
+            if payload.get('supported') and payload.get('interface'):
+                if not {'name', 'listen_port', 'network'} <= payload['interface'].keys():
+                    raise SystemExit('remote WireGuard interface payload is incomplete')
+            forbidden = {'public-key', 'private-key', 'preshared-key', 'config'}
+            if forbidden & payload.keys():
+                raise SystemExit('remote WireGuard status exposes key material')
         if path == '/api/captures':
             expected = {'file_bytes': 50_000_000, 'total_bytes': 200_000_000,
                         'retention_seconds': 86_400}

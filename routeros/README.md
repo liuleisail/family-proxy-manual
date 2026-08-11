@@ -27,6 +27,6 @@ sudo systemctl status family-mihomo-tproxy-auto
 
 8. 验证国内应用、局域网服务和外网策略。异常时先运行 `99-remove-device-template.rsc`，再在旁路主机删除对应 IP 并重新同步 TPROXY。
 
-共享策略会把接管设备的普通 TCP/UDP 53 重定向到旁路 DNS，并在 FastTrack 排除规则之前阻断这些设备访问局域网以外的 TCP/UDP 853。TCP 使用 reset 促使客户端快速回退，UDP 使用 drop；HTTPS 443 不做全局封锁，避免误伤正常网站。DoH、HTTPDNS 和应用内置解析仍需在 DNS 服务侧用经过验证的小型规则处理。
+共享策略会把接管设备的普通 TCP/UDP 53 重定向到旁路 DNS，并在 FastTrack 排除规则之前阻断这些设备访问局域网以外的 TCP/UDP 853。TCP 使用 reset 促使客户端快速回退，UDP 使用 drop；HTTPS 443 不做全局封锁，避免误伤正常网站。受管设备发往 `224.0.0.0/4` 的组播会在共享连接标记之前保持直连，用于 HomeKit/mDNS/IGMP；这不会改变设备的普通外网旁路。DoH、HTTPDNS 和应用内置解析仍需在 DNS 服务侧用经过验证的小型规则处理。
 
 不要执行会全局禁用 FastTrack、重写默认路由、全网 DNS 劫持或直接删除全部 mangle/NAT 的命令。共享规则只匹配 `family_mihomo_devices`，单设备撤出只删除它的地址列表成员和 IPv6 防漏项。

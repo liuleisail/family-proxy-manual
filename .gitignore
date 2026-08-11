@@ -27,3 +27,10 @@ docker-data/
 cache.db
 __pycache__/
 *.pyc
+
+# Local browser test state and visual verification artifacts.
+.playwright-cli/
+output/
+
+# Frontend dependencies are local; the built static bundle is published.
+frontend/node_modules/
