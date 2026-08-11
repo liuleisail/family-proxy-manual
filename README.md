@@ -91,38 +91,55 @@ Bot Token 与 Chat ID 已在截图中遮挡，保留告警来源、故障与恢�
 
 ## 安装
 
-旁路服务器需要 Linux、Docker Engine、Docker Compose 插件、`systemd` 和固定 LAN IPv4。支持 Debian、Ubuntu、极空间、飞牛及其它 Linux 系统。安装器不会自动修改 RouterOS、DNS、订阅或设备接管状态。
+适用于 Debian、Ubuntu、极空间、飞牛及其它 Linux 旁路服务器。安装前需要准备 Docker Engine、Docker Compose 插件、`systemd`、固定 LAN IPv4 和一块持久化磁盘。安装器不会自动安装或替换 Docker，也不会自动修改路由器、DNS 或接管设备。
 
-### 1. 交互式安装
+### 1. 一键安装（推荐）
+
+在旁路服务器终端执行：
 
 ```bash
 git clone https://github.com/liuleisail/family-proxy-manual.git
 cd family-proxy-manual
-sudo ./scripts/bootstrap-interactive.sh
-```
-
-按提示填写 LAN 网段、旁路主机 IP、接口、模式、管理账号和数据目录。脚本会安装服务、创建 Mihomo 容器、启动并校验控制面。
-
-### 2. 网页向导
-
-```bash
 sudo ./scripts/install-one-click.sh
 ```
 
-脚本输出局域网一次性地址。打开后选择 `routeros` 或 `standalone`，完成配置后执行：
+按终端提示填写：
+
+1. 家庭 LAN 网段。
+2. 旁路主机固定 IP。
+3. 家庭网关 IP。
+4. LAN 网卡或桥接口；Z4Pro 通常是 `kvmbr0`，其它系统先运行 `ip -br link` 确认。
+5. 数据目录。
+
+脚本完成后会显示一个局域网一次性地址。用同一局域网设备打开它，选择：
+
+- 家庭网关是 RouterOS 7：选择 `routeros`。
+- 其它路由器：选择 `standalone`。
+
+向导完成后执行：
 
 ```bash
 sudo ./scripts/verify-server.sh
 ```
 
-### 3. 路由模式与地址
+显示校验通过后，登录管理页并导入订阅。RouterOS 模式再准备路由器规则；独立模式直接按下方说明给设备设置代理。
+
+### 2. 设备使用方式
 
 - RouterOS 7：不要求 RB5009。`FAMILY_ROUTER_IP`/`ROUTER_HOST` 填实际网关地址，`FAMILY_PROXY_IP` 填旁路主机固定地址。
-- 非 RouterOS：选择 `standalone`。网关保持原地址，旁路主机使用固定地址，设备使用独立 IP 或 DHCP 静态租约。
-- 独立模式最简单的用法是将设备代理设置为 `FAMILY_PROXY_IP:7890`。设备默认网关仍指向家庭网关；仅修改设备 IP 不会自动翻墙。
-- `7893` 是 TPROXY 透明入口，不是普通代理端口。透明代理需要家庭网关自行提供策略路由和回程路由。
+- 非 RouterOS：设备继续使用家庭网关作为默认网关，并将 HTTP/SOCKS5 代理设置为 `FAMILY_PROXY_IP:7890`。设备使用独立 IP 或 DHCP 静态租约；只改设备 IP 不会自动翻墙。
+- `7893` 是 TPROXY 透明入口，不是普通代理端口。无感代理需要家庭网关自行支持策略路由和回程路由。
 
-### 4. 手工部署
+### 3. RouterOS 接入
+
+仅在 `routeros` 模式执行：
+
+1. 运行 `routeros/01-preflight-and-backup.rsc` 并保存备份。
+2. 填写 LAN 和旁路主机 IP，运行 `routeros/02-prepare-controller.rsc`。
+3. 在管理页导入订阅，只加入一台测试设备。
+4. 验证国内、局域网和外网访问后，再接入其它设备。
+
+### 4. 高级：手工部署
 
 ```bash
 git clone https://github.com/liuleisail/family-proxy-manual.git
@@ -136,18 +153,7 @@ sudo ./scripts/install-server.sh --start
 sudo ./scripts/verify-server.sh
 ```
 
-`frontend/dist/index.html` 必须存在；DNS 服务需自行监听旁路主机的 `53` 端口，本项目不会抢占该端口。
-
-### 5. RouterOS 接入
-
-仅在 `routeros` 模式执行：
-
-1. 运行 `routeros/01-preflight-and-backup.rsc` 并保存备份。
-2. 填写 LAN 和旁路主机 IP，运行 `routeros/02-prepare-controller.rsc`。
-3. 在管理页导入订阅后，只加入一台测试设备。
-4. 验证国内、局域网和外网访问后，再接入其它设备。
-
-完整部署说明见 [DEPLOYMENT.md](DEPLOYMENT.md)，RouterOS 命令见 [routeros/README.md](routeros/README.md)。
+DNS 服务需自行监听旁路主机的 `53` 端口，本项目不会抢占该端口。完整部署说明见 [DEPLOYMENT.md](DEPLOYMENT.md)，RouterOS 命令见 [routeros/README.md](routeros/README.md)。
 
 ### 可选：建立专用运维密钥账号
 
