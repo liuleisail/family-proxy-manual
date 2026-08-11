@@ -15,25 +15,17 @@ scp family-cn-ipv4.rsc <router-user>@<router-ip>:
 然后在 RouterOS 执行 `/import file-name=family-cn-ipv4.rsc`，确认 `/ip firewall address-list print count-only where list="family_cn_ipv4"` 大于 1000。地址表只需在列表更新后重新生成和导入，不包含任何账号或订阅信息。
 
 3. 在 `02-prepare-controller.rsc` 填写 LAN 网段和旁路主机 IP，导入脚本。脚本会在连接打标前加入国内目的地址直连规则，避免国内流量经过 `RouterOS -> Z4Pro -> RouterOS` 的额外往返。
-4. 在 RouterOS 中确认 API 服务只允许旁路主机访问。创建最小权限 API 用户前，先检查当前用户组策略和输入链顺序。
-   如果已经存在名为 `family-mihomo-tproxy-health` 的 Netwatch，
-   将其 HTTP 探针端口设为专用健康端口，避免把经 WireGuard
-   SNAT 后的远程管理访问误判成路由器探针：
-
-```routeros
-/tool netwatch set [find where name="family-mihomo-tproxy-health"] port=18087
-```
-
-   `18088` 只用于交互式管理页面，`18087` 只用于 RouterOS 健康探针。
-5. 用管理页面加入设备；仅当页面不可用时，才填写并导入 `03-enable-device-template.rsc`。
-6. 在旁路主机将同一 IP 写入 `/etc/family-proxy-ui/managed-ips` 后运行：
+4. 在 `04-health-netwatch.rsc` 填写同一旁路主机 IP 并导入。它会把历史 `18087` 探测更新为统一网关 `18088`，并让故障回退只启停当前共享策略，不再匹配旧设备或旧 auto 规则。
+5. 在 RouterOS 中确认 API 服务只允许旁路主机访问。创建最小权限 API 用户前，先检查当前用户组策略和输入链顺序。
+6. 用管理页面加入设备；仅当页面不可用时，才填写并导入 `03-enable-device-template.rsc`。
+7. 在旁路主机将同一 IP 写入 `/etc/family-proxy-ui/managed-ips` 后运行：
 
 ```bash
 sudo /usr/local/sbin/family-mihomo-tproxy-auto sync
 sudo systemctl status family-mihomo-tproxy-auto
 ```
 
-7. 验证国内应用、局域网服务和外网策略。异常时先运行 `99-remove-device-template.rsc`，再在旁路主机删除对应 IP 并重新同步 TPROXY。
+8. 验证国内应用、局域网服务和外网策略。异常时先运行 `99-remove-device-template.rsc`，再在旁路主机删除对应 IP 并重新同步 TPROXY。
 
 共享策略会把接管设备的普通 TCP/UDP 53 重定向到旁路 DNS，并在 FastTrack 排除规则之前阻断这些设备访问局域网以外的 TCP/UDP 853。TCP 使用 reset 促使客户端快速回退，UDP 使用 drop；HTTPS 443 不做全局封锁，避免误伤正常网站。受管设备发往 `224.0.0.0/4` 的组播会在共享连接标记之前保持直连，用于 HomeKit/mDNS/IGMP；这不会改变设备的普通外网旁路。DoH、HTTPDNS 和应用内置解析仍需在 DNS 服务侧用经过验证的小型规则处理。
 
