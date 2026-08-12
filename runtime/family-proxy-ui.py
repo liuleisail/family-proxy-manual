@@ -57,7 +57,8 @@ FIXED_MANAGED_IPS = set()
 RESERVED_IPS = {"__FAMILY_ROUTER_IP__", "__FAMILY_RESERVED_GATEWAY_IP__", PROXY_IP}
 AUDIT_PATH = Path("/var/log/family-proxy-ui-audit.jsonl")
 CSRF_TOKEN_PATH = Path("/etc/family-proxy-ui/csrf-token")
-BUILD_VERSION = "2026.08.10-standalone-routing"
+BUILD_VERSION = "0.11.9"
+BUILD_INFO_PATH = Path("/opt/family-proxy-ui/build-info.json")
 SHARED_LIST = "family_mihomo_devices"
 SHARED_TABLE = "family_mihomo_shared"
 SHARED_CONN_MARK = "family_mihomo_conn"
@@ -84,7 +85,7 @@ def load_csrf_token():
 
 CSRF_TOKEN = load_csrf_token()
 HEALTH_LOCK = threading.Lock()
-HEALTH_GATE = {"ready": True, "failures": 0, "successes": 0}
+HEALTH_GATE = {"ready": False, "failures": 0, "successes": 0}
 RULES_LOCK = threading.Lock()
 DEVICE_PREFS_LOCK = threading.Lock()
 PAGE_LAYOUT_PREFS_LOCK = threading.Lock()
@@ -436,6 +437,7 @@ def local_health():
         "ready": all(checks.values()),
         "checks": checks,
         "detail": detail,
+        "build": build_info(),
         "elapsed_ms": round((time.monotonic() - started) * 1000),
     }
 
@@ -457,6 +459,17 @@ def gated_health():
         health["ready"] = HEALTH_GATE["ready"]
         health["gate"] = dict(HEALTH_GATE)
     return health
+
+
+def build_info():
+    try:
+        value = json.loads(BUILD_INFO_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        value = {}
+    return {
+        "version": str(value.get("version") or BUILD_VERSION),
+        "id": str(value.get("id") or "source"),
+    }
 
 
 def audit(action, ip, outcome, detail=""):
@@ -2786,7 +2799,8 @@ def router_summary(api):
         "netwatch": health.get("status", "unknown") if health else "missing",
         "router": "connected",
         "router_resource": router_resource,
-        "version": BUILD_VERSION,
+        "version": build_info()["version"],
+        "build_id": build_info()["id"],
     })
     return summary
 
@@ -4385,8 +4399,8 @@ class Handler(BaseHTTPRequestHandler):
             except (RouterError, OSError) as exc:
                 self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
             return
-        if path == "/api/health":
-            health = local_health()
+        if path in {"/api/health", "/api/health/gated"}:
+            health = gated_health() if path.endswith("/gated") else local_health()
             self.reply(HTTPStatus.OK if health["ready"] else HTTPStatus.SERVICE_UNAVAILABLE, health)
             return
         if path == "/api/csrf":

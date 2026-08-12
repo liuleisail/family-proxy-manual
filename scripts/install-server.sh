@@ -8,6 +8,7 @@ START=0
 if [[ ${1:-} == "--config" ]]; then CONFIG=$2; shift 2; fi
 [[ ${1:-} == "--start" ]] && START=1
 [[ $EUID -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }
+[[ -f "$REPO_DIR/VERSION" ]] || { echo "VERSION is missing" >&2; exit 1; }
 command -v systemctl >/dev/null || { echo "systemd is required" >&2; exit 1; }
 command -v docker >/dev/null || { echo "Docker must be installed first; installer will not replace NAS Docker" >&2; exit 1; }
 python3 -c 'import yaml' 2>/dev/null || {
@@ -52,6 +53,14 @@ done
 install -d -m 700 /opt/family-proxy-ui/rendered
 python3 "$REPO_DIR/scripts/render-runtime.py" "$CONFIG" "$REPO_DIR/runtime" /opt/family-proxy-ui/rendered
 python3 -m py_compile /opt/family-proxy-ui/rendered/*.py
+version=$(< "$REPO_DIR/VERSION")
+source_id=$(printf '%s\n' \
+  "$(sha256sum /opt/family-proxy-ui/rendered/family-proxy-ui.py | awk '{print $1}')" \
+  "$(sha256sum /opt/family-proxy-ui/rendered/family-proxy-gateway.py | awk '{print $1}')" \
+  "$(sha256sum "$REPO_DIR/VERSION" | awk '{print $1}')" \
+  "$(sha256sum "$REPO_DIR/frontend/dist/index.html" | awk '{print $1}')" | sha256sum | awk '{print substr($1,1,12)}')
+printf '{"version":"%s","id":"%s","deployed_at":"%s"}\n' "$version" "$source_id" "$stamp" > /opt/family-proxy-ui/build-info.json
+install -m 644 "$REPO_DIR/VERSION" /opt/family-proxy-ui/VERSION
 install -m 755 /opt/family-proxy-ui/rendered/family-proxy-ui.py /opt/family-proxy-ui/family-proxy-ui.py
 install -m 755 /opt/family-proxy-ui/rendered/family-mihomo-sub-import.py /opt/family-proxy-ui/family-mihomo-sub-import.py
 install -m 755 /opt/family-proxy-ui/rendered/family-proxy-gateway.py /opt/family-proxy-ui/family-proxy-gateway.py

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+TARGET=${Z4PRO_SSH_TARGET:-z4pro}
+REMOTE_DIR=${Z4PRO_SOURCE_DIR:-/home/codexops/family-proxy-manual}
+cd "$REPO_DIR"
+
+rsync -azc \
+    VERSION DEPLOYMENT.md README.md deploy/ routeros/ runtime/ scripts/ tests/ \
+    frontend/package.json frontend/package-lock.json frontend/index.html \
+    frontend/tsconfig.json frontend/vite.config.ts frontend/src/ frontend/dist/ \
+    "$TARGET:$REMOTE_DIR/"
+
+local_hash=$(sha256sum runtime/family-proxy-gateway.py | awk '{print $1}')
+remote_hash=$(ssh "$TARGET" "sha256sum '$REMOTE_DIR/runtime/family-proxy-gateway.py'" | awk '{print $1}')
+[[ "$local_hash" == "$remote_hash" ]] || {
+    echo "Z4Pro source hash mismatch: local=$local_hash remote=$remote_hash" >&2
+    exit 1
+}
+printf 'Z4Pro source synchronized: %s\n' "$remote_hash"
