@@ -88,7 +88,7 @@ class MaintenanceReleaseInfoTests(unittest.TestCase):
         for source in (
             "https://github.com/MetaCubeX/mihomo/releases",
             "https://github.com/IrineSistiana/mosdns/releases",
-            "https://manual.mikrotik.com/docs/getting-started/installation-and-upgrade/",
+            "https://mikrotik.com/download/changelogs?channelFilter=stable",
             "https://download.zspace.cn/",
         ):
             self.assertIn(source, page)
@@ -98,9 +98,9 @@ class MaintenanceReleaseInfoTests(unittest.TestCase):
             "routeros", "当前已是最新", "官方通道没有可用更新", "2026-08-12T10:00:00Z"
         )
 
-        self.assertEqual(metadata["release_source"], "MikroTik RouterOS 官方升级文档")
+        self.assertEqual(metadata["release_source"], "MikroTik RouterOS 官方稳定版 Changelog")
         self.assertEqual(metadata["release_notes"], "官方通道没有可用更新")
-        self.assertTrue(metadata["release_url"].startswith("https://manual.mikrotik.com/"))
+        self.assertTrue(metadata["release_url"].startswith("https://mikrotik.com/download/changelogs"))
 
 
 if __name__ == "__main__":
