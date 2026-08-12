@@ -25,9 +25,38 @@ def load_module(name, path):
 
 GATEWAY = load_module("family_proxy_gateway_setup", ROOT / "runtime" / "family-proxy-gateway.py")
 PREPARE = load_module("family_proxy_prepare_config", ROOT / "scripts" / "prepare-config.py")
+UI_SOURCE = (ROOT / "runtime" / "family-proxy-ui.py").read_text(encoding="utf-8")
 
 
 class FirstRunSetupTests(unittest.TestCase):
+    def test_health_contract_uses_unified_gated_probe(self):
+        self.assertEqual(GATEWAY.HEALTH_PORT, 18088)
+        self.assertEqual(GATEWAY.HEALTH_BACKEND_PATH, "/api/health/gated")
+        self.assertEqual(GATEWAY.LEGACY_HEALTH_PORT, 18087)
+
+    def test_ui_health_contract_contains_hysteresis_and_build_identity(self):
+        self.assertIn('BUILD_VERSION = "0.11.9"', UI_SOURCE)
+        self.assertIn('BUILD_INFO_PATH = Path("/opt/family-proxy-ui/build-info.json")', UI_SOURCE)
+        self.assertIn('if HEALTH_GATE["successes"] >= 2:', UI_SOURCE)
+        self.assertIn('if HEALTH_GATE["failures"] >= 2:', UI_SOURCE)
+        self.assertIn('HEALTH_GATE = {"ready": False, "failures": 0, "successes": 0}', UI_SOURCE)
+        self.assertIn('path in {"/api/health", "/api/health/gated"}', UI_SOURCE)
+
+    def test_ui_deploy_installs_runtime_helpers(self):
+        script = (ROOT / "scripts" / "deploy-family-proxy-ui").read_text(encoding="utf-8")
+        self.assertIn("apply-runtime-mode", script)
+        self.assertIn("family-mihomo-tproxy-auto", script)
+        self.assertIn("refresh-mihomo-geodata.py", script)
+        self.assertIn('install -m 644 "$SOURCE_DIR/VERSION" "$TARGET_DIR/VERSION"', script)
+
+    def test_z4pro_sync_uses_content_checksums_without_delete(self):
+        script = (ROOT / "scripts" / "sync-z4pro-source").read_text(encoding="utf-8")
+        self.assertIn("rsync -azc", script)
+        self.assertIn("runtime/family-proxy-gateway.py", script)
+        self.assertIn("mktemp -d /tmp/family-proxy-source", script)
+        self.assertIn('ssh "$TARGET" sudo rsync', script)
+        self.assertNotIn("--delete", script)
+
     def test_gateway_keeps_http_handler_lifecycle_setup_method(self):
         self.assertIs(GATEWAY.Handler.setup, BaseHTTPRequestHandler.setup)
 
@@ -41,6 +70,13 @@ class FirstRunSetupTests(unittest.TestCase):
         self.assertIn('class="family-layout-settings"', rendered)
         self.assertIn("<svg ", rendered)
         self.assertNotIn("⚙", rendered)
+
+    def test_legacy_airport_navigation_keeps_maintenance_entry(self):
+        html = '<header><nav class="nav"><a href="/">设备</a><a class="active" href="/airport/">机场与候选池</a></nav></header>'
+        rendered = GATEWAY.inject_legacy_navigation(html, "airport")
+        self.assertIn('<a class="active" href="/airport/">机场与候选池</a>', rendered)
+        self.assertIn('<a href="/mihomo-maintenance">维护</a>', rendered)
+        self.assertEqual(rendered.count('<nav class="nav">'), 1)
 
     def form(self, **overrides):
         values = {

@@ -9,8 +9,13 @@ BACKUP_ROOT=/var/backups/family-proxy
 [[ $EUID -eq 0 ]] || { echo "run through sudo" >&2; exit 1; }
 [[ -r $CONFIG ]] || { echo "missing $CONFIG" >&2; exit 1; }
 [[ -f $SOURCE_DIR/runtime/family-proxy-ui.py ]] || { echo "missing UI source" >&2; exit 1; }
+[[ -f $SOURCE_DIR/runtime/family-proxy-gateway.py ]] || { echo "missing gateway source" >&2; exit 1; }
 [[ -x $SOURCE_DIR/scripts/render-runtime.py ]] || { echo "missing renderer" >&2; exit 1; }
 [[ -f $SOURCE_DIR/frontend/dist/index.html ]] || { echo "missing frontend build: run (cd frontend && npm install && npm run build)" >&2; exit 1; }
+[[ -f $SOURCE_DIR/VERSION ]] || { echo "missing VERSION" >&2; exit 1; }
+for helper in apply-runtime-mode family-mihomo-tproxy-auto refresh-cn-ipv4 sync-routeros-cn-ipv4.py refresh-mihomo-geodata.py family-mihomo-upgrade homekit-direct-routes; do
+    [[ -f "$SOURCE_DIR/scripts/$helper" ]] || { echo "missing helper: $helper" >&2; exit 1; }
+done
 
 stamp=$(date +%Y%m%d-%H%M%S)
 backup_dir=$BACKUP_ROOT/$stamp
@@ -19,15 +24,56 @@ trap 'rm -rf "$stage_dir"' EXIT
 
 install -d -m 700 "$backup_dir"
 [[ -f $TARGET_DIR/family-proxy-ui.py ]] && install -m 700 "$TARGET_DIR/family-proxy-ui.py" "$backup_dir/family-proxy-ui.py"
+[[ -f $TARGET_DIR/family-proxy-gateway.py ]] && install -m 700 "$TARGET_DIR/family-proxy-gateway.py" "$backup_dir/family-proxy-gateway.py"
+[[ -f $TARGET_DIR/build-info.json ]] && install -m 600 "$TARGET_DIR/build-info.json" "$backup_dir/build-info.json"
+[[ -f $TARGET_DIR/VERSION ]] && install -m 600 "$TARGET_DIR/VERSION" "$backup_dir/VERSION"
+[[ -d $TARGET_DIR/frontend ]] && cp -a "$TARGET_DIR/frontend" "$backup_dir/frontend"
+install -d -m 700 "$backup_dir/helpers"
+for helper in apply-family-proxy-mode family-mihomo-tproxy-auto refresh-family-cn-ipv4 sync-routeros-cn-ipv4 refresh-mihomo-geodata family-mihomo-upgrade homekit-direct-routes; do
+    [[ -f "/usr/local/sbin/$helper" ]] && install -m 700 "/usr/local/sbin/$helper" "$backup_dir/helpers/$helper"
+done
 
 python3 "$SOURCE_DIR/scripts/render-runtime.py" "$CONFIG" "$SOURCE_DIR/runtime" "$stage_dir"
-python3 -m py_compile "$stage_dir/family-proxy-ui.py"
+python3 -m py_compile "$stage_dir/family-proxy-ui.py" "$stage_dir/family-proxy-gateway.py"
+grep -q 'HEALTH_PORT = 18088' "$stage_dir/family-proxy-gateway.py" || { echo "gateway health port is not 18088" >&2; exit 1; }
+grep -q 'HEALTH_BACKEND_PATH = "/api/health/gated"' "$stage_dir/family-proxy-gateway.py" || { echo "gateway is not using gated health" >&2; exit 1; }
+version=$(< "$SOURCE_DIR/VERSION")
+source_id=$(printf '%s\n' \
+    "$(sha256sum "$stage_dir/family-proxy-ui.py" | awk '{print $1}')" \
+    "$(sha256sum "$stage_dir/family-proxy-gateway.py" | awk '{print $1}')" \
+    "$(sha256sum "$SOURCE_DIR/VERSION" | awk '{print $1}')" \
+    "$(sha256sum "$SOURCE_DIR/frontend/dist/index.html" | awk '{print $1}')" | sha256sum | awk '{print substr($1,1,12)}')
+printf '{"version":"%s","id":"%s","deployed_at":"%s"}\n' "$version" "$source_id" "$stamp" > "$stage_dir/build-info.json"
+install -m 644 "$stage_dir/build-info.json" "$TARGET_DIR/build-info.json"
+install -m 644 "$SOURCE_DIR/VERSION" "$TARGET_DIR/VERSION"
 install -m 755 "$stage_dir/family-proxy-ui.py" "$TARGET_DIR/family-proxy-ui.py"
+install -m 755 "$stage_dir/family-proxy-gateway.py" "$TARGET_DIR/family-proxy-gateway.py"
 install -d -m 755 "$TARGET_DIR/frontend"
 cp -a "$SOURCE_DIR/frontend/dist/." "$TARGET_DIR/frontend/"
+install -m 755 "$SOURCE_DIR/scripts/apply-runtime-mode" /usr/local/sbin/apply-family-proxy-mode
+install -m 755 "$SOURCE_DIR/scripts/family-mihomo-tproxy-auto" /usr/local/sbin/family-mihomo-tproxy-auto
+install -m 755 "$SOURCE_DIR/scripts/refresh-cn-ipv4" /usr/local/sbin/refresh-family-cn-ipv4
+install -m 755 "$SOURCE_DIR/scripts/sync-routeros-cn-ipv4.py" /usr/local/sbin/sync-routeros-cn-ipv4
+install -m 755 "$SOURCE_DIR/scripts/refresh-mihomo-geodata.py" /usr/local/sbin/refresh-mihomo-geodata
+install -m 755 "$SOURCE_DIR/scripts/family-mihomo-upgrade" /usr/local/sbin/family-mihomo-upgrade
+install -m 755 "$SOURCE_DIR/scripts/homekit-direct-routes" /usr/local/sbin/homekit-direct-routes
 
-systemctl restart family-proxy-ui.service
-systemctl is-active --quiet family-proxy-ui.service
+systemctl restart family-proxy-ui.service family-proxy-gateway.service
+systemctl is-active --quiet family-proxy-ui.service family-proxy-gateway.service
+
+proxy_ip=$(awk -F= '$1 == "FAMILY_PROXY_IP" { print $2; exit }' "$CONFIG")
+for port in 18087 18088; do
+    ready=0
+    for attempt in $(seq 1 20); do
+        if curl --interface "$proxy_ip" --silent --output /dev/null \
+            --write-out '%{http_code}' "http://$proxy_ip:$port/" | grep -Eq '^(200|303|403)$'; then
+            ready=1
+            break
+        fi
+        sleep 0.5
+    done
+    (( ready == 1 )) || { echo "gateway port $port did not become ready" >&2; exit 1; }
+done
 
 secret=$(< /etc/family-proxy-ui/gateway.secret)
 wireguard_payload="$stage_dir/wireguard-status.json"
@@ -50,4 +96,14 @@ for attempt in $(seq 1 20); do
 done
 [[ -s $remote_wireguard_payload ]] || { echo "remote WireGuard API did not become ready" >&2; exit 1; }
 python3 -c 'import json, sys; payload = json.load(open(sys.argv[1])); assert {"mode", "supported", "clients"} <= payload.keys(); assert not ({"public-key", "private-key", "preshared-key", "config"} & payload.keys()); print("remote WireGuard API verified ({0} managed client(s))".format(len(payload.get("clients", []))))' "$remote_wireguard_payload"
+health_payload="$stage_dir/health.json"
+for attempt in $(seq 1 20); do
+    if curl --fail --silent -H "X-Family-Gateway: $secret" \
+        --output "$health_payload" http://127.0.0.1:18093/api/health/gated; then
+        break
+    fi
+    sleep 0.5
+done
+[[ -s $health_payload ]] || { echo "gated health API did not become ready" >&2; exit 1; }
+python3 -c 'import json, sys; payload = json.load(open(sys.argv[1])); assert payload.get("ready") is True; assert payload.get("checks") == {"mihomo": True, "dns": True, "policy": True}; assert payload.get("build", {}).get("version"); print("gated health verified ({0})".format(payload["build"]))' "$health_payload"
 echo "Backup: $backup_dir"

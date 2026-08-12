@@ -2,6 +2,11 @@
 
 当前前端控制台版本：`0.11.9`。
 
+发布时必须使用同一份仓库提交构建前端并运行 `scripts/deploy-family-proxy-ui`；
+该脚本会同时安装 UI、gateway、前端资源和 `build-info.json`，验证 gated health 后才算部署成功。
+RouterOS 健康检查固定走旁路主机的 `18088`，不要从 NAS 或 Mac 的普通 curl 结果判断旁路是否正常。
+页面显示的 build ID 来自实际安装文件内容指纹，不代表 GitHub 提交号；发布前需先通过 `scripts/verify-release.sh`，再由维护者提交并推送。
+
 ### `v0.11.9` 发布摘要
 
 - 修复全新安装时 UI 服务因缺少审计日志文件触发 systemd `226/NAMESPACE` 的问题。
@@ -48,6 +53,8 @@ npm run build
 ```
 
 `frontend/dist` 会随发布提交，`install-server.sh` 和 `deploy-family-proxy-ui` 会将它复制到 `/opt/family-proxy-ui/frontend`。统一入口仍由 `family-proxy-gateway` 提供，原有 DNS、机场、规则和旧版维护页面继续保留。
+
+Z4Pro 发布使用 `scripts/sync-z4pro-source` 同步部署源。脚本按内容校验和执行 `rsync -azc`，不会删除远端其它文件；同步后会核对网关源码哈希，再运行 Z4Pro 上的 `sudo scripts/deploy-family-proxy-ui`。不要用只按时间戳判断的普通同步命令，否则远端文件时间较新时可能出现“同步成功但页面仍是旧版本”。
 
 以下截图来自脱敏的实际管理页面状态，用于说明日常操作入口；图片不包含订阅链接、节点地址、设备 IP/MAC 或登录凭据。
 

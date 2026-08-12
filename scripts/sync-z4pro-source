@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+TARGET=${Z4PRO_SSH_TARGET:-z4pro}
+REMOTE_DIR=${Z4PRO_SOURCE_DIR:-/home/codexops/family-proxy-manual}
+cd "$REPO_DIR"
+
+remote_stage=$(ssh "$TARGET" "mktemp -d /tmp/family-proxy-source.XXXXXX")
+cleanup() { ssh "$TARGET" "rm -rf '$remote_stage'"; }
+trap cleanup EXIT
+
+rsync -azc \
+    VERSION DEPLOYMENT.md README.md deploy/ routeros/ runtime/ scripts/ tests/ \
+    frontend/package.json frontend/package-lock.json frontend/index.html \
+    frontend/tsconfig.json frontend/vite.config.ts frontend/src/ frontend/dist/ \
+    "$TARGET:$remote_stage/"
+ssh "$TARGET" sudo rsync -azc "$remote_stage/" "$REMOTE_DIR/"
+
+key_files=(
+    runtime/family-proxy-gateway.py
+    runtime/family-proxy-ui.py
+    routeros/04-health-netwatch.rsc
+    tests/test_first_run_setup.py
+    tests/test_mihomo_bootstrap.py
+    tests/test_family_proxy_ui.py
+    tests/test_routeros_health_netwatch.py
+    scripts/sync-z4pro-source
+    frontend/dist/index.html
+)
+for file in "${key_files[@]}"; do
+    remote_file=$(ssh "$TARGET" mktemp /tmp/family-proxy-key.XXXXXX)
+    scp -q "$file" "$TARGET:$remote_file"
+    ssh "$TARGET" sudo install -m 644 "$remote_file" "$REMOTE_DIR/$file"
+    ssh "$TARGET" rm -f "$remote_file"
+done
+local_hashes=$(sha256sum "${key_files[@]}" | awk '{print $1}')
+remote_files=("${key_files[@]/#/$REMOTE_DIR/}")
+remote_hashes=$(ssh "$TARGET" sudo sha256sum "${remote_files[@]}" | awk '{print $1}')
+if [[ "$local_hashes" != "$remote_hashes" ]]; then
+    echo "Z4Pro source hash mismatch after privileged sync" >&2
+    diff -u <(printf '%s\n' "$local_hashes") <(printf '%s\n' "$remote_hashes") || true
+    exit 1
+fi
+printf 'Z4Pro source synchronized and key files verified\n'

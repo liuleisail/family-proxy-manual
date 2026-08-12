@@ -105,7 +105,12 @@ class MihomoBootstrapTests(unittest.TestCase):
             (ROOT / "deploy" / "mihomo-config.base.yaml").read_text()
         )
         groups = {item["name"] for item in config["proxy-groups"]}
-        targets = {rule.split(",", 2)[2] for rule in config["rules"]}
+        targets = {
+            parts[2].split(",", 1)[0]
+            for rule in config["rules"]
+            for parts in [rule.split(",", 2)]
+            if len(parts) >= 3
+        }
         self.assertTrue({"Apple", "Telegram"}.issubset(groups))
         builtins = {"DIRECT", "REJECT", "PASS", "Others", "Apple", "Telegram", "V2EX-Auto"}
         self.assertTrue(targets.difference(builtins).issubset(groups))

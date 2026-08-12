@@ -3,6 +3,12 @@ set -Eeuo pipefail
 for unit in family-proxy-ui family-mihomo-sub-import family-proxy-gateway; do
   systemctl is-active --quiet "$unit" || { echo "$unit is not active" >&2; exit 1; }
 done
+proxy_ip=$(awk -F= '$1 == "FAMILY_PROXY_IP" { print $2; exit }' /etc/family-proxy-ui/router.env)
+for port in 18087 18088; do
+  curl --interface "$proxy_ip" --silent --output /dev/null --max-time 5 \
+    --write-out '%{http_code}' "http://$proxy_ip:$port/" | grep -Eq '^(200|303|403)$' \
+    || { echo "gateway port $port is not ready" >&2; exit 1; }
+done
 for executable in /usr/local/sbin/sync-routeros-cn-ipv4 /usr/local/sbin/refresh-mihomo-geodata /usr/local/sbin/family-mihomo-upgrade /usr/local/sbin/homekit-direct-routes /usr/local/sbin/apply-family-proxy-mode; do
   [[ -x $executable ]] || { echo "$executable is missing" >&2; exit 1; }
 done
@@ -21,14 +27,25 @@ fi
 python3 - <<'PY'
 import json
 import importlib.util
+import hashlib
 import time
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 secret = Path('/etc/family-proxy-ui/gateway.secret').read_text().strip()
+build_info = json.loads(Path('/opt/family-proxy-ui/build-info.json').read_text())
+fingerprint_inputs = (
+    Path('/opt/family-proxy-ui/family-proxy-ui.py'),
+    Path('/opt/family-proxy-ui/family-proxy-gateway.py'),
+    Path('/opt/family-proxy-ui/VERSION'),
+    Path('/opt/family-proxy-ui/frontend/index.html'),
+)
+fingerprint_lines = ''.join(f'{hashlib.sha256(path.read_bytes()).hexdigest()}\n' for path in fingerprint_inputs)
+fingerprint = hashlib.sha256(fingerprint_lines.encode()).hexdigest()[:12]
 checks = (
     (18093, '/api/health'),
+    (18093, '/api/health/gated'),
     (18093, '/api/system/status'),
     (18093, '/api/wireguard/status'),
     (18093, '/api/wireguard/remote-access'),
@@ -57,6 +74,13 @@ for port, path in checks:
         responses[(port, path)] = payload
         if path == '/api/system/status' and not {'cpu', 'memory', 'disk', 'docker'} <= payload.keys():
             raise SystemExit('system status payload is incomplete')
+        if path == '/api/health/gated':
+            if payload.get('ready') is not True:
+                raise SystemExit(f'gated health is not ready: {payload}')
+            if payload.get('build', {}).get('version') != build_info.get('version'):
+                raise SystemExit('runtime build version does not match build-info.json')
+            if payload.get('build', {}).get('id') != fingerprint:
+                raise SystemExit('runtime build fingerprint does not match installed files')
         if path == '/api/wireguard/status':
             if not {'updated_at', 'interfaces', 'events'} <= payload.keys():
                 raise SystemExit('WireGuard status payload is incomplete')

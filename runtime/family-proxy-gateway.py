@@ -26,6 +26,10 @@ SECRET_PATH = Path("/etc/family-proxy-ui/gateway.secret")
 SETUP_STATE_PATH = Path("/etc/family-proxy-ui/setup-state.json")
 LAN = ipaddress.ip_network(os.environ.get("FAMILY_LAN_CIDR", "__FAMILY_LAN_CIDR__"))
 SESSION_TTL = 12 * 60 * 60
+HEALTH_PATH = "/"
+HEALTH_BACKEND_PATH = "/api/health/gated"
+HEALTH_PORT = 18088
+LEGACY_HEALTH_PORT = 18087
 SETUP_LOCK = threading.Lock()
 HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade"}
 
@@ -66,6 +70,29 @@ PAGE_LAYOUT = {
 SETTINGS_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.03-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.88L4.2 7.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6h.03A1.7 1.7 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9v.03A1.7 1.7 0 0 0 20.91 10H21a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15Z"/></svg>'
 
 
+LEGACY_NAVIGATION = (
+    ("devices", "设备", "/"),
+    ("dns", "DNS", "/dns/"),
+    ("airport", "机场与候选池", "/airport/"),
+    ("rules", "规则", "/rules"),
+    ("maintenance", "维护", "/mihomo-maintenance"),
+)
+
+
+def legacy_navigation(active):
+    links = []
+    for key, label, href in LEGACY_NAVIGATION:
+        active_attr = ' class="active"' if key == active else ""
+        links.append(f'<a{active_attr} href="{href}">{label}</a>')
+    return '<nav class="nav">' + "".join(links) + "</nav>"
+
+
+def inject_legacy_navigation(html, page):
+    if page not in {item[0] for item in LEGACY_NAVIGATION}:
+        return html
+    return re.sub(r'<nav class="nav"[^>]*>.*?</nav>', legacy_navigation(page), html, count=1, flags=re.S)
+
+
 def layout_page_for_path(path):
     if path in {"/", "/legacy"}:
         return "devices"
@@ -96,6 +123,7 @@ def inject_page_layout(html, page):
     encoded = json.dumps(sections, ensure_ascii=False)
     settings_icon = json.dumps(SETTINGS_ICON, ensure_ascii=False)
     client = f'''<style>
+@media(min-width:761px){{.topbar-inner{{position:relative}}.topbar-inner .nav{{position:absolute;left:50%;transform:translateX(-50%)}}}}@media(max-width:760px){{.topbar-inner{{position:static}}.topbar-inner .nav{{position:static;transform:none}}}}@media(min-width:901px){{.header-inner{{position:relative}}.header-inner .global-nav{{position:absolute;left:50%;transform:translateX(-50%)}}}}@media(max-width:900px){{.header-inner{{position:static}}.header-inner .global-nav{{position:static;transform:none}}}}
 .family-layout-hidden{{display:none!important}}.family-layout-settings{{display:inline-grid;place-items:center;width:32px;height:32px;margin:0 0 0 8px;padding:0;border:0;border-radius:6px;background:#2c2c2e;color:#d1d1d6;line-height:1;cursor:pointer}}.family-layout-settings svg{{display:block;width:16px;height:16px}}.family-layout-settings:hover{{background:#3a3a3c;color:#fff}}.family-layout-dialog{{width:min(440px,calc(100% - 28px));padding:0;border:1px solid #48484a;border-radius:10px;background:#1c1c1e;color:#f5f5f7;box-shadow:0 24px 80px rgba(0,0,0,.62)}}.family-layout-dialog::backdrop{{background:rgba(0,0,0,.65)}}.family-layout-head{{padding:18px 20px 14px;border-bottom:1px solid #38383a}}.family-layout-head h2{{margin:0;font-size:17px}}.family-layout-head p{{margin:6px 0 0;color:#8e8e93;font-size:12px;line-height:1.5}}.family-layout-list{{padding:8px 20px}}.family-layout-item{{display:grid;grid-template-columns:16px 70px minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px 0;border-top:1px solid #38383a;color:#f5f5f7;font-size:14px;cursor:grab}}.family-layout-item:first-child{{border-top:0}}.family-layout-item.dragging{{opacity:.42}}.family-layout-item.drop-target{{box-shadow:0 -2px 0 #0a84ff}}.family-layout-handle{{color:#8e8e93;font-size:16px;line-height:1;user-select:none}}.family-layout-visibility{{display:flex;align-items:center;gap:6px;color:#aeaeb2;font-size:12px;cursor:pointer}}.family-layout-visibility input,.family-layout-expand input{{appearance:none;position:relative;width:30px;height:18px;margin:0;border:1px solid #636366;border-radius:999px;background:#3a3a3c;cursor:pointer;transition:background .12s ease,border-color .12s ease}}.family-layout-visibility input:before,.family-layout-expand input:before{{position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:#fff;content:"";transition:transform .12s ease}}.family-layout-visibility input:checked,.family-layout-expand input:checked{{border-color:#0a84ff;background:#0a84ff}}.family-layout-visibility input:checked:before,.family-layout-expand input:checked:before{{transform:translateX(12px)}}.family-layout-visibility input:disabled{{cursor:default;opacity:.48}}.family-layout-label{{min-width:0;cursor:pointer}}.family-layout-moves{{display:flex;gap:2px}}.family-layout-moves button{{width:26px;height:26px;padding:0;border:0;border-radius:5px;background:transparent;color:#0a84ff;font:600 14px inherit;cursor:pointer}}.family-layout-moves button:hover:not(:disabled){{background:rgba(10,132,255,.16)}}.family-layout-moves button:disabled{{color:#48484a;cursor:default}}.family-layout-foot{{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 20px;border-top:1px solid #38383a}}.family-layout-status{{min-height:18px;color:#8e8e93;font-size:12px}}.family-layout-actions{{display:flex;gap:8px}}.family-layout-actions button{{height:34px;border:0;border-radius:6px;padding:0 11px;background:#2c2c2e;color:#f5f5f7;font:600 12px -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;cursor:pointer}}.family-layout-actions .primary{{background:#0a84ff;color:#fff}}@media(max-width:720px){{.family-layout-settings{{margin-left:0}}.family-layout-dialog{{width:min(100% - 20px,440px)}}}}
 </style><script>(function(){{
 const page={page!r}, sections={encoded}, defaultOrder=sections.map(row=>row[0]); let hidden=new Set(),order=[...defaultOrder],dragKey='';
@@ -600,13 +628,9 @@ class Handler(BaseHTTPRequestHandler):
                     html = html.replace(f'href="http://{proxy_ip}:18088/rules"', 'href="/rules"')
                     html = html.replace(f'href="http://{proxy_ip}:18090/"', 'href="/airport/"')
                     html = html.replace('<a class="active" href="/">DNS</a>', '<a class="active" href="/dns/">DNS</a>')
-                    html = html.replace(
-                        "</head>",
-                        '<style>@media(min-width:761px){.topbar-inner{position:relative}.topbar-inner .nav{position:absolute;left:50%;transform:translateX(-50%)}}@media(max-width:760px){.topbar-inner{position:static}.topbar-inner .nav{position:static;transform:none}}@media(min-width:901px){.header-inner{position:relative}.header-inner .global-nav{position:absolute;left:50%;transform:translateX(-50%)}}@media(max-width:900px){.header-inner{position:static}.header-inner .global-nav{position:static;transform:none}}</style></head>',
-                        1,
-                    )
                 page = layout_page_for_path(parsed.path)
                 if page:
+                    html = inject_legacy_navigation(html, page)
                     html = inject_page_layout(html, page)
                 response_body = html.encode("utf-8")
             self.send_response(response.status, response.reason)
@@ -628,6 +652,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.FORBIDDEN)
             return
         parsed = urlsplit(self.path)
+        if parsed.path == HEALTH_PATH and self.client_address[0] == "__FAMILY_ROUTER_IP__":
+            self.proxy(HEALTH_BACKEND_PATH)
+            return
         if parsed.path == "/favicon.ico":
             self.send_response(HTTPStatus.NO_CONTENT)
             self.end_headers()
@@ -692,7 +719,7 @@ class RouterHealthProbe(Handler):
         if self.path != "/":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
-        self.proxy("/api/health")
+        self.proxy(HEALTH_BACKEND_PATH)
 
 
 class LegacyAirportRedirect(BaseHTTPRequestHandler):
@@ -721,6 +748,6 @@ class LegacyAirportRedirect(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     legacy = ThreadingHTTPServer(("__FAMILY_PROXY_IP__", 18090), LegacyAirportRedirect)
     threading.Thread(target=legacy.serve_forever, daemon=True).start()
-    health = ThreadingHTTPServer(("__FAMILY_PROXY_IP__", 18087), RouterHealthProbe)
+    health = ThreadingHTTPServer(("__FAMILY_PROXY_IP__", LEGACY_HEALTH_PORT), RouterHealthProbe)
     threading.Thread(target=health.serve_forever, daemon=True).start()
-    ThreadingHTTPServer(("__FAMILY_PROXY_IP__", 18088), Handler).serve_forever()
+    ThreadingHTTPServer(("__FAMILY_PROXY_IP__", HEALTH_PORT), Handler).serve_forever()

@@ -121,6 +121,7 @@ const alertToken = ref('')
 const alertChat = ref('')
 const searchQuery = ref('')
 const filter = ref('managed')
+const consoleSettingsOpen = ref(false)
 const renameTarget = ref<Device | null>(null)
 const renameDraft = ref('')
 const iconDraft = ref('phone')
@@ -1677,7 +1678,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
       <div class="sidebar-bottom">
         <div class="mini-availability"><HeartPulse :size="16" /><span>系统可用性</span><strong>{{ ready ? '99.9%' : '检查中' }}</strong></div>
         <a class="secondary-button sidebar-console-switch" href="/legacy" title="回到原版管理界面" aria-label="回到原版管理界面"><ArrowUpRight :size="15" /><span>回到原版</span></a>
-        <div class="sidebar-version">Family Proxy <span>0.11.8</span></div>
+        <div class="sidebar-version">Family Proxy <span :title="String(summary.build_id || '')">{{ summary.version || '0.11.9' }}</span></div>
       </div>
     </aside>
 
@@ -1688,6 +1689,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
         <div class="top-actions">
           <button class="icon-button" title="刷新状态" aria-label="刷新状态" :disabled="loading" @click="load"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
           <button class="icon-button mobile-rules-link" title="规则配置" aria-label="规则配置" @click="selectView('rules')"><SlidersHorizontal :size="17" /></button>
+          <button class="icon-button" title="页面显示设置" aria-label="页面显示设置" @click="consoleSettingsOpen = true"><Settings2 :size="17" /></button>
           <button class="icon-button" :title="isDark ? '切换浅色模式' : '切换深色模式'" :aria-label="isDark ? '切换浅色模式' : '切换深色模式'" @click="setTheme(!isDark)"><Sun v-if="isDark" :size="17" /><Moon v-else :size="17" /></button>
           <div class="profile-dot">家</div>
         </div>
@@ -1817,6 +1819,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
       <nav class="mobile-nav" aria-label="移动端主导航"><button v-for="item in navigationViews" :key="item.id" :class="{ active: activeView === item.id }" @click="selectView(item.id)"><component :is="item.icon" :size="18" /><span>{{ item.label }}</span></button></nav>
     </main>
     <div v-if="toastMessage" class="toast"><CheckCircle2 :size="16" />{{ toastMessage }}</div>
+    <div v-if="consoleSettingsOpen" class="modal-backdrop" @click.self="consoleSettingsOpen = false"><section class="modal-card console-settings-card"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="consoleSettingsOpen = false"><X :size="17" /></button><span class="eyebrow">DISPLAY SETTINGS</span><h2>页面显示</h2><p>调整控制台外观，或打开旧版页面的区块显示设置。</p><div class="console-settings-row"><div><strong>主题</strong><small>{{ isDark ? '当前为深色模式' : '当前为浅色模式' }}</small></div><button type="button" class="secondary-button" @click="setTheme(!isDark)">{{ isDark ? '切换浅色' : '切换深色' }}</button></div><div class="console-settings-row"><div><strong>旧版页面设置</strong><small>DNS、机场、规则和维护页可以分别隐藏和排序区块。</small></div><a class="secondary-button" href="/legacy" @click="consoleSettingsOpen = false"><Settings2 :size="15" />打开旧版</a></div></section></div>
     <div v-if="renameTarget" class="modal-backdrop" @click.self="renameTarget = null"><form class="modal-card device-editor" @submit.prevent="saveRename"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="renameTarget = null"><X :size="17" /></button><span class="eyebrow">DEVICE PROFILE</span><h2>编辑设备</h2><p>{{ renameTarget.ip }} · {{ renameTarget.mac }}</p><label>显示名称<input v-model="renameDraft" autofocus maxlength="40" /></label><fieldset class="icon-picker"><legend>显示图标</legend><div class="icon-options"><button v-for="item in deviceIconOptions" :key="item.key" type="button" class="icon-choice" :class="{ selected: iconDraft === item.key }" :title="item.label" :aria-label="item.label" @click="iconDraft = item.key"><component :is="item.icon" :size="19" /><span>{{ item.label }}</span></button></div></fieldset><div class="modal-actions"><button type="button" class="secondary-button" @click="renameTarget = null">取消</button><button class="primary-button" type="submit" :disabled="busy === 'rename'">保存</button></div></form></div>
     <div v-if="wireguardRenameTarget" class="modal-backdrop" @click.self="wireguardRenameTarget = null"><form class="modal-card" @submit.prevent="saveWireguardRename"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="wireguardRenameTarget = null"><X :size="17" /></button><span class="eyebrow">WIREGUARD NAME</span><h2>编辑远程互联名称</h2><p>当前显示：{{ wireguardRenameTarget.label }}；留空即可恢复原始名称。</p><label>显示名称<input v-model="wireguardRenameDraft" autofocus maxlength="40" :placeholder="wireguardRenameTarget.defaultLabel" /></label><div class="modal-actions"><button type="button" class="secondary-button" @click="wireguardRenameTarget = null">取消</button><button class="primary-button" type="submit" :disabled="busy === 'wireguard-rename'">保存</button></div></form></div>
     <div v-if="remoteWireguardConfig" class="modal-backdrop" @click.self="remoteWireguardConfig = null"><div class="modal-card remote-wg-qr-modal"><button type="button" class="modal-close icon-button" title="关闭二维码" aria-label="关闭二维码" @click="remoteWireguardConfig = null"><X :size="17" /></button><span class="eyebrow">WIREGUARD CLIENT</span><h2>{{ remoteWireguardConfig.name }}</h2><p>使用官方 WireGuard 客户端扫描二维码；客户端地址 {{ remoteWireguardConfig.address }}。二维码包含私钥，请勿转发。</p><div class="remote-wg-qr"><img :src="remoteWireguardConfig.qr" alt="WireGuard 客户端二维码" /></div><div class="modal-actions"><button type="button" class="secondary-button" @click="downloadRemoteWireguard"><ArrowDown :size="15" />下载 .conf</button><button type="button" class="primary-button" @click="remoteWireguardConfig = null">完成</button></div></div></div>

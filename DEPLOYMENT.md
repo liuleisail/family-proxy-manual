@@ -150,6 +150,15 @@ sudo ./scripts/upgrade-server.sh
 
 升级脚本会先建立时间戳备份，然后更新并重启 `family-proxy-ui`、`family-mihomo-sub-import` 和 `family-proxy-gateway`。它不会重启 Mihomo/MosDNS 容器、启动历史停用容器或写入 RouterOS。新版网关兼容 Safari 缓存的旧 DNS 页面，升级后无需清空 DNS 数据。
 
+从开发机发布到 Z4Pro 时，先在仓库根目录执行内容校验和同步，再在 Z4Pro 执行部署。`sync-z4pro-source` 不使用 `--delete`，并会在同步后核对网关源码哈希；部署脚本随后创建时间戳备份、重启控制面并验证 gated health：
+
+```bash
+./scripts/sync-z4pro-source
+ssh z4pro 'sudo /home/codexops/family-proxy-manual/scripts/deploy-family-proxy-ui'
+```
+
+如 SSH 别名或部署源目录不同，可设置 `Z4PRO_SSH_TARGET` 和 `Z4PRO_SOURCE_DIR`。同步完成后应记录部署脚本输出的 `Backup` 路径和 `build-info.json` 的版本/ID，并在浏览器依次打开机场、维护页面验证导航和页面加载。
+
 Mihomo 镜像维护通过管理页“维护”按需执行，不属于上述控制平面升级。检查仓库只读；实际升级会备份当前配置并保留旧镜像标签，且只允许重建 `family-mihomo-fallback`。若配置校验、控制接口或 `Proxy-Auto` 验证失败，脚本会自动回退旧镜像。不要为该功能设置自动计时器。
 
 安装器还会启用 `family-platform-update-check.timer`：每天约 09:15 查询 RouterOS 当前官方通道、Z4Pro 自带极空间升级服务，并对 Mihomo、MosDNS 执行只读镜像检查。该任务只写入维护页状态；Mihomo 的 Alpha、Beta、RC 等预发布镜像不会触发 Telegram，只有正式发布版本才可能推送。它不会升级 RouterOS、ZOS、`apt` 软件包、Docker 镜像或重启设备。
@@ -182,7 +191,13 @@ sudo /usr/local/sbin/family-mihomo-tproxy-auto sync
 - `sync-routeros-cn-ipv4 --check` 没有异常数量或大比例漂移；Mihomo GEO 文件通过官方校验和及内核加载验证。
 - 接管测试设备在国内 App、局域网服务和外网业务上都通过；未接管设备保持原样。
 - RouterOS 文本导出、二进制备份和本次服务器备份均可定位。
-- RouterOS 的 `family-mihomo-tproxy-health` 使用专用 `18087` 端口；
-  从局域网或 WireGuard 打开 `18088` 首页应进入登录页，不能返回健康 JSON。
+- RouterOS 的 `family-mihomo-tproxy-health` 使用统一入口 `18088`；
+  必须从 RB5009 执行 `/tool fetch url="http://旁路主机IP:18088/" mode=http output=none`，
+  再确认 Netwatch 为 `up`。普通局域网或 WireGuard 客户端打开 `18088` 首页仍应进入登录页，
+  不应把浏览器的 `303` 误判为探针失败。
+- 统一入口探针使用连续两次成功/失败门槛；gateway、UI、前端构建和 `build-info.json`
+  由同一个部署脚本安装，脚本会在服务重启后验证 gated health。
+- `build-info.json` 的 ID 是 UI、gateway、前端入口和版本文件的内容指纹，不使用可能带有未提交修改的 Git HEAD 冒充版本。
+- 每次 UI 部署会备份 `/opt/family-proxy-ui` 的旧 Python、前端资源、build-info 和运维 helper；失败时保留本次时间戳目录，可恢复后再重启两个控制面服务。
 
 RouterOS 的命令设计遵循其 [Packet Flow](https://help.mikrotik.com/docs/spaces/ROS/pages/328227/Packet+Flow+in+RouterOS)、[Connection Tracking](https://help.mikrotik.com/docs/spaces/ROS/pages/130220087/Connection+tracking) 与 [Netwatch](https://help.mikrotik.com/docs/spaces/ROS/pages/8323208/Netwatch) 文档：IPv4 策略路由、DNS 和 FastTrack 排除使用共享地址列表，设备增减仍保持单设备事务与独立 IPv6 防漏。
