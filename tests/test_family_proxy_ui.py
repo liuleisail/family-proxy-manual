@@ -73,6 +73,27 @@ class LegacyDashboardWarningTests(unittest.TestCase):
 
 
 class MaintenanceReleaseInfoTests(unittest.TestCase):
+    def test_legacy_maintenance_includes_remote_wireguard_access(self):
+        page = family_proxy_ui.MIHOMO_MAINTENANCE_PAGE
+
+        for marker in (
+            'id="remote-wg-form"',
+            'id="remote-wg-name"',
+            'id="remote-wg-endpoint"',
+            'id="remote-wg-port"',
+            'id="remote-wg-dns"',
+            'id="remote-wg-dialog"',
+            'src="/assets/qrcode-browser.js"',
+            "/api/wireguard/remote-access",
+            "/api/wireguard/remote-access/generate",
+            "/api/wireguard/remote-access/revoke",
+        ):
+            self.assertIn(marker, page)
+
+        self.assertEqual(page.count('src="/assets/qrcode-browser.js"'), 1)
+        self.assertNotIn('private-key', page)
+        self.assertNotIn('preshared-key', page)
+
     def test_all_component_cards_have_shared_release_info_controls(self):
         page = family_proxy_ui.MIHOMO_MAINTENANCE_PAGE
 
