@@ -21,6 +21,7 @@ key_files=(
     runtime/family-proxy-gateway.py
     runtime/family-proxy-ui.py
     runtime/mosdns/updater.py
+    runtime/mosdns/dashboard.html
     routeros/04-health-netwatch.rsc
     tests/test_first_run_setup.py
     tests/test_mihomo_bootstrap.py

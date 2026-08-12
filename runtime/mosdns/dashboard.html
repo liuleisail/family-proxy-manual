@@ -19,7 +19,7 @@
     .toast{min-height:20px;margin:-13px 0 12px;color:transparent;font-size:13px;transition:color .15s ease}.toast.show{color:var(--green)}.toast.error.show{color:#ff6961}
     .page{display:none}.page.active{display:block}.page-head,.section-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:10px}.page-title,h2{margin:0;font-size:16px;line-height:1.4;font-weight:650}.page-subtitle{margin:6px 0 18px;color:var(--muted);line-height:1.6}.section{margin-top:26px}.hint{color:var(--muted);font-size:12px}
     .metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px}.metric{min-height:102px;padding:15px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}.metric-label{color:var(--muted);font-size:12px}.metric-value{margin-top:10px;font-size:25px;line-height:1.1;font-variant-numeric:tabular-nums;font-weight:700}.metric-foot{margin-top:9px;color:var(--muted);font-size:12px}
-    .route-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.route{padding:16px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}.route-top{display:flex;align-items:center;justify-content:space-between;gap:12px}.route-name{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:650}.route-icon{width:30px;height:30px;border-radius:7px;display:grid;place-items:center;background:var(--surface-2)}.route-icon svg{width:17px;height:17px}.route-actions{display:flex;align-items:center;gap:6px}.icon-btn{width:30px;height:30px;display:inline-grid;place-items:center;padding:0;border:0;border-radius:6px;background:var(--surface-2);color:#d1d1d6}.icon-btn:hover{background:#3a3a3c;color:#fff}.icon-btn:disabled{opacity:.5;cursor:default}.icon-btn svg{width:16px;height:16px}
+    .route-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.route{padding:16px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}.route-top{display:flex;align-items:center;justify-content:space-between;gap:12px}.route-name{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:650}.route-icon{width:30px;height:30px;border-radius:7px;display:grid;place-items:center;background:var(--surface-2)}.route-icon svg{width:17px;height:17px}.route-actions{display:flex;align-items:center;gap:6px}.icon-btn{position:relative;width:30px;height:30px;display:inline-grid;place-items:center;padding:0;border:0;border-radius:6px;background:var(--surface-2);color:#d1d1d6}.icon-btn:hover,.icon-btn[aria-expanded="true"]{background:#3a3a3c;color:#fff}.icon-btn:disabled{opacity:.5;cursor:default}.icon-btn svg{width:16px;height:16px}.race-btn{color:var(--blue)}.race-btn::after{position:absolute;z-index:20;top:calc(100% + 8px);right:0;width:max-content;max-width:min(330px,70vw);padding:8px 10px;border:1px solid rgba(10,132,255,.42);border-radius:7px;background:var(--surface);color:#d1d1d6;box-shadow:0 10px 28px rgba(0,0,0,.34);content:attr(data-tooltip);font-size:11px;font-weight:500;line-height:1.45;opacity:0;pointer-events:none;transform:translateY(-3px);transition:opacity .12s ease,transform .12s ease;white-space:normal}.race-btn:hover::after,.race-btn:focus-visible::after{opacity:1;transform:translateY(0)}.race-popover{margin-top:10px;padding:10px 11px;border:1px solid rgba(10,132,255,.32);border-radius:7px;background:var(--blue-soft);color:#d1d1d6;font-size:11px;line-height:1.5}.race-popover-summary{color:#fff}.race-popover-list{margin-top:7px;border-top:1px solid var(--line)}.race-popover-list>div{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 0 0}.race-popover-list span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.race-popover-list strong{flex:0 0 auto;color:#c7e2ff;font-size:10px;font-weight:600;white-space:nowrap}.race-empty{display:block;margin-top:5px;color:var(--muted)}
     .pill{display:inline-flex;align-items:center;min-height:23px;padding:3px 8px;border-radius:6px;font-size:12px;font-weight:600;white-space:nowrap}.pill.direct{color:var(--green);background:var(--green-soft)}.pill.proxy{color:var(--blue);background:var(--blue-soft)}.pill.slow{color:var(--orange);background:var(--orange-soft)}.pill.error{color:var(--red);background:var(--red-soft)}
     .route-list{margin:13px 0 0;padding:0;list-style:none}.route-list li{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-top:1px solid var(--line)}.route-list span:first-child{color:var(--muted)}.route-list span:last-child{text-align:right;overflow-wrap:anywhere}
     .split{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.list-panel,.data-table,.table-scroll{border:1px solid var(--line);border-radius:8px;background:var(--surface);overflow:hidden}.list-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;min-height:44px;padding:9px 12px;border-top:1px solid var(--line)}.list-row:first-child{border-top:0}.list-key{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.list-count{color:var(--muted);font-variant-numeric:tabular-nums}
@@ -30,7 +30,7 @@
     .update-card{border:1px solid var(--line);border-radius:8px;background:var(--surface);overflow:hidden}.update-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0}.update-item{min-height:76px;padding:14px;border-left:1px solid var(--line)}.update-item:first-child{border-left:0}.update-label{display:block;color:var(--muted);font-size:12px;margin-bottom:8px}.update-value{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:650}.update-detail{padding:13px 14px;border-top:1px solid var(--line);color:var(--muted);line-height:1.55}.update-actions{display:flex;flex-wrap:wrap;gap:8px;padding:0 14px 14px}.update-actions .btn{min-width:112px}
     .filter-card{border:1px solid var(--line);border-radius:8px;background:var(--surface);overflow:hidden}.filter-mode{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;padding:10px;background:#242426}.filter-mode button{height:34px;border:0;border-radius:6px;background:transparent;color:var(--muted);font-weight:650}.filter-mode button.active{color:#fff;background:#636366}.filter-mode button[data-mode="observe"].active{background:var(--blue)}.filter-mode button[data-mode="block"].active{background:#248a3d}.filter-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border-top:1px solid var(--line)}.filter-source{display:grid;grid-template-columns:minmax(150px,1fr) auto auto;gap:12px;align-items:center;padding:12px 14px;border-top:1px solid var(--line)}.filter-source:first-child{border-top:0}.filter-source strong{font-size:13px}.filter-source small{display:block;margin-top:4px;color:var(--muted)}.filter-source .mono{color:#d1d1d6;font-size:12px}.filter-hits{padding:12px 14px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;line-height:1.6}.filter-editor{padding:14px;border-top:1px solid var(--line);background:#18181a}.filter-editor[hidden]{display:none}.filter-editor textarea{width:100%;min-height:132px;resize:vertical;padding:10px 11px;border:1px solid #48484a;border-radius:7px;background:var(--surface-2);color:var(--text);font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}.filter-editor .editor-actions{margin-top:10px}.filter-note{padding:11px 14px;border-top:1px solid var(--line);color:#c7e2ff;background:var(--blue-soft);font-size:12px;line-height:1.55}
     .upstream-scope{display:flex;align-items:flex-start;gap:9px;margin-top:10px;padding:11px 12px;border:1px solid rgba(10,132,255,.3);border-radius:8px;background:var(--blue-soft);color:#c7e2ff;line-height:1.55}.upstream-scope svg{width:17px;height:17px;flex:0 0 auto;margin-top:2px}.upstream-editor{margin-top:10px;padding:16px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}.upstream-editor[hidden]{display:none}.upstream-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.field-label{display:block;margin-bottom:7px;font-weight:650}.field-hint{display:block;margin-top:7px;color:var(--muted);font-size:12px;line-height:1.5}.upstream-editor textarea{width:100%;min-height:142px;resize:vertical;padding:11px 12px;border:1px solid #48484a;border-radius:7px;outline:none;background:var(--surface-2);color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.65}.upstream-editor textarea:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(10,132,255,.18)}.upstream-editor textarea:disabled{opacity:.55}.editor-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}.upstream-list{display:flex;flex-wrap:wrap;gap:6px}.upstream-chip{display:inline-flex;align-items:center;max-width:100%;min-height:27px;padding:4px 8px;border-radius:6px;background:var(--surface-2);color:#d1d1d6;font-size:12px;overflow-wrap:anywhere}
-    @media(max-width:900px){.header-inner{min-height:auto;padding:10px 0;align-items:flex-start;flex-direction:column;gap:8px}.global-nav{width:100%;display:grid;grid-template-columns:repeat(4,1fr)}.global-nav a{text-align:center;padding:7px 5px;white-space:normal}.intro{align-items:flex-start;flex-direction:column}.status{max-width:100%;white-space:normal}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.route-grid,.split,.data-layout,.upstream-fields{grid-template-columns:1fr}.segments{order:3;width:100%;margin-left:0}.segment{flex:1}.maintenance{margin-top:0}}
+    @media(max-width:900px){.header-inner{min-height:auto;padding:10px 0;align-items:flex-start;flex-direction:column;gap:8px}.global-nav{width:100%;display:grid;grid-template-columns:repeat(4,1fr)}.global-nav a{text-align:center;padding:7px 5px;white-space:normal}.intro{align-items:flex-start;flex-direction:column}.status{max-width:100%;white-space:normal}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.route-grid,.split,.data-layout,.upstream-fields{grid-template-columns:1fr}.segments{order:3;width:100%;margin-left:0}.segment{flex:1}.maintenance{margin-top:0}.race-popover-list>div{align-items:flex-start;flex-direction:column;gap:2px}}
     @media(max-width:700px){.upstream-metric-row{grid-template-columns:30px minmax(0,1fr) auto}.upstream-win,.upstream-latency{grid-column:2/-1}.upstream-latency{padding-top:2px}.upstream-metric-row>.pill{grid-column:3;grid-row:1}}
     @media(max-width:520px){.header-inner,main{width:min(100% - 28px,1040px)}main{padding:28px 0 50px}.intro h1{font-size:28px}.view-tabs{width:100%}.tab{padding:0 7px}.metrics{gap:7px}.metric{min-height:92px;padding:13px}.metric-value{font-size:22px}.toolbar{align-items:stretch}.search{flex-basis:100%}.toolbar>.btn{width:100%}.data-row{grid-template-columns:1fr auto}.data-row .muted{grid-column:1/-1;grid-row:2}.upstream-card-head{align-items:flex-start}.update-summary,.filter-summary{grid-template-columns:1fr}.update-item{min-height:62px;border-left:0;border-top:1px solid var(--line)}.update-item:first-child{border-top:0}.filter-source{grid-template-columns:1fr auto}.filter-source .mono{grid-column:1}.update-actions .btn{flex:1 1 100%}}
     @media(max-width:900px){.global-nav{grid-template-columns:repeat(5,1fr)}}
@@ -69,12 +69,12 @@
           <div class="section-head"><h2>解析路径</h2><span class="hint">依据当前运行配置</span></div>
           <div class="route-grid">
             <article class="route">
-              <div class="route-top"><div class="route-name"><span class="route-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M12 3v18"/><path d="m8 7 4-4 4 4M8 17l4 4 4-4"/></svg></span>国内解析</div><div class="route-actions"><span class="pill direct">直接连接</span><button class="icon-btn" type="button" data-upstream-edit title="编辑解析服务器" aria-label="编辑国内解析服务器"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button></div></div>
-              <ul id="route-domestic" class="route-list"><li><span>状态</span><span>载入中</span></li></ul>
+              <div class="route-top"><div class="route-name"><span class="route-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M12 3v18"/><path d="m8 7 4-4 4 4M8 17l4 4 4-4"/></svg></span>国内解析</div><div class="route-actions"><span class="pill direct">直接连接</span><button class="icon-btn race-btn" type="button" data-race-group="domestic" title="查看国内解析并发竞速结果" aria-label="查看国内解析并发竞速结果" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l2.5 2.5"/></svg></button><button class="icon-btn" type="button" data-upstream-edit title="编辑解析服务器" aria-label="编辑国内解析服务器"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button></div></div>
+              <ul id="route-domestic" class="route-list"><li><span>状态</span><span>载入中</span></li></ul><div id="race-domestic" class="race-popover" hidden></div>
             </article>
             <article class="route">
-              <div class="route-top"><div class="route-name"><span class="route-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3Z"/></svg></span>国外解析</div><div class="route-actions"><span class="pill proxy">经 Mihomo</span><button class="icon-btn" type="button" data-upstream-edit title="编辑解析服务器" aria-label="编辑国外解析服务器"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button></div></div>
-              <ul id="route-foreign" class="route-list"><li><span>状态</span><span>载入中</span></li></ul>
+              <div class="route-top"><div class="route-name"><span class="route-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3Z"/></svg></span>国外解析</div><div class="route-actions"><span class="pill proxy">经 Mihomo</span><button class="icon-btn race-btn" type="button" data-race-group="foreign" title="查看国外解析并发竞速结果" aria-label="查看国外解析并发竞速结果" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l2.5 2.5"/></svg></button><button class="icon-btn" type="button" data-upstream-edit title="编辑解析服务器" aria-label="编辑国外解析服务器"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button></div></div>
+              <ul id="route-foreign" class="route-list"><li><span>状态</span><span>载入中</span></li></ul><div id="race-foreign" class="race-popover" hidden></div>
             </article>
           </div>
           <div class="upstream-scope"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg><span id="upstream-notice">只影响主动使用 Z4Pro MosDNS 的查询，不修改 RouterOS、DHCP DNS 或设备接管状态。</span></div>
@@ -184,7 +184,7 @@
     </main>
   </div>
   <script>
-    const state = { page: 'overview', logs: [], filter: 'all', capture: null, ruleUpdate: null, adblock: null, upstreams: null, dnsVerify: null };
+    const state = { page: 'overview', logs: [], filter: 'all', capture: null, ruleUpdate: null, adblock: null, upstreams: null, performance: {}, dnsVerify: null };
     const $ = (s) => document.querySelector(s);
     const $$ = (s) => [...document.querySelectorAll(s)];
     const icons = { ok: 'ok', bad: 'bad' };
@@ -243,14 +243,16 @@
         $('#metric-avg').textContent = ms(avg);
         $('#metric-p95').textContent = ms(performance.p95_ms);
         $('#metric-p99').textContent = ms(performance.p99_ms);
+        state.performance = performance || {};
         const win = Object.fromEntries((windows.items || []).map(x => [x.key, x]));
         for (const key of ['1h','24h']) {
           const item = win[key] || {};
           $(`#metric-${key}`).textContent = num(item.request_count || 0);
           $(`#metric-${key}-foot`).textContent = `平均 ${ms(item.average_duration_ms || 0)}`;
         }
-        renderRuntime($('#route-domestic'), domestic, false);
-        renderRuntime($('#route-foreign'), foreign, true);
+        renderRuntime($('#route-domestic'), domestic, false, 'domestic');
+        renderRuntime($('#route-foreign'), foreign, true, 'foreign');
+        renderRaceControls();
         rows($('#rank-domains'), domains, x => `<div class="list-row"><span class="list-key" title="${esc(x.key)}">${esc(x.key)}</span><span class="list-count">${num(x.count)}</span></div>`);
         rows($('#rank-clients'), clients, x => `<div class="list-row"><span class="list-key mono">${esc(clientIp(x.key))}</span><span class="list-count">${num(x.count)}</span></div>`);
         rows($('#rank-effective'), effective, x => `<div class="list-row"><span class="list-key">${esc(x.key || '默认')}</span><span class="list-count">${num(x.count)}</span></div>`);
@@ -259,21 +261,56 @@
         return true;
       } catch (error) { toast(`概览读取失败：${error.message}`, true); return false; }
     }
-    function renderRuntime(container, data, proxy) {
+    function upstreamLine(item) {
+      if (typeof item === 'string') return item;
+      if (!item || typeof item !== 'object') return '';
+      return `${item.addr || item.address || item.url || item.name || '已配置'}${item.dial_addr ? ` | ${item.dial_addr}` : ''}`;
+    }
+    function raceItems(group) {
+      return (state.performance?.upstreams || []).filter(item => item.group === group).slice().sort((a, b) => {
+        const aError = Number(a.error_rate || 0), bError = Number(b.error_rate || 0);
+        const aWin = Number(a.queries || 0) ? Number(a.winners || 0) / Number(a.queries) : 0;
+        const bWin = Number(b.queries || 0) ? Number(b.winners || 0) / Number(b.queries) : 0;
+        return aError - bError || bWin - aWin || Number(a.average_ms || 0) - Number(b.average_ms || 0);
+      });
+    }
+    function raceWinRate(item) {
+      const queries = Number(item.queries || 0);
+      return queries ? Number(item.winners || 0) / queries * 100 : 0;
+    }
+    function raceSummary(group) {
+      const best = raceItems(group)[0];
+      if (!best) return '尚无该组并发竞速样本';
+      return `当前最优：${best.name || '未命名上游'} · 胜率 ${raceWinRate(best).toFixed(1)}% · 平均 ${ms(best.average_ms)} · 错误 ${Number(best.error_rate || 0).toFixed(2)}%`;
+    }
+    function racePopover(group) {
+      const items = raceItems(group);
+      const list = items.slice(0, 3).map((item, index) => `<div><span>#${index + 1} ${esc(item.name || '未命名上游')}</span><strong>${raceWinRate(item).toFixed(1)}% · ${ms(item.average_ms)} · 错误 ${Number(item.error_rate || 0).toFixed(2)}%</strong></div>`).join('');
+      return `<div class="race-popover-summary">${esc(raceSummary(group))}</div>${list ? `<div class="race-popover-list">${list}</div>` : '<span class="race-empty">暂无可展示的竞速结果</span>'}`;
+    }
+    function renderRaceControls() {
+      $$('[data-race-group]').forEach(button => {
+        const group = button.dataset.raceGroup;
+        button.dataset.tooltip = raceSummary(group);
+        const popover = $(`#race-${group}`);
+        if (popover && !popover.hidden) popover.innerHTML = racePopover(group);
+      });
+    }
+    function renderRuntime(container, data, proxy, group) {
       const targets = data.runtime_targets || data.targets || data.upstreams || data.items || (Array.isArray(data) ? data : []);
       const list = Array.isArray(targets) ? targets : Object.values(targets || {});
-      const names = list.map(upstreamLabel).filter(Boolean);
       const configured = data.override_config || [];
       const viaProxy = [...list, ...configured].some(x => x && typeof x === 'object' && (x.use_socks_proxy || x.socks5 || x.socks_proxy));
+      const upstreamRows = list.length ? list.map((item, index) => `<li><span>上游${index ? ` ${index + 1}` : ''}</span><span title="${esc(upstreamLine(item))}">${esc(upstreamLine(item))}</span></li>`).join('') : '<li><span>上游</span><span>已配置</span></li>';
       container.innerHTML = [
-        `<li><span>上游</span><span>${esc(names.join('、') || '已配置')}</span></li>`,
+        upstreamRows,
         `<li><span>出口</span><span>${proxy || viaProxy ? 'Mihomo SOCKS' : '本地网络'}</span></li>`,
         `<li><span>状态</span><span class="pill ${proxy ? 'proxy' : 'direct'}">配置已载入</span></li>`
       ].join('');
     }
 
     function upstreamText(items) {
-      return (items || []).map(item => `${item.addr}${item.dial_addr ? ` | ${item.dial_addr}` : ''}`).join('\n');
+      return (items || []).map(upstreamLine).filter(Boolean).join('\n');
     }
     function renderUpstreamConfig(data) {
       state.upstreams = data;
@@ -395,7 +432,8 @@
       const getItems = x => x.runtime_targets || x.targets || x.upstreams || x.items || (Array.isArray(x) ? x : []);
       const make = (label, data, mode) => {
         const items = getItems(data); const values = Array.isArray(items) ? items : Object.values(items || {});
-        return `<div class="data-row"><strong>${label}</strong><span class="muted">${esc(values.map(upstreamLabel).join('、') || '已配置')}</span><span class="pill ${mode === '代理' ? 'proxy' : 'direct'}">${mode}</span></div>`;
+        const rows = values.length ? values.map((item, index) => `<div class="data-row"><strong>${label} ${index + 1}</strong><span class="muted" title="${esc(upstreamLine(item))}">${esc(upstreamLine(item))}</span><span class="pill ${mode === '代理' ? 'proxy' : 'direct'}">${mode}</span></div>`).join('') : `<div class="data-row"><strong>${label}</strong><span class="muted">已配置</span><span class="pill ${mode === '代理' ? 'proxy' : 'direct'}">${mode}</span></div>`;
+        return rows;
       };
       const metricGroup = (group, label, mode, description) => {
         const score = item => ({error:Number(item.error_rate || 0), win:Number(item.queries || 0) ? Number(item.winners || 0) / Number(item.queries) : 0, latency:Number(item.average_ms || 0)});
@@ -629,6 +667,14 @@
     $('#adblock-allow-cancel').addEventListener('click', () => toggleAdblockEditor(false));
     $('#adblock-allow-save').addEventListener('click', saveAdblockAllowlist);
     $$('[data-upstream-edit]').forEach(button => button.addEventListener('click', () => toggleUpstreamEditor(true)));
+    $$('[data-race-group]').forEach(button => button.addEventListener('click', () => {
+      const group = button.dataset.raceGroup;
+      const popover = $(`#race-${group}`);
+      if (!popover) return;
+      popover.hidden = !popover.hidden;
+      button.setAttribute('aria-expanded', String(!popover.hidden));
+      if (!popover.hidden) popover.innerHTML = racePopover(group);
+    }));
     $('#upstream-cancel').addEventListener('click', () => toggleUpstreamEditor(false));
     $('#upstream-save').addEventListener('click', saveUpstreams);
     const initial = ['overview','logs','data'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'overview';

@@ -26,6 +26,7 @@ def load_module(name, path):
 GATEWAY = load_module("family_proxy_gateway_setup", ROOT / "runtime" / "family-proxy-gateway.py")
 PREPARE = load_module("family_proxy_prepare_config", ROOT / "scripts" / "prepare-config.py")
 UI_SOURCE = (ROOT / "runtime" / "family-proxy-ui.py").read_text(encoding="utf-8")
+DASHBOARD_SOURCE = (ROOT / "runtime" / "mosdns" / "dashboard.html").read_text(encoding="utf-8")
 
 
 class FirstRunSetupTests(unittest.TestCase):
@@ -56,6 +57,14 @@ class FirstRunSetupTests(unittest.TestCase):
         self.assertIn("mktemp -d /tmp/family-proxy-source", script)
         self.assertIn('ssh "$TARGET" sudo rsync', script)
         self.assertNotIn("--delete", script)
+
+    def test_mosdns_dashboard_keeps_upstreams_line_based_and_race_discoverable(self):
+        self.assertIn('data-race-group="domestic"', DASHBOARD_SOURCE)
+        self.assertIn('data-race-group="foreign"', DASHBOARD_SOURCE)
+        self.assertIn("function raceItems(group)", DASHBOARD_SOURCE)
+        self.assertIn("function upstreamLine(item)", DASHBOARD_SOURCE)
+        self.assertNotIn("names.join('、')", DASHBOARD_SOURCE)
+        self.assertNotIn("values.map(upstreamLabel).join('、')", DASHBOARD_SOURCE)
 
     def test_gateway_keeps_http_handler_lifecycle_setup_method(self):
         self.assertIs(GATEWAY.Handler.setup, BaseHTTPRequestHandler.setup)
