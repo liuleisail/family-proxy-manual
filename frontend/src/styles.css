@@ -544,6 +544,32 @@ h1 em { color: var(--blue); font-style: normal; }
 .update-row strong { font-size: 13px; }
 .update-row-main small, .update-row-meta > small { color: var(--text-soft); font-size: 11px; }
 
+/* Keep the overview route cards compact while making race details discoverable. */
+.route-summary-card { min-width: 0; padding: 14px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface-strong); }
+.route-summary-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; min-width: 0; }
+.route-summary-head > div:first-child { min-width: 0; }
+.route-summary-head span, .route-summary-head small { display: block; }
+.route-summary-head span { color: var(--text-muted); font-size: 11px; }
+.route-summary-head small { margin-top: 5px; color: var(--text-soft); font-size: 10px; line-height: 1.4; }
+.route-summary-actions { display: flex; flex: 0 0 auto; gap: 5px; }
+.route-summary-actions .icon-button { position: relative; }
+.dns-race-trigger { color: var(--blue); }
+.dns-race-trigger.active { border-color: rgba(112, 181, 255, .48); background: rgba(112, 181, 255, .14); }
+.dns-race-trigger::after { position: absolute; z-index: 20; top: calc(100% + 8px); right: 0; width: max-content; max-width: min(330px, 70vw); padding: 8px 10px; border: 1px solid rgba(112, 181, 255, .4); border-radius: 7px; background: var(--surface); color: var(--text-soft); box-shadow: 0 10px 28px rgba(0, 0, 0, .34); content: attr(data-tooltip); font-size: 11px; font-weight: 500; line-height: 1.45; opacity: 0; pointer-events: none; transform: translateY(-3px); transition: opacity .12s ease, transform .12s ease; white-space: normal; }
+.dns-race-trigger:hover::after, .dns-race-trigger:focus-visible::after { opacity: 1; transform: translateY(0); }
+.route-lines { margin-top: 12px; border-top: 1px solid var(--line-soft); }
+.route-line { display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: center; gap: 12px; min-height: 34px; padding: 7px 0; border-bottom: 1px solid var(--line-soft); }
+.route-line:last-child { border-bottom: 0; }
+.route-line span { color: var(--text-muted); font-size: 10px; }
+.route-line strong { min-width: 0; overflow: hidden; color: var(--text); font-size: 11px; font-weight: 600; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.dns-race-popover { margin-top: 10px; padding: 10px 11px; border: 1px solid rgba(112, 181, 255, .3); border-radius: 7px; background: rgba(112, 181, 255, .07); color: var(--text-soft); font-size: 10px; line-height: 1.5; }
+.dns-race-popover-summary { color: var(--text); }
+.dns-race-popover-list { margin-top: 7px; border-top: 1px solid var(--line-soft); }
+.dns-race-popover-list > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 0 0; }
+.dns-race-popover-list span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dns-race-popover-list strong { flex: 0 0 auto; color: var(--text-soft); font-size: 10px; font-weight: 600; white-space: nowrap; }
+.dns-race-empty { display: block; margin-top: 5px; color: var(--text-muted); }
+
 @media (max-width: 760px) {
   .page-heading p, .hero-heading p { font-size: 14px; }
   .setup-progress h2 { font-size: 20px; }
