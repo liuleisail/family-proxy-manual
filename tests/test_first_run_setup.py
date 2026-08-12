@@ -36,7 +36,7 @@ class FirstRunSetupTests(unittest.TestCase):
         self.assertEqual(GATEWAY.LEGACY_HEALTH_PORT, 18087)
 
     def test_ui_health_contract_contains_hysteresis_and_build_identity(self):
-        self.assertIn('BUILD_VERSION = "0.11.9"', UI_SOURCE)
+        self.assertIn('BUILD_VERSION = "0.11.10"', UI_SOURCE)
         self.assertIn('BUILD_INFO_PATH = Path("/opt/family-proxy-ui/build-info.json")', UI_SOURCE)
         self.assertIn('if HEALTH_GATE["successes"] >= 2:', UI_SOURCE)
         self.assertIn('if HEALTH_GATE["failures"] >= 2:', UI_SOURCE)
