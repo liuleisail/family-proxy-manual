@@ -52,7 +52,9 @@ class FirstRunSetupTests(unittest.TestCase):
     def test_z4pro_sync_uses_content_checksums_without_delete(self):
         script = (ROOT / "scripts" / "sync-z4pro-source").read_text(encoding="utf-8")
         self.assertIn("rsync -azc", script)
-        self.assertIn("sha256sum runtime/family-proxy-gateway.py", script)
+        self.assertIn("runtime/family-proxy-gateway.py", script)
+        self.assertIn("mktemp -d /tmp/family-proxy-source", script)
+        self.assertIn('ssh "$TARGET" sudo rsync', script)
         self.assertNotIn("--delete", script)
 
     def test_gateway_keeps_http_handler_lifecycle_setup_method(self):
