@@ -59,6 +59,24 @@ AUDIT_PATH = Path("/var/log/family-proxy-ui-audit.jsonl")
 CSRF_TOKEN_PATH = Path("/etc/family-proxy-ui/csrf-token")
 BUILD_VERSION = "0.11.9"
 BUILD_INFO_PATH = Path("/opt/family-proxy-ui/build-info.json")
+COMPONENT_RELEASE_SOURCES = {
+    "mihomo": {
+        "label": "Mihomo 上游 GitHub Release",
+        "url": "https://github.com/MetaCubeX/mihomo/releases",
+    },
+    "mosdns": {
+        "label": "MosDNS 上游 GitHub Release",
+        "url": "https://github.com/IrineSistiana/mosdns/releases",
+    },
+    "routeros": {
+        "label": "MikroTik RouterOS 官方升级文档",
+        "url": "https://manual.mikrotik.com/docs/getting-started/installation-and-upgrade/",
+    },
+    "z4pro": {
+        "label": "极空间官方升级服务",
+        "url": "https://download.zspace.cn/",
+    },
+}
 SHARED_LIST = "family_mihomo_devices"
 SHARED_TABLE = "family_mihomo_shared"
 SHARED_CONN_MARK = "family_mihomo_conn"
@@ -630,6 +648,16 @@ def read_platform_update_status():
     return payload if isinstance(payload, dict) else {"checked_at": 0}
 
 
+def component_release_metadata(component, detail="", notes="", published=""):
+    source = COMPONENT_RELEASE_SOURCES[component]
+    return {
+        "release_source": source["label"],
+        "release_url": source["url"],
+        "release_notes": str(notes or detail or "官方未提供逐项变更说明"),
+        "latest_published": str(published or ""),
+    }
+
+
 def parse_zos_timestamp(value):
     try:
         return int(time.mktime(time.strptime(value, "%Y-%m-%d %H:%M:%S")))
@@ -675,15 +703,20 @@ def zos_upgrade_status():
                     "latest_version": str(system.get("app_version") or "官方更新"),
                     "detail": str(system.get("version_content") or "极空间官方检测到可用系统或服务更新"),
                     "checked_at": checked_at,
+                    **component_release_metadata(
+                        "z4pro", system.get("version_content") or "极空间官方检测到可用系统或服务更新"
+                    ),
                 }
             return {
                 "state": "current", "available": False, "current_version": current_version,
                 "latest_version": current_version, "detail": "极空间官方升级服务最近一次检查未发现可用更新",
                 "checked_at": checked_at,
+                **component_release_metadata("z4pro", "极空间官方升级服务最近一次检查未发现可用更新"),
             }
     return {
         "state": "unknown", "available": False, "current_version": current_version,
         "latest_version": "等待极空间官方检查", "detail": "尚未读取到有效的极空间官方升级检查结果", "checked_at": 0,
+        **component_release_metadata("z4pro", "尚未读取到有效的极空间官方升级检查结果"),
     }
 
 
@@ -693,6 +726,7 @@ def routeros_upgrade_status():
             "state": "not_applicable", "available": False, "current_version": "未接入",
             "latest_version": "不适用", "channel": "独立旁路", "detail": "独立旁路模式未连接 RouterOS",
             "checked_at": int(time.time()),
+            **component_release_metadata("routeros", "独立旁路模式未连接 RouterOS"),
         }
     try:
         with RouterOS() as api:
@@ -706,12 +740,16 @@ def routeros_upgrade_status():
             "latest_version": latest, "channel": str(record.get("channel") or "未知"),
             "detail": str(record.get("status") or ("有可用更新" if state == "update_available" else "当前已是最新")),
             "checked_at": int(time.time()),
+            **component_release_metadata(
+                "routeros", record.get("status") or ("有可用更新" if state == "update_available" else "当前已是最新")
+            ),
         }
     except (RouterError, OSError, ValueError) as exc:
         return {
             "state": "check_failed", "available": False, "current_version": "未知",
             "latest_version": "未知", "channel": "未知", "detail": f"RouterOS 官方通道检查失败：{exc}",
             "checked_at": int(time.time()),
+            **component_release_metadata("routeros", f"RouterOS 官方通道检查失败：{exc}"),
         }
 
 
@@ -725,7 +763,8 @@ def mihomo_component_update_status(check=False):
         payload = mihomo_upgrade_status()
     except (RouterError, OSError, subprocess.SubprocessError) as exc:
         return {"state": "check_failed", "available": False, "current_version": "未知",
-                "latest_version": "未知", "detail": f"Mihomo 更新检查失败：{exc}", "checked_at": int(time.time())}
+                "latest_version": "未知", "detail": f"Mihomo 更新检查失败：{exc}", "checked_at": int(time.time()),
+                **component_release_metadata("mihomo", f"Mihomo 更新检查失败：{exc}")}
     state = str(payload.get("state", "unknown"))
     current_version = str(payload.get("current_version") or "未知")
     latest_version = str(payload.get("latest_version") or "未知")
@@ -744,6 +783,11 @@ def mihomo_component_update_status(check=False):
         "latest_version": latest_version,
         "detail": detail,
         "checked_at": int(payload.get("updated_at") or 0),
+        "release_notes": str(payload.get("release_notes") or payload.get("release_notes_zh") or detail),
+        "release_notes_zh": str(payload.get("release_notes_zh") or ""),
+        "release_url": str(payload.get("release_url") or COMPONENT_RELEASE_SOURCES["mihomo"]["url"]),
+        "release_source": COMPONENT_RELEASE_SOURCES["mihomo"]["label"],
+        "latest_published": str(payload.get("latest_published") or ""),
     }
 
 
@@ -779,6 +823,13 @@ def mosdns_component_update_status(check=False):
         "latest_version": str(payload.get("latest_image") or "未知"),
         "detail": str(payload.get("message") or "MosDNS 更新状态尚未读取"),
         "checked_at": checked_at,
+        **component_release_metadata(
+            "mosdns", payload.get("message") or "MosDNS 更新状态尚未读取",
+            payload.get("release_notes") or payload.get("message") or "MosDNS 上游正式版变更说明请打开官方 Release 页面",
+            payload.get("latest_published") or checked_at,
+        ),
+        "release_url": str(payload.get("release_url") or COMPONENT_RELEASE_SOURCES["mosdns"]["url"]),
+        "release_version": str(payload.get("release_version") or ""),
     }
 
 
@@ -4146,7 +4197,11 @@ MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
 
 MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
     '<span id="mihomo-badge" class="badge">读取中</span>',
-    '<div class="card-head-tools"><button id="mihomo-release-open" class="info-button" type="button" title="查看更新内容" aria-label="查看 Mihomo 更新内容" disabled><span aria-hidden="true">i</span></button><span id="mihomo-badge" class="badge">读取中</span></div>',
+    '<div class="card-head-tools"><button id="mihomo-release-open" class="info-button" type="button" title="查看 Mihomo 正式版更新内容" aria-label="查看 Mihomo 正式版更新内容" disabled><span aria-hidden="true">!</span></button><span id="mihomo-badge" class="badge">读取中</span></div>',
+    1,
+).replace(
+    '<span id="mosdns-badge" class="badge">读取中</span>',
+    '<div class="card-head-tools"><button id="mosdns-release-open" class="info-button" type="button" title="查看 MosDNS 正式版更新内容" aria-label="查看 MosDNS 正式版更新内容" disabled><span aria-hidden="true">!</span></button><span id="mosdns-badge" class="badge">读取中</span></div>',
     1,
 ).replace(
     '</main><script>',
@@ -4158,7 +4213,7 @@ MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
     1,
 ).replace(
     "let csrf='__CSRF__'; const $=s=>document.querySelector(s);",
-    "let csrf='__CSRF__',mihomoRelease={}; const $=s=>document.querySelector(s);",
+    "let csrf='__CSRF__',mihomoRelease={},releaseRecords={}; const $=s=>document.querySelector(s);",
     1,
 ).replace(
     "function renderMihomo(d){",
@@ -4166,11 +4221,15 @@ MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
     1,
 ).replace(
     "$('#mihomo-detail').textContent=(d.message||'尚未检查更新')+(d.release_notes_zh?' · '+d.release_notes_zh:'');$('#mihomo-check').disabled=busy;",
-    "mihomoRelease=d||{};$('#mihomo-detail').textContent=(d.message||'尚未检查更新')+(d.release_notes_zh?' · '+d.release_notes_zh:'');$('#mihomo-release-open').disabled=!(d.latest_version||d.current_version||d.release_notes);$('#mihomo-check').disabled=busy;",
+    "mihomoRelease=d||{};releaseRecords.mihomo=d||{};$('#mihomo-detail').textContent=(d.message||'尚未检查更新')+(d.release_notes_zh?' · '+d.release_notes_zh:'');$('#mihomo-release-open').disabled=!(d.latest_version||d.current_version||d.release_notes||d.detail);$('#mihomo-check').disabled=busy;",
+    1,
+).replace(
+    "function renderMosdns(d){",
+    "function renderMosdns(d){releaseRecords.mosdns=d||{};$('#mosdns-release-open').disabled=!(d.latest_image||d.current_version||d.release_notes||d.message);",
     1,
 ).replace(
     "$('#mihomo-check').onclick=()=>runAction",
-    "$('#mihomo-release-open').onclick=openMihomoRelease;$('#mihomo-release-close').onclick=closeMihomoRelease;$('#mihomo-release-done').onclick=closeMihomoRelease;$('#mihomo-release-dialog').addEventListener('click',event=>{if(event.target===event.currentTarget)closeMihomoRelease()});$('#mihomo-check').onclick=()=>runAction",
+    r'''function openComponentRelease(component,label){let d=releaseRecords[component]||{},sources={mihomo:'https://github.com/MetaCubeX/mihomo/releases',mosdns:'https://github.com/IrineSistiana/mosdns/releases',routeros:'https://manual.mikrotik.com/docs/getting-started/installation-and-upgrade/',z4pro:'https://download.zspace.cn/'},source=sources[component],candidate=String(d.release_url||'');if(candidate.indexOf(source)!==0)candidate=source;let version=d.release_version||d.latest_version||d.current_version||'未知版本',notes=d.release_notes||d.release_notes_zh||d.detail||'官方未提供逐项变更说明。';$('#mihomo-release-title').textContent=label+' 当前正式版更新内容';$('#mihomo-release-meta').textContent=[d.current_version?'当前 '+d.current_version:'',d.latest_version?'正式通道 '+d.latest_version:'',d.latest_published?'发布/检查 '+stamp(d.latest_published||d.checked_at):'',d.release_source?'来源 '+d.release_source:''].filter(Boolean).join(' · ')||'尚无版本信息';$('#mihomo-release-body').textContent='当前版本：'+(d.current_version||'未知')+'\n正式版本：'+version+'\n来源：'+(d.release_source||'官方版本平台')+'\n\n'+notes;$('#mihomo-release-link').hidden=!candidate;if(candidate)$('#mihomo-release-link').href=candidate;$('#mihomo-release-dialog').showModal()}$('#mihomo-release-open').onclick=()=>openComponentRelease('mihomo','Mihomo');$('#mosdns-release-open').onclick=()=>openComponentRelease('mosdns','MosDNS');$('#routeros-release-open').onclick=()=>openComponentRelease('routeros','RouterOS');$('#z4pro-release-open').onclick=()=>openComponentRelease('z4pro','Z4Pro ZOS');$('#mihomo-release-close').onclick=closeMihomoRelease;$('#mihomo-release-done').onclick=closeMihomoRelease;$('#mihomo-release-dialog').addEventListener('click',event=>{if(event.target===event.currentTarget)closeMihomoRelease()});$('#mihomo-check').onclick=()=>runAction''',
     1,
 )
 
@@ -4186,9 +4245,9 @@ MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
     'Promise.all([loadMihomo(),loadMosdns()]);', _ALERT_SCRIPT + 'Promise.all([loadMihomo(),loadMosdns(),loadAlerts()]);', 1,
 )
 
-_PLATFORM_UPDATE_CARD = r'''<section class="platform-update-section"><div class="platform-update-head"><div><h2>系统与平台</h2><p>RouterOS 与 Z4Pro 的状态卡只读取官方通道；确认升级仍在各自官方管理界面完成。</p></div><button id="platform-check">检查系统更新</button></div><div class="platform-update-grid"><article class="card"><div class="card-head"><div><h2>RouterOS</h2><p>路由器官方长期支持通道</p></div><span id="routeros-update-badge" class="badge">读取中</span></div><div class="facts"><div class="fact"><span class="label">当前版本</span><span id="routeros-update-current" class="value">--</span></div><div class="fact"><span class="label">可用版本</span><span id="routeros-update-latest" class="value">--</span></div><div class="fact"><span class="label">更新通道</span><span id="routeros-update-channel" class="value">--</span></div><div class="fact"><span class="label">检查时间</span><span id="routeros-update-time" class="value">--</span></div></div><div id="routeros-update-detail" class="detail">正在读取 RouterOS 官方通道。</div></article><article class="card"><div class="card-head"><div><h2>Z4Pro ZOS</h2><p>极空间官方系统升级服务</p></div><span id="z4pro-update-badge" class="badge">读取中</span></div><div class="facts"><div class="fact"><span class="label">当前版本</span><span id="z4pro-update-current" class="value">--</span></div><div class="fact"><span class="label">可用版本</span><span id="z4pro-update-latest" class="value">--</span></div><div class="fact"><span class="label">通知状态</span><span id="platform-update-notice" class="value">--</span></div><div class="fact"><span class="label">检查时间</span><span id="z4pro-update-time" class="value">--</span></div></div><div id="z4pro-update-detail" class="detail">正在读取极空间官方升级服务。</div></article></div><div class="platform-update-foot" id="platform-update-foot">每日自动检查一次；Mihomo 仅正式发布版、MosDNS 更新纳入相同的去重通知。</div></section>'''
+_PLATFORM_UPDATE_CARD = r'''<section class="platform-update-section"><div class="platform-update-head"><div><h2>系统与平台</h2><p>RouterOS 与 Z4Pro 的状态卡只读取官方通道；确认升级仍在各自官方管理界面完成。</p></div><button id="platform-check">检查系统更新</button></div><div class="platform-update-grid"><article class="card"><div class="card-head"><div><h2>RouterOS</h2><p>路由器官方长期支持通道</p></div><div class="card-head-tools"><button id="routeros-release-open" class="info-button" type="button" title="查看 RouterOS 正式版更新内容" aria-label="查看 RouterOS 正式版更新内容" disabled><span aria-hidden="true">!</span></button><span id="routeros-update-badge" class="badge">读取中</span></div></div><div class="facts"><div class="fact"><span class="label">当前版本</span><span id="routeros-update-current" class="value">--</span></div><div class="fact"><span class="label">可用版本</span><span id="routeros-update-latest" class="value">--</span></div><div class="fact"><span class="label">更新通道</span><span id="routeros-update-channel" class="value">--</span></div><div class="fact"><span class="label">检查时间</span><span id="routeros-update-time" class="value">--</span></div></div><div id="routeros-update-detail" class="detail">正在读取 RouterOS 官方通道。</div></article><article class="card"><div class="card-head"><div><h2>Z4Pro ZOS</h2><p>极空间官方系统升级服务</p></div><div class="card-head-tools"><button id="z4pro-release-open" class="info-button" type="button" title="查看 Z4Pro ZOS 正式版更新内容" aria-label="查看 Z4Pro ZOS 正式版更新内容" disabled><span aria-hidden="true">!</span></button><span id="z4pro-update-badge" class="badge">读取中</span></div></div><div class="facts"><div class="fact"><span class="label">当前版本</span><span id="z4pro-update-current" class="value">--</span></div><div class="fact"><span class="label">可用版本</span><span id="z4pro-update-latest" class="value">--</span></div><div class="fact"><span class="label">通知状态</span><span id="platform-update-notice" class="value">--</span></div><div class="fact"><span class="label">检查时间</span><span id="z4pro-update-time" class="value">--</span></div></div><div id="z4pro-update-detail" class="detail">正在读取极空间官方升级服务。</div></article></div><div class="platform-update-foot" id="platform-update-foot">每日自动检查一次；Mihomo 仅正式发布版、MosDNS 更新纳入相同的去重通知。</div></section>'''
 
-_PLATFORM_UPDATE_SCRIPT = r'''function platformTime(value){let n=Number(value||0);if(!n)return '尚无记录';if(n<100000000000)n*=1000;let d=new Date(n);return isNaN(d.getTime())?'尚无记录':d.toLocaleString('zh-CN',{hour12:false})}function setPlatformState(prefix,item){item=item||{};let state={current:'已是最新',update_available:'有可用更新',check_failed:'检查失败',unknown:'等待检查'}[item.state]||'等待检查',bad=item.state==='check_failed',warn=item.state==='update_available';$('#'+prefix+'-update-badge').textContent=state;$('#'+prefix+'-update-badge').className='badge '+(bad?'bad':warn?'warn':'');$('#'+prefix+'-dot').className='dot '+(bad?'bad':warn?'warn':'ok');$('#'+prefix+'-update-current').textContent=item.current_version||'--';$('#'+prefix+'-update-latest').textContent=item.latest_version||'--';if(prefix==='routeros')$('#routeros-update-channel').textContent=item.channel||'--';$('#'+prefix+'-update-time').textContent=platformTime(item.checked_at);$('#'+prefix+'-update-detail').textContent=item.detail||'尚无可用信息'}function renderPlatformUpdates(data){setPlatformState('routeros',data.routeros);setPlatformState('z4pro',data.z4pro);let note=data.notification||{},notice={sent:'已推送 Telegram',already_sent:'已提醒',pending:'等待 Telegram 推送',not_needed:'无需推送'}[note.state]||'尚未推送';$('#platform-update-notice').textContent=notice;let mihomo=data.mihomo?.state==='preview_ignored'?'Mihomo 预发布已忽略':data.mihomo?.available?'Mihomo 有正式版更新':'Mihomo 已检查',components=[mihomo,data.mosdns?.available?'MosDNS 有更新':'MosDNS 已检查'].join(' · ');$('#platform-update-foot').textContent=(note.message||'每日自动检查一次；Mihomo 仅正式发布版、MosDNS 更新纳入相同的去重通知。')+'。'+components+'；自动检查每天 09:15 左右运行，不会自动升级。'}async function loadPlatformUpdates(){try{renderPlatformUpdates(await api('/api/platform/updates'))}catch(e){$('#platform-update-foot').textContent='系统更新读取失败：'+e.message}}async function checkPlatformUpdates(){let button=$('#platform-check'),original=button.textContent;button.disabled=true;button.textContent='正在检查';$('#platform-update-foot').textContent='正在执行四项只读更新检查，请稍候…';try{await api('/api/platform/updates/check',{method:'POST'});for(let n=0;n<70;n++){await new Promise(r=>setTimeout(r,1000));let d=await api('/api/platform/updates');if(Number(d.checked_at||0)*1000>Date.now()-90000){renderPlatformUpdates(d);break}}}catch(e){$('#platform-update-foot').textContent='检查失败：'+e.message}finally{button.disabled=false;button.textContent=original}}$('#platform-check').onclick=checkPlatformUpdates;'''
+_PLATFORM_UPDATE_SCRIPT = r'''function platformTime(value){let n=Number(value||0);if(!n)return '尚无记录';if(n<100000000000)n*=1000;let d=new Date(n);return isNaN(d.getTime())?'尚无记录':d.toLocaleString('zh-CN',{hour12:false})}function setPlatformState(prefix,item){item=item||{};let state={current:'已是最新',update_available:'有可用更新',check_failed:'检查失败',unknown:'等待检查',not_applicable:'不适用'}[item.state]||'等待检查',bad=item.state==='check_failed',warn=item.state==='update_available';releaseRecords[prefix]=item;$('#'+prefix+'-update-badge').textContent=state;$('#'+prefix+'-update-badge').className='badge '+(bad?'bad':warn?'warn':'');$('#'+prefix+'-dot').className='dot '+(bad?'bad':warn?'warn':'ok');$('#'+prefix+'-update-current').textContent=item.current_version||'--';$('#'+prefix+'-update-latest').textContent=item.latest_version||'--';if(prefix==='routeros')$('#routeros-update-channel').textContent=item.channel||'--';$('#'+prefix+'-update-time').textContent=platformTime(item.checked_at);$('#'+prefix+'-update-detail').textContent=item.detail||'尚无可用信息';$('#'+prefix+'-release-open').disabled=!(item.latest_version||item.current_version||item.release_notes||item.detail)}function renderPlatformUpdates(data){setPlatformState('routeros',data.routeros);setPlatformState('z4pro',data.z4pro);let note=data.notification||{},notice={sent:'已推送 Telegram',already_sent:'已提醒',pending:'等待 Telegram 推送',not_needed:'无需推送'}[note.state]||'尚未推送';$('#platform-update-notice').textContent=notice;let mihomo=data.mihomo?.state==='preview_ignored'?'Mihomo 预发布已忽略':data.mihomo?.available?'Mihomo 有正式版更新':'Mihomo 已检查',components=[mihomo,data.mosdns?.available?'MosDNS 有更新':'MosDNS 已检查'].join(' · ');$('#platform-update-foot').textContent=(note.message||'每日自动检查一次；Mihomo 仅正式发布版、MosDNS 更新纳入相同的去重通知。')+'。'+components+'；自动检查每天 09:15 左右运行，不会自动升级。'}async function loadPlatformUpdates(){try{renderPlatformUpdates(await api('/api/platform/updates'))}catch(e){$('#platform-update-foot').textContent='系统更新读取失败：'+e.message}}async function checkPlatformUpdates(){let button=$('#platform-check'),original=button.textContent;button.disabled=true;button.textContent='正在检查';$('#platform-update-foot').textContent='正在执行四项只读更新检查，请稍候…';try{await api('/api/platform/updates/check',{method:'POST'});for(let n=0;n<70;n++){await new Promise(r=>setTimeout(r,1000));let d=await api('/api/platform/updates');if(Number(d.checked_at||0)*1000>Date.now()-90000){renderPlatformUpdates(d);break}}}catch(e){$('#platform-update-foot').textContent='检查失败：'+e.message}finally{button.disabled=false;button.textContent=original}}$('#platform-check').onclick=checkPlatformUpdates;'''
 
 MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
     _ALERT_CARD,

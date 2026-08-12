@@ -87,9 +87,17 @@ ui_container=$(docker compose -f "$COMPOSE_DIR/compose.yml" ps -q ui)
 docker exec "$ui_container" test -r /usr/share/nginx/html/index.html
 systemctl is-active --quiet family-mosdns-updater.service
 secret=$(cat /etc/family-proxy-ui/gateway.secret)
-curl --fail --silent --show-error -H "X-Family-Gateway: $secret" http://127.0.0.1:18102/upstreams >/dev/null
-curl --fail --silent --show-error -H "X-Family-Gateway: $secret" http://127.0.0.1:18102/adblock/status >/dev/null
-curl --fail --silent --show-error -H "X-Family-Gateway: $secret" http://127.0.0.1:18102/verify/status >/dev/null
+for endpoint in /upstreams /adblock/status /verify/status; do
+  ready=0
+  for attempt in $(seq 1 20); do
+    if curl --fail --silent --show-error -H "X-Family-Gateway: $secret" "http://127.0.0.1:18102$endpoint" >/dev/null; then
+      ready=1
+      break
+    fi
+    sleep 0.25
+  done
+  (( ready == 1 )) || { echo "MosDNS management endpoint did not become ready: $endpoint" >&2; exit 1; }
+done
 
 echo "MosDNS management installed. Backup: $backup"
 echo "The MosDNS core, RouterOS, DHCP DNS, and current upstream configuration were not changed."

@@ -72,5 +72,36 @@ class LegacyDashboardWarningTests(unittest.TestCase):
         self.assertIn('.dash-warning:hover:after', page)
 
 
+class MaintenanceReleaseInfoTests(unittest.TestCase):
+    def test_all_component_cards_have_shared_release_info_controls(self):
+        page = family_proxy_ui.MIHOMO_MAINTENANCE_PAGE
+
+        for component in ("mihomo", "mosdns", "routeros", "z4pro"):
+            self.assertIn(f'id="{component}-release-open"', page)
+        self.assertEqual(page.count('class="info-button"'), 4)
+        self.assertIn("function openComponentRelease", page)
+        self.assertIn("releaseRecords[prefix]=item", page)
+
+    def test_release_sources_are_limited_to_official_component_pages(self):
+        page = family_proxy_ui.MIHOMO_MAINTENANCE_PAGE
+
+        for source in (
+            "https://github.com/MetaCubeX/mihomo/releases",
+            "https://github.com/IrineSistiana/mosdns/releases",
+            "https://manual.mikrotik.com/docs/getting-started/installation-and-upgrade/",
+            "https://download.zspace.cn/",
+        ):
+            self.assertIn(source, page)
+
+    def test_component_release_metadata_has_consistent_contract(self):
+        metadata = family_proxy_ui.component_release_metadata(
+            "routeros", "当前已是最新", "官方通道没有可用更新", "2026-08-12T10:00:00Z"
+        )
+
+        self.assertEqual(metadata["release_source"], "MikroTik RouterOS 官方升级文档")
+        self.assertEqual(metadata["release_notes"], "官方通道没有可用更新")
+        self.assertTrue(metadata["release_url"].startswith("https://manual.mikrotik.com/"))
+
+
 if __name__ == "__main__":
     unittest.main()

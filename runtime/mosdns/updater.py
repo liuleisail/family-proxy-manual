@@ -23,6 +23,8 @@ IMAGE = "jasonxtt/mosdns-t:latest"
 CONTAINER = "family-mosdns-t"
 CRANE = "/opt/family-mosdns-updater/crane"
 REGISTRY_PROXY = "http://127.0.0.1:7890"
+UPSTREAM_RELEASE_API = "https://api.github.com/repos/IrineSistiana/mosdns/releases/latest"
+UPSTREAM_RELEASE_URL = "https://github.com/IrineSistiana/mosdns/releases"
 COMPOSE_DIR = Path(os.environ.get("FAMILY_MOSDNS_COMPOSE_DIR", "/var/lib/family-proxy/docker/family-mosdns-t"))
 STATE_DIR = Path("/etc/family-proxy-ui")
 CONFIG_PATH = STATE_DIR / "mosdns-updater.json"
@@ -283,6 +285,40 @@ def remote_image_id():
     if not digest:
         raise RuntimeError("官方镜像清单缺少配置标识")
     return digest
+
+
+def upstream_release():
+    """Read the latest stable upstream release without making it a hard dependency."""
+    fallback = {
+        "release_source": "MosDNS 上游 GitHub Release",
+        "release_url": UPSTREAM_RELEASE_URL,
+        "release_notes": "暂未读取到 MosDNS 上游正式版逐项说明；请打开官方 Release 页面查看。",
+        "release_version": "未知",
+        "latest_published": "",
+    }
+    request = urllib.request.Request(UPSTREAM_RELEASE_API, headers={"User-Agent": "family-proxy-mosdns-updater"})
+    openers = [
+        urllib.request.build_opener(),
+        urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": REGISTRY_PROXY, "https": REGISTRY_PROXY})
+        ),
+    ]
+    for opener in openers:
+        try:
+            with opener.open(request, timeout=12) as response:
+                payload = json.loads(response.read().decode("utf-8", "replace"))
+            if not isinstance(payload, dict) or payload.get("draft") or payload.get("prerelease"):
+                return fallback
+            fallback.update({
+                "release_url": str(payload.get("html_url") or UPSTREAM_RELEASE_URL),
+                "release_notes": str(payload.get("body") or fallback["release_notes"]).strip()[:20000],
+                "release_version": str(payload.get("tag_name") or "未知"),
+                "latest_published": str(payload.get("published_at") or ""),
+            })
+            return fallback
+        except (OSError, ValueError, urllib.error.URLError):
+            continue
+    return fallback
 
 
 def download_latest_image():
@@ -1146,6 +1182,7 @@ def do_check():
             local = running_image_id()
             remote = remote_image_id()
             available = local != remote
+            release = upstream_release()
             set_status(
                 "available" if available else "up_to_date",
                 "发现可用更新" if available else "当前已经是最新版本",
@@ -1154,6 +1191,7 @@ def do_check():
                 latest_image=remote,
                 current_version=core_version(),
                 checked_at=now_iso(),
+                **release,
             )
         except Exception as exc:
             set_status("error", f"检查失败：{exc}", update_available=False, checked_at=now_iso())

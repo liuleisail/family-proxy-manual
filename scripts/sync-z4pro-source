@@ -20,18 +20,22 @@ ssh "$TARGET" sudo rsync -azc "$remote_stage/" "$REMOTE_DIR/"
 key_files=(
     runtime/family-proxy-gateway.py
     runtime/family-proxy-ui.py
+    runtime/mosdns/updater.py
     routeros/04-health-netwatch.rsc
     tests/test_first_run_setup.py
     tests/test_mihomo_bootstrap.py
     tests/test_family_proxy_ui.py
     tests/test_routeros_health_netwatch.py
     scripts/sync-z4pro-source
+    scripts/install-mosdns-management.sh
     frontend/dist/index.html
 )
 for file in "${key_files[@]}"; do
     remote_file=$(ssh "$TARGET" mktemp /tmp/family-proxy-key.XXXXXX)
     scp -q "$file" "$TARGET:$remote_file"
-    ssh "$TARGET" sudo install -m 644 "$remote_file" "$REMOTE_DIR/$file"
+    mode=644
+    [[ "$file" == scripts/* ]] && mode=755
+    ssh "$TARGET" sudo install -m "$mode" "$remote_file" "$REMOTE_DIR/$file"
     ssh "$TARGET" rm -f "$remote_file"
 done
 local_hashes=$(sha256sum "${key_files[@]}" | awk '{print $1}')
