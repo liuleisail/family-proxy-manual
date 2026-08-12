@@ -57,6 +57,7 @@ class FirstRunSetupTests(unittest.TestCase):
         self.assertIn("mktemp -d /tmp/family-proxy-source", script)
         self.assertIn('ssh "$TARGET" sudo rsync', script)
         self.assertIn("frontend/dist/qrcode-browser.js", script)
+        self.assertIn("scripts/deploy-family-proxy-ui", script)
         self.assertNotIn("--delete", script)
 
     def test_mosdns_dashboard_keeps_upstreams_line_based_and_race_discoverable(self):
