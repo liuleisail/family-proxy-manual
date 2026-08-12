@@ -28,8 +28,10 @@ key_files=(
     tests/test_family_proxy_ui.py
     tests/test_routeros_health_netwatch.py
     scripts/sync-z4pro-source
+    scripts/deploy-family-proxy-ui
     scripts/install-mosdns-management.sh
     frontend/dist/index.html
+    frontend/dist/qrcode-browser.js
 )
 for file in "${key_files[@]}"; do
     remote_file=$(ssh "$TARGET" mktemp /tmp/family-proxy-key.XXXXXX)

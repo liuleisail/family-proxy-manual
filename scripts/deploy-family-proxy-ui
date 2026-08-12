@@ -12,6 +12,7 @@ BACKUP_ROOT=/var/backups/family-proxy
 [[ -f $SOURCE_DIR/runtime/family-proxy-gateway.py ]] || { echo "missing gateway source" >&2; exit 1; }
 [[ -x $SOURCE_DIR/scripts/render-runtime.py ]] || { echo "missing renderer" >&2; exit 1; }
 [[ -f $SOURCE_DIR/frontend/dist/index.html ]] || { echo "missing frontend build: run (cd frontend && npm install && npm run build)" >&2; exit 1; }
+[[ -f $SOURCE_DIR/frontend/dist/qrcode-browser.js ]] || { echo "missing bundled QR runtime: run (cd frontend && npm run build)" >&2; exit 1; }
 [[ -f $SOURCE_DIR/VERSION ]] || { echo "missing VERSION" >&2; exit 1; }
 for helper in apply-runtime-mode family-mihomo-tproxy-auto refresh-cn-ipv4 sync-routeros-cn-ipv4.py refresh-mihomo-geodata.py family-mihomo-upgrade homekit-direct-routes; do
     [[ -f "$SOURCE_DIR/scripts/$helper" ]] || { echo "missing helper: $helper" >&2; exit 1; }
@@ -42,7 +43,8 @@ source_id=$(printf '%s\n' \
     "$(sha256sum "$stage_dir/family-proxy-ui.py" | awk '{print $1}')" \
     "$(sha256sum "$stage_dir/family-proxy-gateway.py" | awk '{print $1}')" \
     "$(sha256sum "$SOURCE_DIR/VERSION" | awk '{print $1}')" \
-    "$(sha256sum "$SOURCE_DIR/frontend/dist/index.html" | awk '{print $1}')" | sha256sum | awk '{print substr($1,1,12)}')
+    "$(sha256sum "$SOURCE_DIR/frontend/dist/index.html" | awk '{print $1}')" \
+    "$(sha256sum "$SOURCE_DIR/frontend/dist/qrcode-browser.js" | awk '{print $1}')" | sha256sum | awk '{print substr($1,1,12)}')
 printf '{"version":"%s","id":"%s","deployed_at":"%s"}\n' "$version" "$source_id" "$stamp" > "$stage_dir/build-info.json"
 install -m 644 "$stage_dir/build-info.json" "$TARGET_DIR/build-info.json"
 install -m 644 "$SOURCE_DIR/VERSION" "$TARGET_DIR/VERSION"
@@ -50,6 +52,8 @@ install -m 755 "$stage_dir/family-proxy-ui.py" "$TARGET_DIR/family-proxy-ui.py"
 install -m 755 "$stage_dir/family-proxy-gateway.py" "$TARGET_DIR/family-proxy-gateway.py"
 install -d -m 755 "$TARGET_DIR/frontend"
 cp -a "$SOURCE_DIR/frontend/dist/." "$TARGET_DIR/frontend/"
+install -d -m 755 "$TARGET_DIR/frontend/assets"
+install -m 644 "$SOURCE_DIR/frontend/dist/qrcode-browser.js" "$TARGET_DIR/frontend/assets/qrcode-browser.js"
 install -m 755 "$SOURCE_DIR/scripts/apply-runtime-mode" /usr/local/sbin/apply-family-proxy-mode
 install -m 755 "$SOURCE_DIR/scripts/family-mihomo-tproxy-auto" /usr/local/sbin/family-mihomo-tproxy-auto
 install -m 755 "$SOURCE_DIR/scripts/refresh-cn-ipv4" /usr/local/sbin/refresh-family-cn-ipv4
