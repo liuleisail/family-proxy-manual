@@ -77,6 +77,10 @@ class FirstRunSetupTests(unittest.TestCase):
         self.assertNotIn("<strong>上游</strong><span", DASHBOARD_SOURCE)
         self.assertNotIn("names.join('、')", DASHBOARD_SOURCE)
         self.assertNotIn("values.map(upstreamLabel).join('、')", DASHBOARD_SOURCE)
+        data_page = DASHBOARD_SOURCE.split('<section id="page-data"', 1)[1].split('</section>', 1)[0]
+        self.assertNotIn('上游服务器', data_page)
+        self.assertNotIn('并发竞速', data_page)
+        self.assertNotIn('renderUpstreamData(', DASHBOARD_SOURCE)
 
     def test_gateway_keeps_http_handler_lifecycle_setup_method(self):
         self.assertIs(GATEWAY.Handler.setup, BaseHTTPRequestHandler.setup)
