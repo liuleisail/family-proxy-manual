@@ -46,4 +46,14 @@ if [[ "$local_hashes" != "$remote_hashes" ]]; then
     diff -u <(printf '%s\n' "$local_hashes") <(printf '%s\n' "$remote_hashes") || true
     exit 1
 fi
+
+mapfile -t frontend_files < <(find frontend/dist -type f -print | sort)
+local_frontend_hashes=$(sha256sum "${frontend_files[@]}" | awk '{print $1}')
+remote_frontend_files=("${frontend_files[@]/#/$REMOTE_DIR/}")
+remote_frontend_hashes=$(ssh "$TARGET" sudo sha256sum "${remote_frontend_files[@]}" 2>/dev/null | awk '{print $1}' || true)
+if [[ "$local_frontend_hashes" != "$remote_frontend_hashes" ]]; then
+    echo "Z4Pro frontend asset manifest mismatch after privileged sync" >&2
+    diff -u <(printf '%s\n' "$local_frontend_hashes") <(printf '%s\n' "$remote_frontend_hashes") || true
+    exit 1
+fi
 printf 'Z4Pro source synchronized and key files verified\n'
