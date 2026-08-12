@@ -89,7 +89,7 @@ systemctl is-active --quiet family-mosdns-updater.service
 secret=$(cat /etc/family-proxy-ui/gateway.secret)
 for endpoint in /upstreams /adblock/status /verify/status; do
   ready=0
-  for attempt in $(seq 1 20); do
+  for attempt in $(seq 1 40); do
     if curl --fail --silent --show-error -H "X-Family-Gateway: $secret" "http://127.0.0.1:18102$endpoint" >/dev/null; then
       ready=1
       break
