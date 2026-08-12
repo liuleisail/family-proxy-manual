@@ -63,6 +63,12 @@ class FirstRunSetupTests(unittest.TestCase):
         self.assertIn('data-race-group="foreign"', DASHBOARD_SOURCE)
         self.assertIn("function raceItems(group)", DASHBOARD_SOURCE)
         self.assertIn("function upstreamLine(item)", DASHBOARD_SOURCE)
+        self.assertIn('class="race-popover" data-race-panel="domestic"', DASHBOARD_SOURCE)
+        self.assertIn('class="race-panel-row ${index === 0 ? \'best\' : \'\'}"', DASHBOARD_SOURCE)
+        self.assertIn('胜率 ${winRate.toFixed(1)}%', DASHBOARD_SOURCE)
+        self.assertIn('P95 ${ms(item.p95_ms)} · P99 ${ms(item.p99_ms)}', DASHBOARD_SOURCE)
+        self.assertNotIn("上游${index ? ` ${index + 1}` : ''}", DASHBOARD_SOURCE)
+        self.assertNotIn("${label} ${index + 1}", DASHBOARD_SOURCE)
         self.assertNotIn("names.join('、')", DASHBOARD_SOURCE)
         self.assertNotIn("values.map(upstreamLabel).join('、')", DASHBOARD_SOURCE)
 
