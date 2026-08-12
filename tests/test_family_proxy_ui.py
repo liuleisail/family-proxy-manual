@@ -63,5 +63,14 @@ class ClearDeviceConnectionsTests(unittest.TestCase):
             family_proxy_ui.clear_device_connections(api, "192.168.2.189")
 
 
+class LegacyDashboardWarningTests(unittest.TestCase):
+    def test_auto_failover_has_explanatory_warning_tooltip(self):
+        page = family_proxy_ui.PAGE
+
+        self.assertIn('<small>自动回退<span class="dash-warning"', page)
+        self.assertIn('RouterOS Netwatch 连续探测异常时', page)
+        self.assertIn('.dash-warning:hover:after', page)
+
+
 if __name__ == "__main__":
     unittest.main()
