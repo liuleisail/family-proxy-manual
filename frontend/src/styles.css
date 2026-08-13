@@ -760,3 +760,30 @@ h1 em { color: var(--blue); font-style: normal; }
 .dns-view .adblock-modes button.active.block { border-color: var(--green); background: rgba(83, 211, 156, .12); color: var(--green); }
 .dns-view .adblock-modes button:disabled { cursor: wait; opacity: .55; }
 .dns-view .soft-badge.warn { border-color: rgba(244, 169, 94, .28); background: rgba(244, 169, 94, .1); color: var(--orange); }
+.dns-view .route-summary-card { padding: 14px 16px; min-height: 172px; }
+.dns-view .route-lines { margin-top: 12px; }
+.dns-view .route-upstreams-values .route-line { padding: 4px 0; }
+.dns-view .route-line { padding: 5px 0; }
+.dns-view .route-upstreams-label, .dns-view .route-line span { font-size: 11px; }
+.dns-view .route-line strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.dns-view .dns-race-columns, .dns-view .dns-race-row { grid-template-columns: minmax(0, 1.45fr) minmax(112px, .8fr) minmax(120px, .8fr) minmax(72px, .5fr); column-gap: 14px; }
+.dns-view .dns-race-row { min-height: 78px; padding: 12px 14px; }
+.dns-view .dns-race-columns { font-size: 11px; }
+.dns-view .dns-race-metric strong { font-size: 15px; }
+.dns-view .dns-race-metric small { overflow: visible; line-height: 1.45; white-space: normal; }
+.dns-view .dns-race-error { font-size: 11px; }
+.dns-view .surface-card { padding: 26px 28px; }
+.dns-view .section-grid { gap: 18px; }
+.dns-view .metric-grid { gap: 16px; }
+.dns-view .dns-overview-stack { display: flex; flex-direction: column; gap: 18px; }
+.dns-view .feature-metrics { margin-bottom: 0; }
+.dns-view .feature-metrics .metric-card { min-height: 136px; padding: 18px 20px; }
+.dns-view .dns-race-grid { margin-top: 0; }
+.dns-view .dns-race-note { margin: 0; padding: 12px 14px; }
+.dns-view .dns-race-row { min-height: 84px; padding: 14px 16px; }
+.dns-view .route-summary { gap: 14px; margin-top: 24px; }
+.dns-view .rank-columns { gap: 28px; margin-top: 24px; }
+.dns-view .rank-row { padding: 13px 0; }
+.dns-race-popover { margin-top: 12px; padding: 12px; border: 1px solid rgba(112, 181, 255, .3); border-radius: 8px; background: var(--surface); }
+.dns-race-popover .dns-race-list { margin-top: 10px; }
+.dns-race-popover .dns-race-note { margin-top: 12px; }
