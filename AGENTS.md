@@ -481,3 +481,21 @@ RouterOS 变更要求：
 - 旧版 DNS 仪表盘（/dns/）：源文件 `runtime/mosdns/dashboard.html`，部署时备份后复制到 Z4Pro `/tmp/zfsv3/nvme13/18053615760/data/docker/family-mosdns-t/web/index.html`。
 - 发布流程：bump `VERSION`、`frontend/package.json`、`runtime/family-proxy-ui.py` 的 BUILD_VERSION、`App.vue` 侧边栏回退版本 → 构建 → 部署 → commit → `git tag -a vX.Y.Z` → push main 与 tag → `gh release create vX.Y.Z`。
 - GitHub push 偶发 `Connection reset by peer`，重试即可。
+
+## 14. 2026-08-13 16:20 定期维护审计与修复记录
+
+### 审计结论
+
+- 总体：警告（系统运行健康，四层一致、流量正常；发现 1 项已修复的发布一致性问题 + 1 项待用户确认的容器事件 + 1 项观察项）。
+- 基线：main @ `910f0a8`，v0.11.12，工作区干净；审计全程只读，无生产变更；修复均在人工批准后执行。
+
+### 发现与处理
+
+1. **已修复（发布一致性）**：`tests/test_first_run_setup.py` 此前硬编码断言 `BUILD_VERSION = "0.11.10"`，随版本升级（0.11.11/0.11.12）导致 46 项测试中 1 项失败。已改为从仓库 `VERSION` 文件读取并断言 `BUILD_VERSION` 与之一致（并校验格式），本地与 Z4Pro 全量 46 项测试通过。
+2. **待用户确认（容器事件）**：2026-08-13 12:26 family-mihomo-fallback 容器被“手动停止”后重建（docker 事件 `hasBeenManuallyStopped=true`、TaskDelete，新容器 restarts=0、无 OOM/错误）。升级链路（install-server / ensure-mihomo-rule-provider-storage / apply-current）均无停止或重建该容器的步骤，compose 文件未变更；结论指向外部手动操作（需用户确认 12:26 前后是否在极空间或命令行手动停止/重启过 mihomo）。现有 `family-mihomo-docker-health.timer` 只检查镜像仓库可达性，不会在容器被手动停止后自动拉起；如需自愈保护，另加容器运行态 watchdog（待用户决定）。
+3. **观察项**：Z4Pro 负载约 1.6、iowait 16.9%（smbd 活跃），服务与接口正常，暂不处理。
+
+### 交接要点
+
+- 发布流程新增注意：bump 版本时检查是否还有硬编码旧版本号的测试断言（当前已改为动态比较 VERSION）。
+- mihomo 容器若再次出现“手动停止”事件且无人工操作，按 AGENTS.md 第 8 节决策树排查并考虑加 watchdog。
