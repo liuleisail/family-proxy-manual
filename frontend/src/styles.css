@@ -685,3 +685,19 @@ h1 em { color: var(--blue); font-style: normal; }
   .failsafe-check { grid-column: 2; text-align: right; }
   .failsafe-summary { flex-wrap: wrap; justify-content: flex-end; }
 }
+
+/* Traffic observation typography tuning (scoped to the traffic view) */
+.traffic-view .eyebrow { font-size: 11px; letter-spacing: .12em; }
+.traffic-view .live-badge { font-size: 11px; }
+.traffic-view .card-heading h2 { font-size: 18px; }
+.traffic-view .muted-caption { font-size: 11px; }
+.traffic-metrics .metric-label { font-size: 12px; }
+.traffic-metrics .metric-card small { font-size: 11px; }
+.traffic-list { gap: 14px; margin-top: 24px; }
+.traffic-label { font-size: 12px; font-weight: 600; }
+.traffic-row strong { font-size: 15px; font-weight: 680; }
+.traffic-row > small { font-size: 11px; }
+.observation-stat { padding: 16px 0; }
+.observation-stat span { color: var(--text-soft); font-size: 11px; font-weight: 600; }
+.observation-stat strong { margin-top: 6px; font-size: 16px; }
+.observation-stat small { margin-top: 5px; font-size: 11px; }
