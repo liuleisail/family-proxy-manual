@@ -490,6 +490,7 @@ RouterOS 变更要求：
 - 23:05 跟进：订阅来源卡片重构落地（去三列表头、每来源独立小卡片、操作按钮对齐、去掉会被遮挡的小字）。产物 `index-DwPkCwR3.css`、`index-BP97lxcf.js`，build id `8d3d270c51fe`（deployed_at `20260813-230527`），verify-server 通过。
 - 23:09 跟进：切换状态页“当前出口”下方改为紧凑表格行（`.runtime-row`），压缩纵向空间。产物 `index-D9Vp-Biv.css`、`index-Be2Cqkah.js`，build id `8bc3d780159a`（deployed_at `20260813-230943`），verify-server 通过。
 - 23:11 跟进：修正“当前出口”表格风格，包进 `surface-card failsafe-card` 卡片（卡头含标题/说明/刷新按钮，表格嵌卡内），与页面其余卡片一致；CSS 未变，JS 产物 `index-BhxrnPjL.js`、build id `d6a32d140d1b`（deployed_at `20260813-231141`），verify-server 通过。
+- 23:15 跟进：去噪“当前出口”表格：桌面端单元格只显示值（小标签隐藏，避免与表头重复），行高放宽到 64px、状态加圆点标识、最近探测长文本截断并带悬停提示；移动端才显示单元格小标签。产物 `index-tcLQVMcU.css`、`index-BFAVqfiV.js`，build id `76357ad7e54a`（deployed_at `20260813-231507`），verify-server 通过。
 - 交接注意：后续发布 release 时，本弹窗改动与上一批 DNS 概览改动（commit `cac4a12`、`08da8f7`）一并进入版本号与发布说明；GitHub push 曾连续 Internal Server Error，推送失败时重试即可，本地 main 已领先 origin。
 
 ### 交接注意（构建与部署）
