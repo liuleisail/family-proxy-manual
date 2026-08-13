@@ -640,12 +640,9 @@ h1 em { color: var(--blue); font-style: normal; }
 .source-panel > .card-heading, .failsafe-card > .card-heading { padding: 24px 27px 19px; }
 .source-panel .card-heading, .failsafe-card .card-heading { align-items: flex-start; }
 .source-panel .card-subtitle, .failsafe-card .card-subtitle { max-width: 760px; margin-top: 6px; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
-.source-columns, .source-row { display: grid; grid-template-columns: minmax(190px, .7fr) minmax(360px, 1.8fr) minmax(250px, 1fr); gap: 18px; align-items: center; }
-.source-columns { min-height: 34px; padding: 0 27px; border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); color: var(--text-muted); font-size: 10px; }
-.source-columns span:last-child { text-align: right; }
-.source-list { overflow: hidden; }
-.source-row { min-height: 104px; padding: 15px 27px; border-bottom: 1px solid var(--line-soft); }
-.source-row:last-child { border-bottom: 0; }
+.source-list { display: grid; gap: 10px; padding: 4px 27px 16px; }
+.source-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 18px; align-items: start; padding: 14px 16px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-strong); }
+.source-url { grid-column: 1 / -1; min-width: 0; }
 .source-name { display: grid; grid-template-columns: 29px minmax(0, 1fr); gap: 10px; align-items: center; min-width: 0; }
 .source-index { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 7px; background: rgba(94, 168, 255, .12); color: var(--blue); font-size: 11px; font-weight: 700; }
 .source-name > div { min-width: 0; }
@@ -655,9 +652,10 @@ h1 em { color: var(--blue); font-style: normal; }
 .source-updated { margin-top: 5px; }
 .source-row input { width: 100%; min-width: 0; height: 38px; margin: 0; padding: 0 11px; border: 1px solid var(--line); border-radius: 6px; outline: 0; background: var(--surface-strong); color: var(--text); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .source-row input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(94, 168, 255, .12); }
-.source-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; min-width: 0; }
-.source-actions > small { margin-right: auto; overflow: hidden; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.source-actions .primary-button, .source-actions .secondary-button { flex: 0 0 auto; }
+.source-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+.source-actions { align-self: start; margin-top: 10px; }
+.source-actions .primary-button, .source-actions .secondary-button, .source-actions .source-remove { flex: 0 0 auto; }
+.source-actions .source-remove { color: var(--text-muted); }
 .failsafe-summary { display: flex; align-items: center; gap: 7px; }
 .failsafe-list { overflow: hidden; border-top: 1px solid var(--line-soft); }
 .failsafe-columns, .failsafe-row { display: grid; grid-template-columns: minmax(170px, .8fr) minmax(320px, 1.55fr) minmax(130px, .7fr) minmax(180px, 1fr); gap: 18px; align-items: center; }
@@ -677,16 +675,16 @@ h1 em { color: var(--blue); font-style: normal; }
 .failsafe-check strong { color: var(--text-soft); font-size: 11px; font-weight: 600; }
 
 @media (max-width: 1040px) {
-  .source-columns, .source-row { grid-template-columns: minmax(170px, .7fr) minmax(260px, 1.3fr) minmax(190px, .9fr); gap: 12px; padding-right: 20px; padding-left: 20px; }
   .failsafe-columns, .failsafe-row { grid-template-columns: minmax(145px, .8fr) minmax(240px, 1.4fr) minmax(120px, .7fr) minmax(150px, .9fr); gap: 12px; padding-right: 20px; padding-left: 20px; }
 }
 
 @media (max-width: 760px) {
   .source-panel > .card-heading, .failsafe-card > .card-heading { padding: 20px; }
-  .source-columns, .failsafe-columns { display: none; }
-  .source-row { grid-template-columns: 1fr; gap: 10px; min-height: 0; padding: 15px 20px; }
+  .failsafe-columns { display: none; }
+  .source-list { padding: 4px 20px 14px; }
+  .source-row { grid-template-columns: 1fr; gap: 10px; min-height: 0; padding: 15px 16px; }
   .source-actions { justify-content: flex-start; flex-wrap: wrap; }
-  .source-actions > small { flex: 1 1 100%; margin-right: 0; }
+  .source-actions { margin-top: 0; }
   .failsafe-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 14px; min-height: 0; padding: 14px 20px; }
   .failsafe-group { grid-column: 1 / -1; }
   .failsafe-route { grid-column: 1 / -1; }

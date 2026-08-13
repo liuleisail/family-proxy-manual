@@ -473,6 +473,7 @@ RouterOS 变更要求：
 - 总览页：KPI 改为已接管设备/活动连接/当前出口/DNS 平均处理（可点击跳转，悬停有小手与上浮效果，当前出口数值字号 17px）；异常时状态头显示“N 项需检查”；运行状态卡新增配置漂移提示；进入总览自动加载 DNS 统计。
 - 旧版设备页（runtime/family-proxy-ui.py）：警告徽标配色与 tooltip 遮挡修复。
 - 机场候选池：候选池页在“筛选节点名称”下方新增测速/应用进度条与状态行（每秒轮询后端 `/api/test-status`，显示 completed/total、GitHub 专项阶段、完成/失败结果）；覆盖“三次稳定性测速”“复测并生效”“校验并应用”“回退上一版”。后端进度接口本就存在（旧版机场页在用），新版控制台此前未接入。
+- 机场候选池（订阅来源卡片重构）：去掉“来源/地址/操作”三列表头；每个来源改为独立小卡片（`.source-row` 圆角内衬）：左上是序号+机场名+导入状态+最后更新，右侧为操作按钮，整行下方放订阅链接输入框（`.source-url`）。删除冗余的“当前生效来源/备用来源”小字（原会被挤压遮挡）；备用机场的删除图标移到操作组最左侧，保证两行的“直连导入或替换/清空”按钮纵向对齐。桌面端双列（名称+按钮 / 输入框整行），移动端单列堆叠。
 - 机场候选池（流程修复）：全量测速完成后自动把 `suggestions.pools` 载入候选池草稿，再点“复测并生效”才会复测建议节点。此前新版控制台从未使用 suggestions，导致“复测并生效”一直复测旧池（例如 US-AI 池旧节点未通过 3/3 时被清空并报“必须是 1 至 5 个不重复节点”）。
 - DNS 概览版面优化：常用域名与活跃设备下移到竞速区下方；概览内容用纵向容器统一 18px 间距；上游地址单行（省略号）、竞速小字允许换行不截断；**解析路径拆为“国内解析/国外解析”两张独立卡片**（不再有大卡片套小卡片，`.route-cards` 双列网格，移动端单列）；每张卡片内问号图标以**居中弹窗**展示该组竞速数据（原固定竞速卡片与卡片内联面板均已移除），铅笔图标**只编辑对应一侧上游地址**（弹窗仅显示该侧输入框，未编辑侧沿用当前配置提交，后端 `/upstreams` 契约不变）。弹窗容器 `.dns-race-modal`：宽 `min(760px, calc(100% - 28px))`、最大高 `min(720px, calc(100vh - 40px))`、内容可滚动，列表沿用 `.dns-race-columns/.dns-race-row` 四列网格；移动端沿用现有 760px 断点折叠布局。弹窗遮罩 `.dns-race-backdrop` 限定在右侧内容区（`left: var(--sidebar-w)`，跟随 244/214/0px 断点），不遮挡左侧固定菜单栏。
 
@@ -485,6 +486,7 @@ RouterOS 变更要求：
 - 22:45 跟进：遮罩加 `.dns-race-backdrop`（`left: var(--sidebar-w)`），弹窗限定在右侧内容区居中，不再盖到左侧菜单栏；弹窗宽度改相对内容区 `calc(100% - 28px)`。重部署后产物为 `index-CwqdwV8N.css`、`index-CQ6vsR65.js`，build id `5298c89b570e`（deployed_at `20260813-224554`），verify-server 通过。
 - 22:51 跟进：解析路径从单张“解析路径”大卡片拆为“国内解析/国外解析”两张独立卡片（`.route-cards` 双列网格）；移除大卡片标题旁铅笔；每张卡片铅笔只编辑对应一侧上游地址（新增 `dnsUpstreamEditSide`，弹窗只显示该侧输入框，未编辑侧按当前配置补齐后提交）。重部署后产物为 `index-D0MZBRGB.css`、`index-68Coq4ra.js`，build id `d7f098838568`（deployed_at `20260813-225155`），verify-server 通过（刚重启后 18087/18088 偶发短时不可达，稍等重跑即可）。
 - 22:57 跟进：`npm run typecheck` 清零（此前 5 个历史报错）：移除未使用的 `Robot` 导入；新增 `SummaryPayload` 类型并让 `summary` computed 使用它（覆盖 ready/mode/netwatch/router/drift/version/build_id/proxy_ip/checks/detail/router_resource）；机场测速状态里的建议候选池显式按 `Record<string, string[]>` 读取。纯类型/死代码修复，产物哈希不变（仍为 `index-D0MZBRGB.css`、`index-68Coq4ra.js`，与线上逐字节一致），未重启服务；后续维护可直接 `npm run typecheck` 作为前置校验。
+- 23:05 跟进：订阅来源卡片重构落地（去三列表头、每来源独立小卡片、操作按钮对齐、去掉会被遮挡的小字）。产物 `index-DwPkCwR3.css`、`index-BP97lxcf.js`，build id `8d3d270c51fe`（deployed_at `20260813-230527`），verify-server 通过。
 - 交接注意：后续发布 release 时，本弹窗改动与上一批 DNS 概览改动（commit `cac4a12`、`08da8f7`）一并进入版本号与发布说明；GitHub push 曾连续 Internal Server Error，推送失败时重试即可，本地 main 已领先 origin。
 
 ### 交接注意（构建与部署）
