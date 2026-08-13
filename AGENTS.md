@@ -448,3 +448,35 @@ RouterOS 变更要求：
   3. 立即恢复 codexops 到 `read`，复核最终用户组策略。
   4. 再执行精确变更，变更后从 RouterOS 状态、计数、Netwatch、日志和真实客户端路径验证；失败用本次备份回滚。
 - 该授权只覆盖“变更前备份所需的临时提权”，不构成对任意 RouterOS 修改的预授权；每次具体修改仍需用户明确目标。
+
+## 13. 2026-08-13 UI 变更与发布记录（v0.11.11 / v0.11.12）
+
+以下为同一维护周期内完成的新版控制台 UI 变更与发布信息，作为后续模型接管的补充上下文。
+
+### 发布版本
+
+- v0.11.11：tag 与 GitHub Release 已发布（含设备图标选择、DNS 内容过滤与更新反馈、各页排版优化、系统维护卡片合并等）。
+- v0.11.12：tag 与 GitHub Release 已发布（含总览页重构、KPI 调整、悬停交互）。
+- 升级方式：`git pull --ff-only && sudo ./scripts/upgrade-server.sh`；DNS 数据管理页升级后点击“重新载入”。
+
+### 主要 UI 变更（均在新版控制台 frontend/src/App.vue + frontend/src/styles.css）
+
+- 设备管理：点击设备左侧图标可打开选择面板（26 种样式），选中保存只提交 `{mac, icon}`；“编辑设备”弹窗只保留改名；流量观察“设备活动”卡片的图标同样可点击更换，保存后即时刷新。
+- DNS 管理：
+  - 解析路径卡片版式（上游标签居中、地址逐行、无多余装饰），全页字号排版优化；
+  - “精简内容过滤”更名为“内容过滤”，关闭/观察/拦截改为独立按钮，切换即时反馈（切换中/成功/失败），不再依赖刷新；
+  - “立即检查并更新”轮询 `/rules/status`（最长约 60 秒）并显示更新中/成功/失败与最近结果时间；
+  - “规则数据”卡片紧凑化。
+- 流量观察：字号与排版协调优化。
+- 系统维护：“平台更新状态”并入“核心组件与设备”卡片并补齐 Mihomo/Z4Pro/MosDNS/RB5009 版本号，卡底显示上次检查时间；“异地回家”卡片补 13px 下间距。
+- 总览页：KPI 改为已接管设备/活动连接/当前出口/DNS 平均处理（可点击跳转，悬停有小手与上浮效果，当前出口数值字号 17px）；异常时状态头显示“N 项需检查”；运行状态卡新增配置漂移提示；进入总览自动加载 DNS 统计。
+- 旧版设备页（runtime/family-proxy-ui.py）：警告徽标配色与 tooltip 遮挡修复。
+
+### 交接注意（构建与部署）
+
+- 仓库在 NAS 挂载上不保留执行位，已设 `core.fileMode false`；不要用 chmod 反复纠正。
+- 本机 NAS 上直接 `npm ci` 会因 esbuild postinstall 失败；构建流程：把 frontend 同步到本地临时目录（如 /tmp/fb.xxx，排除 node_modules/dist）→ `npm ci && npm run build` → 把 dist 拷回仓库 `frontend/dist`。
+- 部署：rsync frontend 到 Z4Pro `/home/codexops/family-proxy-manual-main/frontend`（排除 node_modules），再 `sudo ./scripts/install-server.sh --start`；改 VERSION 或 runtime/family-proxy-ui.py 时要同步到仓库副本对应路径。
+- 旧版 DNS 仪表盘（/dns/）：源文件 `runtime/mosdns/dashboard.html`，部署时备份后复制到 Z4Pro `/tmp/zfsv3/nvme13/18053615760/data/docker/family-mosdns-t/web/index.html`。
+- 发布流程：bump `VERSION`、`frontend/package.json`、`runtime/family-proxy-ui.py` 的 BUILD_VERSION、`App.vue` 侧边栏回退版本 → 构建 → 部署 → commit → `git tag -a vX.Y.Z` → push main 与 tag → `gh release create vX.Y.Z`。
+- GitHub push 偶发 `Connection reset by peer`，重试即可。
