@@ -526,3 +526,10 @@ RouterOS 变更要求：
 - 根因：**TG-Auto 代理节点无法承载 Telegram MTProto 会话**。RouterOS 双采样显示 .189→149.154.175.50:443 的连接带 `connection-mark=family_mihomo_conn`（正确走 TG-Auto），但每次只交换约 389B 发送 / 305B 接收即停滞并断开重连（新连接号持续出现）；APNs 会话（17.188.171.133:5223）保持空闲且下行不增长。即 App 无法经代理维持 Telegram 后台连接 → 推送依赖的连接不可用。
 - 旁证：mihomo 对 Telegram DC IP 的 SNI 嗅探报 `may not have any sent data` 属 Telegram MTProto 非标准握手导致，路由已回退 IPCIDR 命中 TG-Auto，非故障原因；TG-Auto 对 DC 的简单 delay 探测 5/5 通过（探测不敏感，无法发现 MTProto 停滞）。
 - 修复方向（待用户操作/授权）：在管理页把 TG 策略组当前节点（主力 HK）切换为其它候选（或复测并生效），iPhone 杀掉 Telegram 重开后验证；若所有 TG 候选都失败，说明该批节点被 Telegram 对 MTProto 封禁/限速，需更换机场节点。切换后复查 .189 的 MTProto 连接 orig/repl 计数是否持续增长。
+
+### TG 推送根因最终确认（2026-08-13 17:20）
+
+- 用户已切换 TG 节点并实测，仍收不到推送；字节级观测与握手探针最终确认根因：**TG-Auto 机场节点无法中继 Telegram MTProto 会话**（TCP 可建连，MTProto 握手数据不流动）。
+- 探针结论：经 `127.0.0.1:7890`（命中 IPCIDR→TG-Auto）向 149.154.175.50 / 91.108.56.149:443 发送规范 MTProto 混淆头（64B、首字节 0xEF），两个 DC 均无响应（超时）；Z4Pro 直连（不经代理）同样超时，说明国内 WAN 直连 Telegram DC 被阻断，只能依赖节点，而当前节点（切换前后）均不通。
+- 可复用诊断方法：给 TG 池更换节点后，先用该握手探针验证节点是否真的能承载 MTProto（期望收到 64B 响应），再让用户测试，避免反复试错。简单 delay 探测（/group/delay）对 MTProto 不敏感，不能用它判断。
+- 修复：换用能承载 Telegram MTProto 的节点/机场（优先试备用机场 2 的节点）；若全部候选都不通，需更换机场供应商。
