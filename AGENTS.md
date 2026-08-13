@@ -506,3 +506,10 @@ RouterOS 变更要求：
 - Telegram 路径：`ip route get 149.154.166.110 mark 0x2000` 正确落到 family_mihomo_shared；经 Mihomo 本机代理唯一源端口访问 api.telegram.org 返回 302；config 中 TG-Auto/TG-Notify 规则在位。**实际消息投递仍需用户用自己的 Telegram 会话验证（不代持凭据）**。
 - 真实客户端业务：RouterOS 标记连接 48 条，其中 .189 活跃 21 条，证明受管设备真实业务流量在走旁路路径；应用级功能（国内/局域网/外网）仍需用户在设备上实测。
 - Z4Pro 负载：iowait 已回落至 0% wa、load 约 1.35（早前 16.9% wa 为瞬时 SMB 活动）；24h 内无 OOM 杀进程。另观察到极空间外部组件 `zfrpc.service` 01:26 单次失败（非本系统，仅记录）。
+
+### TG 推送故障排查（2026-08-13 16:38）
+
+- 现象：用户在局域网报告 Telegram 推送失败；经查当前推送路径正常。
+- 结论：不是规则问题。证据：`/api/alerts/test` 返回“测试消息已发送”；mihomo 日志确认 127.0.0.1→api.telegram.org 命中 `AND((SrcIPCIDR,127.0.0.1/32)&&(Domain,api.telegram.org))→TG-Notify`；TG-Notify（Fallback，3 候选）对 api.telegram.org 探测 3/3 可达；TG-Auto（URLTest，5 候选）5/5 健康，客户端 MTProto（149.154.x/91.108.x）连接活跃。
+- 已记录的两条排查经验：① `/group/*/delay` 用默认 gstatic 探测 URL 可能误报（TG-Notify 默认探测 0/1，换成 api.telegram.org 后 3/3），判断 Telegram 可达性应使用 Telegram 真实端点；② 系统告警推送路径 = family-proxy-ui.py `send_alert_test()` / 更新提醒，经 `curl --proxy http://127.0.0.1:7890` 到 api.telegram.org，命中 TG-Notify 规则。
+- 待用户补充：失败发生的时间点、具体是“系统告警测试/更新提醒”还是“手机 App 通知”、当时的报错文本；若再次失败，抓取当时 mihomo 日志与 `/api/alerts/test` 返回值定位。
