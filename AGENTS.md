@@ -499,3 +499,10 @@ RouterOS 变更要求：
 
 - 发布流程新增注意：bump 版本时检查是否还有硬编码旧版本号的测试断言（当前已改为动态比较 VERSION）。
 - mihomo 容器若再次出现“手动停止”事件且无人工操作，按 AGENTS.md 第 8 节决策树排查并考虑加 watchdog。
+
+### 风险验证结果（2026-08-13 16:35）
+
+- DNS 方向：`verify-dns-routing.sh --full` 通过（国内 6 域名全部 domestic、国外 6 域名全部 foreign；执行时清了一次 MosDNS 缓存）。
+- Telegram 路径：`ip route get 149.154.166.110 mark 0x2000` 正确落到 family_mihomo_shared；经 Mihomo 本机代理唯一源端口访问 api.telegram.org 返回 302；config 中 TG-Auto/TG-Notify 规则在位。**实际消息投递仍需用户用自己的 Telegram 会话验证（不代持凭据）**。
+- 真实客户端业务：RouterOS 标记连接 48 条，其中 .189 活跃 21 条，证明受管设备真实业务流量在走旁路路径；应用级功能（国内/局域网/外网）仍需用户在设备上实测。
+- Z4Pro 负载：iowait 已回落至 0% wa、load 约 1.35（早前 16.9% wa 为瞬时 SMB 活动）；24h 内无 OOM 杀进程。另观察到极空间外部组件 `zfrpc.service` 01:26 单次失败（非本系统，仅记录）。
