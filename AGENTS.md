@@ -492,7 +492,7 @@ RouterOS 变更要求：
 ### 发现与处理
 
 1. **已修复（发布一致性）**：`tests/test_first_run_setup.py` 此前硬编码断言 `BUILD_VERSION = "0.11.10"`，随版本升级（0.11.11/0.11.12）导致 46 项测试中 1 项失败。已改为从仓库 `VERSION` 文件读取并断言 `BUILD_VERSION` 与之一致（并校验格式），本地与 Z4Pro 全量 46 项测试通过。
-2. **待用户确认（容器事件）**：2026-08-13 12:26 family-mihomo-fallback 容器被“手动停止”后重建（docker 事件 `hasBeenManuallyStopped=true`、TaskDelete，新容器 restarts=0、无 OOM/错误）。升级链路（install-server / ensure-mihomo-rule-provider-storage / apply-current）均无停止或重建该容器的步骤，compose 文件未变更；结论指向外部手动操作（需用户确认 12:26 前后是否在极空间或命令行手动停止/重启过 mihomo）。现有 `family-mihomo-docker-health.timer` 只检查镜像仓库可达性，不会在容器被手动停止后自动拉起；如需自愈保护，另加容器运行态 watchdog（待用户决定）。
+2. **已澄清（容器事件，属预期行为）**：2026-08-13 12:26 family-mihomo-fallback 的停止/启动来自升级链路 `family-mihomo-sub-import.py --apply-current` 应用候选池后自动执行 `restart_mihomo()`（`docker restart family-mihomo-fallback`），属预期自动重启（约 1–2 秒），非外部手动操作、非异常。docker 事件中的 `hasBeenManuallyStopped=true` 是 `docker restart` 停止阶段的 API 标记；容器 ID 在事件前后一致（同一容器重启，非重建），无 OOM/错误。后续审计遇到相同事件可直接归因于升级/应用候选池流程，无需再报异常。`family-mihomo-docker-health.timer` 仍只检查镜像仓库可达性，不负责容器运行态；如未来需要自愈保护再另行评估。
 3. **观察项**：Z4Pro 负载约 1.6、iowait 16.9%（smbd 活跃），服务与接口正常，暂不处理。
 
 ### 交接要点
