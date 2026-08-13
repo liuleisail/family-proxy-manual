@@ -474,7 +474,15 @@ RouterOS 变更要求：
 - 旧版设备页（runtime/family-proxy-ui.py）：警告徽标配色与 tooltip 遮挡修复。
 - 机场候选池：候选池页在“筛选节点名称”下方新增测速/应用进度条与状态行（每秒轮询后端 `/api/test-status`，显示 completed/total、GitHub 专项阶段、完成/失败结果）；覆盖“三次稳定性测速”“复测并生效”“校验并应用”“回退上一版”。后端进度接口本就存在（旧版机场页在用），新版控制台此前未接入。
 - 机场候选池（流程修复）：全量测速完成后自动把 `suggestions.pools` 载入候选池草稿，再点“复测并生效”才会复测建议节点。此前新版控制台从未使用 suggestions，导致“复测并生效”一直复测旧池（例如 US-AI 池旧节点未通过 3/3 时被清空并报“必须是 1 至 5 个不重复节点”）。
-- DNS 概览版面优化：解析路径独占一行（全宽）；常用域名与活跃设备下移到竞速区下方；概览内容用纵向容器统一 18px 间距；上游地址单行（省略号）、竞速小字允许换行不截断；国内上游/国外上游竞速面板改为点击解析路径卡片内问号图标展开（原固定竞速卡片已移除）。
+- DNS 概览版面优化：解析路径独占一行（全宽）；常用域名与活跃设备下移到竞速区下方；概览内容用纵向容器统一 18px 间距；上游地址单行（省略号）、竞速小字允许换行不截断；国内上游/国外上游竞速数据改为点击解析路径卡片内问号图标后以**居中弹窗**展示（原固定竞速卡片与卡片内联面板均已移除）。弹窗容器 `.dns-race-modal`：宽 `min(760px, calc(100vw - 28px))`、最大高 `min(720px, calc(100vh - 40px))`、内容可滚动，列表沿用 `.dns-race-columns/.dns-race-row` 四列网格；移动端沿用现有 760px 断点折叠布局。
+
+### 2026-08-13 22:42 追加部署（DNS 竞速居中弹窗，未发 release）
+
+- 变更：DNS 概览“国内上游/国外上游”竞速面板从卡片内联改为居中弹窗（点击解析路径卡片内问号图标触发，点遮罩或关闭按钮退出），避免面板内嵌挤压卡片与弹层。
+- 版本：仍为 v0.11.12，未 bump；本次仅 UI 微调，尚未打 tag / 发布 release。
+- 部署：rsync frontend → Z4Pro `/home/codexops/family-proxy-manual-main/frontend` → `sudo ./scripts/install-server.sh --start`；`verify-server.sh` 通过（control-plane local checks passed）。
+- 产物：`/opt/family-proxy-ui/frontend/` 现引用 `index-CFdnphLq.css`、`index-YMJshlph.js`；build-info.json id `c6e8e581d479`（deployed_at `20260813-224213`）。
+- 交接注意：后续发布 release 时，本弹窗改动与上一批 DNS 概览改动（commit `cac4a12`、`08da8f7`）一并进入版本号与发布说明；GitHub push 曾连续 Internal Server Error，推送失败时重试即可，本地 main 已领先 origin。
 
 ### 交接注意（构建与部署）
 
