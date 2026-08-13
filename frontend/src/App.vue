@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch, type Component } from 'vue'
 import {
-  Activity, AlertTriangle, ArrowDown, ArrowUp, ArrowUpRight, Camera, Check, CheckCircle2, ChevronRight,
-  CircleHelp, Cpu, Gamepad2, Gauge, Globe2, HardDrive, HeartPulse, House,
-  Laptop, LayoutDashboard, Menu, Monitor, Moon, MoreHorizontal, Network, Pencil,
-  Plus, RefreshCw, Router, Search, Server, Settings2, ShieldCheck,
+  Activity, AirVent, AlertTriangle, ArrowDown, ArrowUp, ArrowUpRight, Baby, BatteryCharging, Bot, Camera, Car, Check, CheckCircle2, ChevronRight,
+  CircleHelp, Cpu, Fan, Gamepad2, Gauge, Globe2, HardDrive, Headphones, HeartPulse, House,
+  Lamp, Laptop, LayoutDashboard, Lightbulb, Menu, Microwave, Monitor, Moon, MoreHorizontal, Network, Pencil, Refrigerator,
+  Plus, Printer, RefreshCw, Robot, Router, Search, Server, Settings2, ShieldCheck,
   SlidersHorizontal, Smartphone, Sparkles, Speaker, Sun, Tablet, Thermometer,
-  Trash2, Tv, Users, Watch, Wifi, X, Zap,
+  Trash2, Tv, Users, WashingMachine, Watch, Wifi, X, Zap,
 } from '@lucide/vue'
 import { toDataURL as qrToDataURL } from 'qrcode'
 
@@ -53,6 +53,20 @@ const deviceIconOptions: Array<{ key: string; label: string; icon: Component }> 
   { key: 'home', label: '家庭设备', icon: House },
   { key: 'watch', label: '手表', icon: Watch },
   { key: 'server', label: '服务器', icon: Server },
+  { key: 'printer', label: '打印机', icon: Printer },
+  { key: 'ac', label: '空调', icon: AirVent },
+  { key: 'light', label: '灯', icon: Lightbulb },
+  { key: 'car', label: '汽车', icon: Car },
+  { key: 'earphone', label: '耳机', icon: Headphones },
+  { key: 'nas', label: 'NAS', icon: HardDrive },
+  { key: 'robot', label: '机器人', icon: Bot },
+  { key: 'baby', label: '婴儿', icon: Baby },
+  { key: 'washer', label: '洗衣机', icon: WashingMachine },
+  { key: 'fridge', label: '冰箱', icon: Refrigerator },
+  { key: 'microwave', label: '微波炉', icon: Microwave },
+  { key: 'lamp', label: '台灯', icon: Lamp },
+  { key: 'power', label: '充电宝', icon: BatteryCharging },
+  { key: 'fan', label: '风扇', icon: Fan },
 ]
 
 function iconFor(key?: string) {
@@ -125,6 +139,7 @@ const consoleSettingsOpen = ref(false)
 const renameTarget = ref<Device | null>(null)
 const renameDraft = ref('')
 const iconDraft = ref('phone')
+const iconPickerTarget = ref<Device | null>(null)
 const wireguardRenameTarget = ref<{ key: string; label: string; defaultLabel: string; alias: string } | null>(null)
 const wireguardRenameDraft = ref('')
 let poller: number | undefined
@@ -412,6 +427,11 @@ function openRename(device: Device) {
   iconDraft.value = device.icon || 'phone'
 }
 
+function openIconPicker(device: Device) {
+  iconPickerTarget.value = device
+  iconDraft.value = device.icon || 'phone'
+}
+
 function wireguardInterfaceLabel(item: WireGuardInterface) {
   return item.alias || item.name || item.label || '未命名接口'
 }
@@ -558,6 +578,13 @@ async function saveRename() {
     icon: iconDraft.value,
   }, '设备信息已保存')
   if (saved) renameTarget.value = null
+}
+
+async function saveDeviceIcon() {
+  const device = iconPickerTarget.value
+  if (!device) return
+  const saved = await action('icon', '/api/device/preference', { mac: device.mac, icon: iconDraft.value }, '设备图标已更新')
+  if (saved) iconPickerTarget.value = null
 }
 
 async function checkMihomo() {
@@ -1739,7 +1766,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
             <div class="table-head"><span>设备</span><span>网络地址</span><span>状态</span><span>旁路状态</span><span>操作</span></div>
             <div v-if="filteredDevices.length" class="member-list">
               <div v-for="device in filteredDevices" :key="device.mac" class="member-row">
-                <div class="member-title"><div class="device-avatar"><component :is="iconFor(device.icon)" :size="17" /></div><div><strong>{{ device.name || '未命名设备' }}</strong><small>{{ device.custom_name ? (device.router_name || '自定义名称') : device.status === 'bound' ? '在线设备' : '已发现设备' }}</small></div></div>
+                <div class="member-title"><button type="button" class="device-avatar-trigger" title="选择设备图标" :aria-label="`选择${device.name || '设备'}的图标`" @click="openIconPicker(device)"><div class="device-avatar"><component :is="iconFor(device.icon)" :size="17" /></div></button><div><strong>{{ device.name || '未命名设备' }}</strong><small>{{ device.custom_name ? (device.router_name || '自定义名称') : device.status === 'bound' ? '在线设备' : '已发现设备' }}</small></div></div>
                 <div class="address-cell"><strong>{{ device.ip }}</strong><small>{{ device.mac }}</small></div>
                 <div><span class="status-label" :class="device.status === 'bound' ? 'online' : 'offline'"><span />{{ device.status === 'bound' ? '在线' : '离线' }}</span></div>
                 <div><span class="state-label" :class="device.managed ? (device.effective ? 'active' : 'pending') : 'idle'">{{ !device.managed ? '未接管' : device.effective ? '已生效' : '等待新流量' }}</span><small v-if="device.managed">{{ number(device.packets).toLocaleString() }} 个包</small></div>
@@ -1833,6 +1860,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
     <div v-if="toastMessage" class="toast"><CheckCircle2 :size="16" />{{ toastMessage }}</div>
     <div v-if="consoleSettingsOpen" class="modal-backdrop" @click.self="consoleSettingsOpen = false"><section class="modal-card console-settings-card"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="consoleSettingsOpen = false"><X :size="17" /></button><span class="eyebrow">DISPLAY SETTINGS</span><h2>页面显示</h2><p>调整控制台外观，或打开旧版页面的区块显示设置。</p><div class="console-settings-row"><div><strong>主题</strong><small>{{ isDark ? '当前为深色模式' : '当前为浅色模式' }}</small></div><button type="button" class="secondary-button" @click="setTheme(!isDark)">{{ isDark ? '切换浅色' : '切换深色' }}</button></div><div class="console-settings-row"><div><strong>旧版页面设置</strong><small>DNS、机场、规则和维护页可以分别隐藏和排序区块。</small></div><a class="secondary-button" href="/legacy" @click="consoleSettingsOpen = false"><Settings2 :size="15" />打开旧版</a></div></section></div>
     <div v-if="renameTarget" class="modal-backdrop" @click.self="renameTarget = null"><form class="modal-card device-editor" @submit.prevent="saveRename"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="renameTarget = null"><X :size="17" /></button><span class="eyebrow">DEVICE PROFILE</span><h2>编辑设备</h2><p>{{ renameTarget.ip }} · {{ renameTarget.mac }}</p><label>显示名称<input v-model="renameDraft" autofocus maxlength="40" /></label><fieldset class="icon-picker"><legend>显示图标</legend><div class="icon-options"><button v-for="item in deviceIconOptions" :key="item.key" type="button" class="icon-choice" :class="{ selected: iconDraft === item.key }" :title="item.label" :aria-label="item.label" @click="iconDraft = item.key"><component :is="item.icon" :size="19" /><span>{{ item.label }}</span></button></div></fieldset><div class="modal-actions"><button type="button" class="secondary-button" @click="renameTarget = null">取消</button><button class="primary-button" type="submit" :disabled="busy === 'rename'">保存</button></div></form></div>
+    <div v-if="iconPickerTarget" class="modal-backdrop" @click.self="iconPickerTarget = null"><div class="modal-card icon-picker-card"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="iconPickerTarget = null"><X :size="17" /></button><span class="eyebrow">DEVICE ICON</span><h2>选择设备图标</h2><p>{{ iconPickerTarget.ip }} · {{ iconPickerTarget.mac }}</p><fieldset class="icon-picker"><legend>显示图标</legend><div class="icon-options"><button v-for="item in deviceIconOptions" :key="item.key" type="button" class="icon-choice" :class="{ selected: iconDraft === item.key }" :title="item.label" :aria-label="item.label" @click="iconDraft = item.key"><component :is="item.icon" :size="19" /><span>{{ item.label }}</span></button></div></fieldset><div class="modal-actions"><button type="button" class="secondary-button" @click="iconPickerTarget = null">取消</button><button class="primary-button" :disabled="busy === 'icon'" @click="saveDeviceIcon">保存</button></div></div></div>
     <div v-if="wireguardRenameTarget" class="modal-backdrop" @click.self="wireguardRenameTarget = null"><form class="modal-card" @submit.prevent="saveWireguardRename"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="wireguardRenameTarget = null"><X :size="17" /></button><span class="eyebrow">WIREGUARD NAME</span><h2>编辑远程互联名称</h2><p>当前显示：{{ wireguardRenameTarget.label }}；留空即可恢复原始名称。</p><label>显示名称<input v-model="wireguardRenameDraft" autofocus maxlength="40" :placeholder="wireguardRenameTarget.defaultLabel" /></label><div class="modal-actions"><button type="button" class="secondary-button" @click="wireguardRenameTarget = null">取消</button><button class="primary-button" type="submit" :disabled="busy === 'wireguard-rename'">保存</button></div></form></div>
     <div v-if="remoteWireguardConfig" class="modal-backdrop" @click.self="remoteWireguardConfig = null"><div class="modal-card remote-wg-qr-modal"><button type="button" class="modal-close icon-button" title="关闭二维码" aria-label="关闭二维码" @click="remoteWireguardConfig = null"><X :size="17" /></button><span class="eyebrow">WIREGUARD CLIENT</span><h2>{{ remoteWireguardConfig.name }}</h2><p>使用官方 WireGuard 客户端扫描二维码；客户端地址 {{ remoteWireguardConfig.address }}。二维码包含私钥，请勿转发。</p><div class="remote-wg-qr"><img :src="remoteWireguardConfig.qr" alt="WireGuard 客户端二维码" /></div><div class="modal-actions"><button type="button" class="secondary-button" @click="downloadRemoteWireguard"><ArrowDown :size="15" />下载 .conf</button><button type="button" class="primary-button" @click="remoteWireguardConfig = null">完成</button></div></div></div>
     <div v-if="dnsUpstreamsOpen" class="modal-backdrop" @click.self="dnsUpstreamsOpen = false"><form class="modal-card wide-editor" @submit.prevent="saveDnsUpstreams"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="dnsUpstreamsOpen = false"><X :size="17" /></button><span class="eyebrow">DNS UPSTREAMS</span><h2>编辑解析服务器</h2><p>一行一个地址；带有 `|` 的内容会作为拨号地址保留。保存时会先做健康检查，失败不会替换当前配置。</p><label>国内上游<textarea v-model="dnsDomesticDraft" spellcheck="false" placeholder="223.5.5.5&#10;https://dns.alidns.com/dns-query" /></label><label>国外上游<textarea v-model="dnsForeignDraft" spellcheck="false" placeholder="https://1.1.1.1/dns-query" /></label><div class="modal-actions"><button type="button" class="secondary-button" @click="dnsUpstreamsOpen = false">取消</button><button class="primary-button" type="submit" :disabled="busy === 'dns-upstreams'">校验并应用</button></div></form></div>
