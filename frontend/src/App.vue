@@ -1721,6 +1721,10 @@ async function refreshAirportTestStatus() {
     if (airportTestPrevRunning && !running) {
       airportTestPrevRunning = false
       stopAirportTestPolling()
+      const suggestion = (status.suggestions || {}).pools
+      if (suggestion && Object.keys(suggestion).length) {
+        airportPools.value = Object.fromEntries(Object.entries(suggestion).map(([key, values]) => [key, [...values]]))
+      }
       await loadAirportState()
     }
     airportTestPrevRunning = running
