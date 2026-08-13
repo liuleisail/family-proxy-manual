@@ -4,7 +4,7 @@ import {
   Activity, AirVent, AlertTriangle, ArrowDown, ArrowUp, ArrowUpRight, Baby, BatteryCharging, Bot, Camera, Car, Check, CheckCircle2, ChevronRight,
   CircleHelp, Cpu, Fan, Gamepad2, Gauge, Globe2, HardDrive, Headphones, HeartPulse, House,
   Lamp, Laptop, LayoutDashboard, Lightbulb, Menu, Microwave, Monitor, Moon, MoreHorizontal, Network, Pencil, Refrigerator,
-  Plus, Printer, RefreshCw, Robot, Router, Search, Server, Settings2, ShieldCheck,
+  Plus, Printer, RefreshCw, Router, Search, Server, Settings2, ShieldCheck,
   SlidersHorizontal, Smartphone, Sparkles, Speaker, Sun, Tablet, Thermometer,
   Trash2, Tv, Users, WashingMachine, Watch, Wifi, X, Zap,
 } from '@lucide/vue'
@@ -36,6 +36,20 @@ type DevicePayload = {
   summary?: Record<string, unknown>
   devices?: Device[]
   mode?: string
+}
+
+type SummaryPayload = {
+  ready?: boolean
+  mode?: string
+  netwatch?: string
+  router?: string
+  drift?: string[]
+  version?: string
+  build_id?: string
+  proxy_ip?: string
+  checks?: Record<string, unknown>
+  detail?: { proxy?: string }
+  router_resource?: { available?: boolean; version?: string; board_name?: string; uptime?: string; cpu_percent?: number; memory_percent?: number }
 }
 
 type SetupPayload = { pending?: boolean; url?: string; mode?: string }
@@ -1623,7 +1637,7 @@ async function loadFeatureView(view: string) {
 }
 
 const devices = computed(() => devicePayload.value.devices || [])
-const summary = computed(() => devicePayload.value.summary || {})
+const summary = computed(() => (devicePayload.value.summary || {}) as SummaryPayload)
 const checks = computed(() => (summary.value.checks || {}) as Record<string, unknown>)
 const standaloneMode = computed(() => summary.value.mode === 'standalone' || system.value.mode === 'standalone' || setupState.value.mode === 'standalone' || platformStatus.value.mode === 'standalone')
 const navigationViews = computed(() => standaloneMode.value
@@ -1729,9 +1743,9 @@ async function refreshAirportTestStatus() {
     if (airportTestPrevRunning && !running) {
       airportTestPrevRunning = false
       stopAirportTestPolling()
-      const suggestion = (status.suggestions || {}).pools
-      if (suggestion && Object.keys(suggestion).length) {
-        airportPools.value = Object.fromEntries(Object.entries(suggestion).map(([key, values]) => [key, [...values]]))
+      const pools = ((status.suggestions || {}) as { pools?: Record<string, string[]> }).pools
+      if (pools && Object.keys(pools).length) {
+        airportPools.value = Object.fromEntries(Object.entries(pools).map(([key, values]) => [key, [...values]]))
       }
       await loadAirportState()
     }

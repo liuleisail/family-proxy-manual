@@ -484,6 +484,7 @@ RouterOS 变更要求：
 - 产物：`/opt/family-proxy-ui/frontend/` 现引用 `index-CFdnphLq.css`、`index-YMJshlph.js`；build-info.json id `c6e8e581d479`（deployed_at `20260813-224213`）。
 - 22:45 跟进：遮罩加 `.dns-race-backdrop`（`left: var(--sidebar-w)`），弹窗限定在右侧内容区居中，不再盖到左侧菜单栏；弹窗宽度改相对内容区 `calc(100% - 28px)`。重部署后产物为 `index-CwqdwV8N.css`、`index-CQ6vsR65.js`，build id `5298c89b570e`（deployed_at `20260813-224554`），verify-server 通过。
 - 22:51 跟进：解析路径从单张“解析路径”大卡片拆为“国内解析/国外解析”两张独立卡片（`.route-cards` 双列网格）；移除大卡片标题旁铅笔；每张卡片铅笔只编辑对应一侧上游地址（新增 `dnsUpstreamEditSide`，弹窗只显示该侧输入框，未编辑侧按当前配置补齐后提交）。重部署后产物为 `index-D0MZBRGB.css`、`index-68Coq4ra.js`，build id `d7f098838568`（deployed_at `20260813-225155`），verify-server 通过（刚重启后 18087/18088 偶发短时不可达，稍等重跑即可）。
+- 22:57 跟进：`npm run typecheck` 清零（此前 5 个历史报错）：移除未使用的 `Robot` 导入；新增 `SummaryPayload` 类型并让 `summary` computed 使用它（覆盖 ready/mode/netwatch/router/drift/version/build_id/proxy_ip/checks/detail/router_resource）；机场测速状态里的建议候选池显式按 `Record<string, string[]>` 读取。纯类型/死代码修复，产物哈希不变（仍为 `index-D0MZBRGB.css`、`index-68Coq4ra.js`，与线上逐字节一致），未重启服务；后续维护可直接 `npm run typecheck` 作为前置校验。
 - 交接注意：后续发布 release 时，本弹窗改动与上一批 DNS 概览改动（commit `cac4a12`、`08da8f7`）一并进入版本号与发布说明；GitHub push 曾连续 Internal Server Error，推送失败时重试即可，本地 main 已领先 origin。
 
 ### 交接注意（构建与部署）
