@@ -547,6 +547,9 @@ h1 em { color: var(--blue); font-style: normal; }
 .update-row-main small, .update-row-meta > small { color: var(--text-soft); font-size: 11px; }
 
 /* Keep the overview route cards compact while making race details discoverable. */
+.route-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: stretch; }
+.route-cards .card-subtitle { margin-top: 7px; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+.route-cards .card-heading h2 { font-size: 17px; }
 .route-summary-card { min-width: 0; padding: 12px 13px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface-strong); }
 .route-summary-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; min-width: 0; }
 .route-summary-head > div:first-child { min-width: 0; }
@@ -620,6 +623,7 @@ h1 em { color: var(--blue); font-style: normal; }
 .dns-race-note span:last-child { margin-left: auto; color: var(--text-soft); white-space: nowrap; }
 
 @media (max-width: 760px) {
+  .route-cards { grid-template-columns: 1fr; }
   .dns-race-columns { display: none; }
   .dns-race-row { grid-template-columns: minmax(0, 1fr) auto; row-gap: 8px; min-height: 0; padding: 13px 0; }
   .dns-race-row.best { margin: 0; padding-right: 0; padding-left: 0; }
