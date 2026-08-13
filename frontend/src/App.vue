@@ -1023,11 +1023,13 @@ async function removeAirportSource(slot: AirportSource) {
 
 async function testAirportAll() {
   busy.value = 'airport-test'
+  airportActionText.value = ''
   try {
     const result = await airportApi<JsonRecord>('/api/test-all', { method: 'POST', body: '{}' })
-    notify(result.message || '稳定性测速已启动')
-    await loadAirportState()
+    airportTestStatus.value = { ...result }
+    startAirportTestPolling()
   } catch (error) {
+    stopAirportTestPolling()
     notify(error instanceof Error ? error.message : '稳定性测速失败')
   } finally {
     busy.value = ''
@@ -1036,6 +1038,7 @@ async function testAirportAll() {
 
 async function saveAirportPools() {
   busy.value = 'airport-pools'
+  airportActionText.value = '正在校验并应用候选池…'
   try {
     await airportApi('/api/pools', { method: 'POST', body: JSON.stringify({ pools: airportPools.value }) })
     notify('候选池已校验并生效')
@@ -1044,17 +1047,20 @@ async function saveAirportPools() {
   } catch (error) {
     notify(error instanceof Error ? error.message : '候选池应用失败')
   } finally {
+    airportActionText.value = ''
     busy.value = ''
   }
 }
 
 async function retestAirportPools() {
   busy.value = 'airport-retest'
+  airportActionText.value = ''
   try {
-    await airportApi('/api/retest-apply', { method: 'POST', body: JSON.stringify({ pools: airportPools.value }) })
-    notify('候选池已复测并生效')
-    await loadAirportState()
+    const result = await airportApi<JsonRecord>('/api/retest-apply', { method: 'POST', body: JSON.stringify({ pools: airportPools.value }) })
+    airportTestStatus.value = { ...result }
+    startAirportTestPolling()
   } catch (error) {
+    stopAirportTestPolling()
     notify(error instanceof Error ? error.message : '候选池复测失败')
   } finally {
     busy.value = ''
@@ -1063,12 +1069,15 @@ async function retestAirportPools() {
 
 async function rollbackAirportPools() {
   if (!window.confirm('回退到上一版候选池并重新验证？')) return
+  airportActionText.value = '正在回退上一版候选池…'
   try {
     await airportApi('/api/rollback', { method: 'POST', body: '{}' })
     notify('已验证并恢复上一版候选池')
     await loadAirportState()
   } catch (error) {
     notify(error instanceof Error ? error.message : '候选池回退失败')
+  } finally {
+    airportActionText.value = ''
   }
 }
 
@@ -1595,6 +1604,8 @@ async function loadFeatureView(view: string) {
     if (dnsTab.value === 'logs' && !dnsLogs.value.length) await loadDnsLogs()
   } else if (view === 'airport') {
     await loadAirportState()
+    await refreshAirportTestStatus()
+    if (airportTestRunning.value) startAirportTestPolling()
     if (airportTab.value === 'runtime') await loadAirportRuntime()
   } else if (view === 'rules') {
     await loadRules()
@@ -1677,6 +1688,53 @@ const dnsFilteredLogs = computed(() => dnsLogs.value.filter((log) => {
 const airportSources = computed(() => airportState.value.slots || [])
 const airportPoolNames = computed(() => Object.keys(airportPools.value))
 const airportTestedAt = computed(() => airportState.value.tests?.tested_at)
+const airportTestStatus = ref<JsonRecord>({})
+let airportTestPoll: number | undefined
+let airportTestPrevRunning = false
+const airportActionText = ref('')
+const airportTestRunning = computed(() => Boolean(airportTestStatus.value.running))
+const airportTestProgress = computed(() => {
+  const total = Number(airportTestStatus.value.total || 0)
+  const done = Number(airportTestStatus.value.completed || 0)
+  return total ? Math.min(100, Math.round((done / total) * 100)) : 0
+})
+const airportTestStatusText = computed(() => {
+  const s = airportTestStatus.value
+  const action = String(s.action || '')
+  if (s.running) {
+    const base = action === 'retest-apply' ? '候选池复测中' : '全量测速中'
+    const extra = action !== 'retest-apply' && s.phase === 'github' ? '（GitHub 专项）' : ''
+    return `${base}：${s.completed ?? 0}/${s.total ?? 0} 个节点已完成${extra}`
+  }
+  if (s.error) return action === 'retest-apply' ? `复测未生效：${s.error}` : `测速未完成：${s.error}`
+  if (s.finished_at && action === 'retest-apply') return s.applied ? '复测、专项、配置校验与运行验证均通过，候选池已生效' : '复测完成，但未生效'
+  if (s.finished_at && action === 'full-test') return s.proposal_ready ? '测速完成，已生成待生效建议；点击“复测并生效”后更新出口' : '测速完成，但有业务池没有连续三次成功的节点'
+  if (airportActionText.value) return airportActionText.value
+  return ''
+})
+const airportProgressVisible = computed(() => Boolean(airportTestRunning.value || airportTestStatusText.value))
+async function refreshAirportTestStatus() {
+  try {
+    const status = await airportApi<JsonRecord>('/api/test-status')
+    const running = Boolean(status.running)
+    airportTestStatus.value = status
+    if (airportTestPrevRunning && !running) {
+      airportTestPrevRunning = false
+      stopAirportTestPolling()
+      await loadAirportState()
+    }
+    airportTestPrevRunning = running
+    if (!running) stopAirportTestPolling()
+  } catch { /* keep last status */ }
+}
+function startAirportTestPolling() {
+  stopAirportTestPolling()
+  airportTestPrevRunning = true
+  airportTestPoll = window.setInterval(refreshAirportTestStatus, 1000)
+}
+function stopAirportTestPolling() {
+  if (airportTestPoll) { window.clearInterval(airportTestPoll); airportTestPoll = undefined }
+}
 const airportRuntimeGroups = computed(() => Object.entries((airportStatus.value.groups || {}) as Record<string, JsonRecord>))
 const airportFailsafeEntries = computed(() => Object.entries((airportStatus.value.failsafes || {}) as Record<string, JsonRecord>))
 const rulePolicies = computed(() => rulesPayload.value.policies || ['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'Others'])
@@ -1761,7 +1819,7 @@ onMounted(() => {
   void loadFeatureView(activeView.value)
   poller = window.setInterval(load, 30000)
 })
-onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeout(toastTimer) })
+onUnmounted(() => { if (poller) window.clearInterval(poller); if (airportTestPoll) window.clearInterval(airportTestPoll); window.clearTimeout(toastTimer) })
 </script>
 
 <template>
@@ -1884,7 +1942,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
           </template>
 
           <template v-else-if="airportTab === 'pools'">
-            <section class="surface-card"><div class="toolbar feature-toolbar"><div class="search-field"><Search :size="17" /><input v-model="airportFilter" placeholder="筛选节点名称" /></div><button class="primary-button" :disabled="busy === 'airport-test'" @click="testAirportAll"><Activity :size="15" />三次稳定性测速</button><button class="secondary-button" :disabled="busy === 'airport-retest'" @click="retestAirportPools">复测并生效</button><button class="secondary-button" @click="saveAirportPools">校验并应用</button><button class="compact-button danger" @click="rollbackAirportPools">回退上一版</button></div><div class="data-note-line">{{ airportTestedAt ? `上次稳定性测速：${timeValue(airportTestedAt)}` : '尚未执行稳定性测速；每次只在人工操作时测试节点。' }}</div></section><div class="pool-grid"><article v-for="pool in airportPoolNames" :key="pool" class="surface-card pool-card"><div class="card-heading"><div><h2>{{ pool }}</h2><span class="muted-caption">{{ (airportPools[pool] || []).length }}/5 个候选</span></div><button class="icon-button small" title="编辑候选池模式" aria-label="编辑候选池模式" @click="openAirportPoolEditor(pool)"><Pencil :size="15" /></button></div><div class="pool-mode"><span class="soft-badge mini">{{ airportSettings[pool]?.type === 'url-test' ? '自动测速' : airportSettings[pool]?.type === 'select' ? '手动选择' : '故障切换' }}</span><span class="muted-caption">按业务专项探针排序</span></div><div v-for="(node, index) in airportPools[pool] || []" :key="node" class="pool-node"><div><strong>{{ node }}</strong><small v-if="airportMetric(node).delay !== undefined">{{ airportMetric(node).delay }} ms · 抖动 {{ airportMetric(node).jitter }} · {{ airportMetric(node).success }}/3</small></div><div class="pool-node-actions"><button class="icon-button small" title="上移" aria-label="上移" @click="moveAirportNode(pool, index, -1)">↑</button><button class="icon-button small" title="下移" aria-label="下移" @click="moveAirportNode(pool, index, 1)">↓</button><button class="icon-button small" title="移除节点" aria-label="移除节点" @click="removeAirportNode(pool, index)"><X :size="14" /></button></div></div><div class="pool-add"><select @change="selectAirportNode(pool, $event)"><option value="">添加候选节点</option><option v-for="node in airportFilteredNodes(pool)" :key="node.name" :value="node.name">{{ node.name }}</option></select></div></article></div>
+            <section class="surface-card"><div class="toolbar feature-toolbar"><div class="search-field"><Search :size="17" /><input v-model="airportFilter" placeholder="筛选节点名称" /></div><button class="primary-button" :disabled="busy === 'airport-test'" @click="testAirportAll"><Activity :size="15" />三次稳定性测速</button><button class="secondary-button" :disabled="busy === 'airport-retest'" @click="retestAirportPools">复测并生效</button><button class="secondary-button" @click="saveAirportPools">校验并应用</button><button class="compact-button danger" @click="rollbackAirportPools">回退上一版</button></div><div v-if="airportProgressVisible" class="airport-progress"><div class="airport-progress-bar"><span :style="{ width: `${airportTestProgress}%` }" /></div><span>{{ airportTestStatusText }}</span></div><div class="data-note-line">{{ airportTestedAt ? `上次稳定性测速：${timeValue(airportTestedAt)}` : '尚未执行稳定性测速；每次只在人工操作时测试节点。' }}</div></section><div class="pool-grid"><article v-for="pool in airportPoolNames" :key="pool" class="surface-card pool-card"><div class="card-heading"><div><h2>{{ pool }}</h2><span class="muted-caption">{{ (airportPools[pool] || []).length }}/5 个候选</span></div><button class="icon-button small" title="编辑候选池模式" aria-label="编辑候选池模式" @click="openAirportPoolEditor(pool)"><Pencil :size="15" /></button></div><div class="pool-mode"><span class="soft-badge mini">{{ airportSettings[pool]?.type === 'url-test' ? '自动测速' : airportSettings[pool]?.type === 'select' ? '手动选择' : '故障切换' }}</span><span class="muted-caption">按业务专项探针排序</span></div><div v-for="(node, index) in airportPools[pool] || []" :key="node" class="pool-node"><div><strong>{{ node }}</strong><small v-if="airportMetric(node).delay !== undefined">{{ airportMetric(node).delay }} ms · 抖动 {{ airportMetric(node).jitter }} · {{ airportMetric(node).success }}/3</small></div><div class="pool-node-actions"><button class="icon-button small" title="上移" aria-label="上移" @click="moveAirportNode(pool, index, -1)">↑</button><button class="icon-button small" title="下移" aria-label="下移" @click="moveAirportNode(pool, index, 1)">↓</button><button class="icon-button small" title="移除节点" aria-label="移除节点" @click="removeAirportNode(pool, index)"><X :size="14" /></button></div></div><div class="pool-add"><select @change="selectAirportNode(pool, $event)"><option value="">添加候选节点</option><option v-for="node in airportFilteredNodes(pool)" :key="node.name" :value="node.name">{{ node.name }}</option></select></div></article></div>
           </template>
 
           <template v-else>

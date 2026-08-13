@@ -744,6 +744,10 @@ h1 em { color: var(--blue); font-style: normal; }
 .dns-view .soft-badge.mini { font-size: 10px; }
 .overview-alert { display: flex; align-items: flex-start; gap: 8px; margin: 12px 22px 0; padding: 9px 11px; border: 1px solid rgba(244, 169, 94, .3); border-radius: 7px; background: rgba(244, 169, 94, .08); color: var(--orange); font-size: 11px; line-height: 1.5; }
 .overview-alert svg { flex: 0 0 auto; margin-top: 1px; }
+.airport-progress { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.airport-progress-bar { flex: 1 1 auto; height: 4px; overflow: hidden; border-radius: 99px; background: var(--surface-strong); }
+.airport-progress-bar span { display: block; height: 100%; border-radius: inherit; background: var(--blue); transition: width .3s ease; }
+.airport-progress > span { flex: 0 0 auto; color: var(--text-soft); font-size: 11px; white-space: nowrap; }
 .metric-value-long strong { font-size: 17px; letter-spacing: -.02em; }
 .dns-view .rule-data-card { padding: 18px 20px; }
 .dns-view .rule-data-card .data-list { margin-top: 10px; }
