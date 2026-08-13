@@ -701,3 +701,44 @@ h1 em { color: var(--blue); font-style: normal; }
 .observation-stat span { color: var(--text-soft); font-size: 11px; font-weight: 600; }
 .observation-stat strong { margin-top: 6px; font-size: 16px; }
 .observation-stat small { margin-top: 5px; font-size: 11px; }
+
+/* DNS management typography tuning (scoped to the DNS view) */
+.dns-view .eyebrow { font-size: 11px; letter-spacing: .12em; }
+.dns-view .soft-badge { font-size: 11px; }
+.dns-view .card-heading h2 { font-size: 18px; }
+.dns-view .feature-tabs button { font-size: 12px; }
+.dns-view .metric-label { font-size: 12px; }
+.dns-view .metric-card small { font-size: 11px; }
+.dns-view .muted-caption { font-size: 11px; }
+.dns-view .info-strip, .dns-view .feature-hint, .dns-view .data-note-line { font-size: 11px; line-height: 1.6; }
+.dns-view .route-summary-head span { color: var(--text); font-size: 12px; font-weight: 650; }
+.dns-view .route-summary-head small { font-size: 11px; }
+.dns-view .route-upstreams-label { font-size: 11px; }
+.dns-view .route-line span { font-size: 11px; }
+.dns-view .route-line strong { font-size: 12px; }
+.dns-view .dns-race-card .card-subtitle { font-size: 11px; }
+.dns-view .dns-race-identity strong { font-size: 12px; }
+.dns-view .dns-race-identity small { font-size: 10px; }
+.dns-view .dns-race-error { font-size: 10px; }
+.dns-view .dns-race-metrics span { font-size: 10px; }
+.dns-view .dns-race-metrics strong { font-size: 14px; }
+.dns-view .dns-race-metrics small { font-size: 10px; }
+.dns-view .dns-race-note { font-size: 11px; }
+.dns-view .rank-row { font-size: 12px; }
+.dns-view .rank-row strong { font-size: 13px; }
+.dns-view .log-head { font-size: 11px; }
+.dns-view .log-row { font-size: 12px; }
+.dns-view .log-row strong { font-size: 13px; }
+.dns-view .log-row small { font-size: 11px; }
+.dns-view .log-route { font-size: 11px; }
+.dns-view .log-upstream { font-size: 11px; }
+.dns-view .table-foot { font-size: 11px; }
+.dns-view .segmented button { font-size: 12px; }
+.dns-view .search-field input { font-size: 13px; }
+.dns-view .data-line { font-size: 12px; }
+.dns-view .data-line strong { font-size: 13px; }
+.dns-view .filter-summary span { font-size: 11px; }
+.dns-view .filter-summary strong { font-size: 12px; }
+.dns-view .action-block strong { font-size: 13px; }
+.dns-view .action-block small { font-size: 11px; }
+.dns-view .soft-badge.mini { font-size: 10px; }
