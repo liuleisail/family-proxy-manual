@@ -513,3 +513,9 @@ RouterOS 变更要求：
 - 结论：不是规则问题。证据：`/api/alerts/test` 返回“测试消息已发送”；mihomo 日志确认 127.0.0.1→api.telegram.org 命中 `AND((SrcIPCIDR,127.0.0.1/32)&&(Domain,api.telegram.org))→TG-Notify`；TG-Notify（Fallback，3 候选）对 api.telegram.org 探测 3/3 可达；TG-Auto（URLTest，5 候选）5/5 健康，客户端 MTProto（149.154.x/91.108.x）连接活跃。
 - 已记录的两条排查经验：① `/group/*/delay` 用默认 gstatic 探测 URL 可能误报（TG-Notify 默认探测 0/1，换成 api.telegram.org 后 3/3），判断 Telegram 可达性应使用 Telegram 真实端点；② 系统告警推送路径 = family-proxy-ui.py `send_alert_test()` / 更新提醒，经 `curl --proxy http://127.0.0.1:7890` 到 api.telegram.org，命中 TG-Notify 规则。
 - 待用户补充：失败发生的时间点、具体是“系统告警测试/更新提醒”还是“手机 App 通知”、当时的报错文本；若再次失败，抓取当时 mihomo 日志与 `/api/alerts/test` 返回值定位。
+
+### TG 推送故障二次排查结论（2026-08-13 16:55，iPhone .189 在局域网）
+
+- 用户反馈：iPhone（192.168.2.189）在局域网完全收不到 Telegram 弹窗通知；5G 下正常。
+- 系统侧已排除：RouterOS 连接表显示 .189 存在**活跃且直连的 APNs 会话** `17.188.171.133:5223`（TCP established，orig 4,015 包 / 3.08 MB，repl 2,891 包收包正常，回复目的地为公网 WAN IP，未进旁路/代理）；另有 Apple 中国节点 101.226.142.171:443 与 NTP 17.253.68.251:123 连接。APNs 通道在正常收发，Apple→iPhone 推送链路未发现阻断。.189 当前无 Telegram DC（149.154.x/91.108.x）连接，IPv6 guard 计数增长极缓（+10/20min）。
+- 结论：网络/旁路系统未阻断推送，指向 iOS/Telegram 客户端侧（通知权限、专注模式、APNs 令牌或 App 后台状态）。下一步验证：用户触发测试消息时观察 .189 的 APNs 会话 repl 计数是否增长（增长=Apple 在投递，问题在显示侧；不增长=令牌/Telegram 服务端未下发）。
