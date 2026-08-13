@@ -519,3 +519,10 @@ RouterOS 变更要求：
 - 用户反馈：iPhone（192.168.2.189）在局域网完全收不到 Telegram 弹窗通知；5G 下正常。
 - 系统侧已排除：RouterOS 连接表显示 .189 存在**活跃且直连的 APNs 会话** `17.188.171.133:5223`（TCP established，orig 4,015 包 / 3.08 MB，repl 2,891 包收包正常，回复目的地为公网 WAN IP，未进旁路/代理）；另有 Apple 中国节点 101.226.142.171:443 与 NTP 17.253.68.251:123 连接。APNs 通道在正常收发，Apple→iPhone 推送链路未发现阻断。.189 当前无 Telegram DC（149.154.x/91.108.x）连接，IPv6 guard 计数增长极缓（+10/20min）。
 - 结论：网络/旁路系统未阻断推送，指向 iOS/Telegram 客户端侧（通知权限、专注模式、APNs 令牌或 App 后台状态）。下一步验证：用户触发测试消息时观察 .189 的 APNs 会话 repl 计数是否增长（增长=Apple 在投递，问题在显示侧；不增长=令牌/Telegram 服务端未下发）。
+
+### TG 推送根因确认（2026-08-13 17:05，iPhone .189）
+
+- 现象：iPhone .189 在局域网完全收不到 Telegram 弹窗；5G 下正常；手机侧通知设置/重启 TG/专注模式均已排除。
+- 根因：**TG-Auto 代理节点无法承载 Telegram MTProto 会话**。RouterOS 双采样显示 .189→149.154.175.50:443 的连接带 `connection-mark=family_mihomo_conn`（正确走 TG-Auto），但每次只交换约 389B 发送 / 305B 接收即停滞并断开重连（新连接号持续出现）；APNs 会话（17.188.171.133:5223）保持空闲且下行不增长。即 App 无法经代理维持 Telegram 后台连接 → 推送依赖的连接不可用。
+- 旁证：mihomo 对 Telegram DC IP 的 SNI 嗅探报 `may not have any sent data` 属 Telegram MTProto 非标准握手导致，路由已回退 IPCIDR 命中 TG-Auto，非故障原因；TG-Auto 对 DC 的简单 delay 探测 5/5 通过（探测不敏感，无法发现 MTProto 停滞）。
+- 修复方向（待用户操作/授权）：在管理页把 TG 策略组当前节点（主力 HK）切换为其它候选（或复测并生效），iPhone 杀掉 Telegram 重开后验证；若所有 TG 候选都失败，说明该批节点被 Telegram 对 MTProto 封禁/限速，需更换机场节点。切换后复查 .189 的 MTProto 连接 orig/repl 计数是否持续增长。
