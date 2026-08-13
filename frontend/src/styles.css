@@ -588,6 +588,10 @@ h1 em { color: var(--blue); font-style: normal; }
 .dns-race-card { align-self: start; min-width: 0; }
 .dns-race-card .card-heading { align-items: flex-start; }
 .dns-race-card .card-subtitle { margin-top: 6px; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+.dns-race-modal { width: min(760px, calc(100vw - 28px)); max-height: min(720px, calc(100vh - 40px)); overflow-y: auto; }
+.dns-race-modal .dns-race-popover-summary { margin-top: 8px; color: var(--text-muted); font-size: 11px; line-height: 1.55; }
+.dns-race-modal .dns-race-list { margin-top: 16px; }
+.dns-race-modal .dns-race-note { margin-top: 12px; }
 .dns-race-list { overflow: hidden; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface-strong); }
 .dns-race-columns, .dns-race-row { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(98px, .7fr) minmax(110px, .75fr) minmax(64px, .45fr); column-gap: 13px; align-items: center; }
 .dns-race-columns { min-height: 33px; padding: 0 14px; border-bottom: 1px solid var(--line-soft); color: var(--text-muted); font-size: 10px; }
