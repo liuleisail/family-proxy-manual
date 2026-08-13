@@ -742,3 +742,10 @@ h1 em { color: var(--blue); font-style: normal; }
 .dns-view .action-block strong { font-size: 13px; }
 .dns-view .action-block small { font-size: 11px; }
 .dns-view .soft-badge.mini { font-size: 10px; }
+.dns-view .adblock-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 15px; }
+.dns-view .adblock-modes button { min-height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-strong); color: var(--text-soft); font-size: 12px; font-weight: 600; transition: .15s ease; }
+.dns-view .adblock-modes button:hover:not(:disabled) { border-color: var(--text-muted); color: var(--text); }
+.dns-view .adblock-modes button.active { border-color: var(--blue); background: rgba(94, 168, 255, .12); color: var(--blue); }
+.dns-view .adblock-modes button.active.block { border-color: var(--green); background: rgba(83, 211, 156, .12); color: var(--green); }
+.dns-view .adblock-modes button:disabled { cursor: wait; opacity: .55; }
+.dns-view .soft-badge.warn { border-color: rgba(244, 169, 94, .28); background: rgba(244, 169, 94, .1); color: var(--orange); }

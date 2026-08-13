@@ -163,6 +163,7 @@ const dnsCapacity = ref<JsonRecord>({})
 const dnsRuleData = ref<JsonRecord>({})
 const dnsAdblock = ref<JsonRecord>({})
 const dnsRuleUpdate = ref<JsonRecord>({})
+const dnsRuleBusy = ref(false)
 const dnsVerify = ref<JsonRecord>({})
 const dnsUpstreamsOpen = ref(false)
 const dnsDomesticDraft = ref('')
@@ -768,7 +769,49 @@ async function runDnsAction(path: string, message: string, payload: unknown = {}
 }
 
 async function updateDnsRules() {
-  await runDnsAction('/rules/update', '已开始下载并校验官方规则')
+  if (dnsRuleBusy.value) return
+  dnsRuleBusy.value = true
+  dnsRuleUpdate.value = { ...dnsRuleUpdate.value, phase: 'checking', message: '正在下载并校验官方规则…' }
+  try {
+    await dnsMaintenanceApi('/rules/update', { method: 'POST', body: '{}' })
+    let phase = ''
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      const status = await dnsMaintenanceApi<JsonRecord>('/rules/status')
+      dnsRuleUpdate.value = status
+      phase = String(status.phase || '')
+      if (!['checking', 'updating', 'busy', 'starting', ''].includes(phase)) break
+    }
+    if (['failed', 'error', 'rolled_back'].includes(phase)) {
+      notify(`规则更新失败${dnsRuleUpdate.value.message ? `：${dnsRuleUpdate.value.message}` : ''}`)
+    } else if (['updated', 'up_to_date'].includes(phase)) {
+      notify('规则已更新并通过校验')
+    } else {
+      notify('规则更新任务已提交，仍在后台进行')
+    }
+  } catch (error) {
+    notify(error instanceof Error ? `规则更新失败：${error.message}` : '规则更新失败')
+  } finally {
+    dnsRuleBusy.value = false
+    await loadDnsData()
+  }
+}
+
+function dnsRulePhaseLabel(phase?: string) {
+  if (!phase || phase === 'idle') return '尚未执行'
+  if (phase === 'updated' || phase === 'up_to_date') return '更新完成'
+  if (phase === 'checking' || phase === 'updating' || phase === 'busy' || phase === 'starting') return '更新中'
+  if (phase === 'failed' || phase === 'error' || phase === 'rolled_back') return '更新失败'
+  if (phase === 'available') return '有可用更新'
+  return phase
+}
+
+function dnsRulePhaseWarn(phase?: string) {
+  return ['checking', 'updating', 'busy', 'starting', 'failed', 'error', 'rolled_back', 'available'].includes(String(phase || ''))
+}
+
+function dnsRulePhaseBusy(phase?: string) {
+  return ['checking', 'updating', 'busy', 'starting'].includes(String(phase || ''))
 }
 
 async function toggleDnsRuleAuto() {
@@ -777,17 +820,29 @@ async function toggleDnsRuleAuto() {
 }
 
 async function setDnsAdblockMode(mode: string) {
+  if (busy.value === 'dns-adblock') return
   if (mode === 'block' && !window.confirm('启用后，命中的广告和成人域名会返回 NXDOMAIN。继续吗？')) return
-  await runDnsAction('/adblock/mode', '正在切换过滤模式并执行验证', { mode })
+  if (mode === dnsAdblock.value.mode) return
+  busy.value = 'dns-adblock'
+  dnsAdblock.value = { ...dnsAdblock.value, mode, message: mode === 'observe' ? '正在切换为观察模式…' : mode === 'block' ? '正在切换为拦截模式…' : '正在关闭内容过滤…' }
+  try {
+    await dnsMaintenanceApi('/adblock/mode', { method: 'POST', body: JSON.stringify({ mode }) })
+    notify(mode === 'off' ? '内容过滤已关闭' : mode === 'observe' ? '已切换为观察模式' : '已切换为拦截模式')
+  } catch (error) {
+    notify(error instanceof Error ? error.message : '切换过滤模式失败')
+  } finally {
+    busy.value = ''
+    await loadDnsData()
+  }
 }
 
 async function updateDnsAdblock() {
-  await runDnsAction('/adblock/update', '已开始使用本地网络更新精简规则')
+  await runDnsAction('/adblock/update', '已开始使用本地网络更新内容过滤规则')
 }
 
 async function toggleDnsAdblockAuto() {
   const enabled = !Boolean(dnsAdblock.value.auto_enabled)
-  await runDnsAction('/adblock/auto', enabled ? '精简过滤自动更新已开启' : '精简过滤自动更新已关闭', { enabled })
+  await runDnsAction('/adblock/auto', enabled ? '内容过滤自动更新已开启' : '内容过滤自动更新已关闭', { enabled })
 }
 
 function openDnsAllowlist() {
@@ -1810,7 +1865,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); window.clearTimeou
           </template>
 
           <template v-else>
-            <div class="section-grid data-layout"><div class="data-stack"><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">RULE DATA</span><h2>规则数据</h2></div><span class="soft-badge">{{ Number(dnsCapacity.capacity || 0).toLocaleString() }} 条日志容量</span></div><div class="data-list"><div v-for="item in [{ label: '国内域名', value: dnsRuleData.domestic?.rule_count }, { label: '国外域名', value: dnsRuleData.foreign?.rule_count }, { label: '国内 IP', value: dnsRuleData.ip?.rule_count }]" :key="item.label" class="data-line"><span>{{ item.label }}</span><strong>{{ Number(item.value || 0).toLocaleString() }} 条</strong></div><div v-for="item in (dnsRuleData.extras || [])" :key="item.tag || item.name" class="data-line"><span>{{ item.name || item.tag || '附加规则' }}</span><strong>{{ Number(item.rule_count || 0).toLocaleString() }} 条</strong></div></div></section><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">CONTENT FILTER</span><h2>精简内容过滤</h2></div><span class="soft-badge" :class="{ good: dnsAdblock.mode === 'block' }">{{ dnsAdblock.mode === 'block' ? '正在拦截' : dnsAdblock.mode === 'observe' ? '观察中' : '已关闭' }}</span></div><div class="segmented wide-segment"><button v-for="mode in [{ id: 'off', label: '关闭' }, { id: 'observe', label: '观察' }, { id: 'block', label: '拦截' }]" :key="mode.id" :class="{ active: dnsAdblock.mode === mode.id }" @click="setDnsAdblockMode(mode.id)">{{ mode.label }}</button></div><div class="filter-summary"><div><span>近期命中</span><strong>{{ Number(dnsAdblock.hits?.total || 0).toLocaleString() }} 次</strong></div><div><span>放行域名</span><strong>{{ Number(dnsAdblock.allowlist_count || 0) }} 个</strong></div><div><span>自动更新</span><strong>{{ dnsAdblock.auto_enabled ? `每 ${Number(dnsAdblock.interval_hours || 24)} 小时` : '已关闭' }}</strong></div></div><div class="data-note-line">{{ dnsAdblock.message || '尚未准备精简过滤规则' }} · 国内广告 {{ Number(dnsAdblock.hits?.cn_ads || 0) }} 次，成人内容 {{ Number(dnsAdblock.hits?.adult || 0) }} 次</div><div class="inline-actions"><button class="primary-button" @click="updateDnsAdblock">更新并校验</button><button class="secondary-button" @click="toggleDnsAdblockAuto">{{ dnsAdblock.auto_enabled ? '关闭自动更新' : '开启自动更新' }}</button><button class="secondary-button" @click="openDnsAllowlist">编辑放行名单</button></div><div v-if="dnsAllowlistOpen" class="inline-editor"><textarea v-model="dnsAllowlistDraft" placeholder="每行一个域名" /><div class="inline-actions"><button class="secondary-button" @click="dnsAllowlistOpen = false">取消</button><button class="primary-button" @click="saveDnsAllowlist">保存并校验</button></div></div></section><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">RULE UPDATES</span><h2>规则自动更新</h2></div><span class="soft-badge" :class="{ good: dnsRuleUpdate.phase === 'updated' }">{{ dnsRuleUpdate.phase === 'updated' ? '更新完成' : dnsRuleUpdate.phase || '尚未执行' }}</span></div><div class="filter-summary"><div><span>更新范围</span><strong>官方国内/国外/国内 IP</strong></div><div><span>更新周期</span><strong>{{ dnsRuleUpdate.config?.rule_auto_enabled ? `每 ${dnsRuleUpdate.config?.rule_interval_hours || 24} 小时` : '已关闭' }}</strong></div><div><span>最近结果</span><strong>{{ timeValue(dnsRuleUpdate.completed_at || dnsRuleUpdate.updated_at) }}</strong></div></div><div class="data-note-line">{{ dnsRuleUpdate.message || '更新前备份，数量或探针异常时自动回滚。' }}</div><div class="inline-actions"><button class="primary-button" @click="updateDnsRules">立即检查并更新</button><button class="secondary-button" @click="toggleDnsRuleAuto">{{ dnsRuleUpdate.config?.rule_auto_enabled ? '关闭自动更新' : '开启自动更新' }}</button></div></section></div><aside class="surface-card maintenance-card dns-actions"><div class="card-heading"><div><span class="eyebrow">MAINTENANCE</span><h2>维护操作</h2></div><Settings2 :size="18" class="muted-icon" /></div><div class="action-block"><strong>刷新页面数据</strong><small>重新读取状态、规则数量与上游配置。</small><button class="secondary-button" @click="loadDnsData"><RefreshCw :size="14" />重新载入</button></div><div class="action-block"><strong>DNS 回归检查</strong><small>{{ dnsVerify.message || '快速检查保留缓存；完整回归会清理路由缓存。' }}</small><div class="inline-actions"><button class="secondary-button" @click="runDnsVerify('quick')">快速检查</button><button class="secondary-button" @click="runDnsVerify('full')">完整回归</button></div></div><div class="action-block"><strong>清空 DNS 缓存</strong><small>用于排查旧解析结果，清空后首次访问可能稍慢。</small><button class="secondary-button" @click="flushDnsCaches">清空缓存</button></div><div class="action-block"><strong>查询记录采集</strong><small>{{ dnsCapture.capturing ? '当前正在采集查询记录。' : '当前已暂停采集，解析服务仍然正常。' }}</small><button class="secondary-button" @click="toggleDnsCapture">{{ dnsCapture.capturing ? '暂停采集' : '开始采集' }}</button></div><div class="action-block"><strong>清空查询日志</strong><small>删除当前审计记录，不影响 DNS 解析。</small><button class="compact-button danger" @click="clearDnsLogs">清空日志</button></div></aside></div>
+            <div class="section-grid data-layout"><div class="data-stack"><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">RULE DATA</span><h2>规则数据</h2></div><span class="soft-badge">{{ Number(dnsCapacity.capacity || 0).toLocaleString() }} 条日志容量</span></div><div class="data-list"><div v-for="item in [{ label: '国内域名', value: dnsRuleData.domestic?.rule_count }, { label: '国外域名', value: dnsRuleData.foreign?.rule_count }, { label: '国内 IP', value: dnsRuleData.ip?.rule_count }]" :key="item.label" class="data-line"><span>{{ item.label }}</span><strong>{{ Number(item.value || 0).toLocaleString() }} 条</strong></div><div v-for="item in (dnsRuleData.extras || [])" :key="item.tag || item.name" class="data-line"><span>{{ item.name || item.tag || '附加规则' }}</span><strong>{{ Number(item.rule_count || 0).toLocaleString() }} 条</strong></div></div></section><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">CONTENT FILTER</span><h2>内容过滤</h2></div><span class="soft-badge" :class="{ good: dnsAdblock.mode === 'block' }">{{ dnsAdblock.mode === 'block' ? '正在拦截' : dnsAdblock.mode === 'observe' ? '观察中' : '已关闭' }}</span></div><div class="adblock-modes"><button v-for="mode in [{ id: 'off', label: '关闭' }, { id: 'observe', label: '观察' }, { id: 'block', label: '拦截' }]" :key="mode.id" type="button" :class="{ active: dnsAdblock.mode === mode.id, block: mode.id === 'block' }" :disabled="busy === 'dns-adblock'" @click="setDnsAdblockMode(mode.id)">{{ busy === 'dns-adblock' && dnsAdblock.mode === mode.id ? '切换中…' : mode.label }}</button></div><div class="filter-summary"><div><span>近期命中</span><strong>{{ Number(dnsAdblock.hits?.total || 0).toLocaleString() }} 次</strong></div><div><span>放行域名</span><strong>{{ Number(dnsAdblock.allowlist_count || 0) }} 个</strong></div><div><span>自动更新</span><strong>{{ dnsAdblock.auto_enabled ? `每 ${Number(dnsAdblock.interval_hours || 24)} 小时` : '已关闭' }}</strong></div></div><div class="data-note-line">{{ dnsAdblock.message || '尚未准备内容过滤规则' }} · 国内广告 {{ Number(dnsAdblock.hits?.cn_ads || 0) }} 次，成人内容 {{ Number(dnsAdblock.hits?.adult || 0) }} 次</div><div class="inline-actions"><button class="primary-button" @click="updateDnsAdblock">更新并校验</button><button class="secondary-button" @click="toggleDnsAdblockAuto">{{ dnsAdblock.auto_enabled ? '关闭自动更新' : '开启自动更新' }}</button><button class="secondary-button" @click="openDnsAllowlist">编辑放行名单</button></div><div v-if="dnsAllowlistOpen" class="inline-editor"><textarea v-model="dnsAllowlistDraft" placeholder="每行一个域名" /><div class="inline-actions"><button class="secondary-button" @click="dnsAllowlistOpen = false">取消</button><button class="primary-button" @click="saveDnsAllowlist">保存并校验</button></div></div></section><section class="surface-card"><div class="card-heading"><div><span class="eyebrow">RULE UPDATES</span><h2>规则自动更新</h2></div><span class="soft-badge" :class="{ good: dnsRuleUpdate.phase === 'updated' || dnsRuleUpdate.phase === 'up_to_date', warn: dnsRulePhaseWarn(dnsRuleUpdate.phase) }">{{ dnsRulePhaseLabel(dnsRuleUpdate.phase) }}</span></div><div class="filter-summary"><div><span>更新范围</span><strong>官方国内/国外/国内 IP</strong></div><div><span>更新周期</span><strong>{{ dnsRuleUpdate.config?.rule_auto_enabled ? `每 ${dnsRuleUpdate.config?.rule_interval_hours || 24} 小时` : '已关闭' }}</strong></div><div><span>最近结果</span><strong>{{ dnsRulePhaseBusy(dnsRuleUpdate.phase) ? '进行中…' : timeValue(dnsRuleUpdate.completed_at || dnsRuleUpdate.updated_at) }}</strong></div></div><div class="data-note-line">{{ dnsRuleUpdate.message || '更新前备份，数量或探针异常时自动回滚。' }}</div><div class="inline-actions"><button class="primary-button" :disabled="dnsRuleBusy" @click="updateDnsRules">{{ dnsRuleBusy ? '更新中…' : '立即检查并更新' }}</button><button class="secondary-button" @click="toggleDnsRuleAuto">{{ dnsRuleUpdate.config?.rule_auto_enabled ? '关闭自动更新' : '开启自动更新' }}</button></div></section></div><aside class="surface-card maintenance-card dns-actions"><div class="card-heading"><div><span class="eyebrow">MAINTENANCE</span><h2>维护操作</h2></div><Settings2 :size="18" class="muted-icon" /></div><div class="action-block"><strong>刷新页面数据</strong><small>重新读取状态、规则数量与上游配置。</small><button class="secondary-button" @click="loadDnsData"><RefreshCw :size="14" />重新载入</button></div><div class="action-block"><strong>DNS 回归检查</strong><small>{{ dnsVerify.message || '快速检查保留缓存；完整回归会清理路由缓存。' }}</small><div class="inline-actions"><button class="secondary-button" @click="runDnsVerify('quick')">快速检查</button><button class="secondary-button" @click="runDnsVerify('full')">完整回归</button></div></div><div class="action-block"><strong>清空 DNS 缓存</strong><small>用于排查旧解析结果，清空后首次访问可能稍慢。</small><button class="secondary-button" @click="flushDnsCaches">清空缓存</button></div><div class="action-block"><strong>查询记录采集</strong><small>{{ dnsCapture.capturing ? '当前正在采集查询记录。' : '当前已暂停采集，解析服务仍然正常。' }}</small><button class="secondary-button" @click="toggleDnsCapture">{{ dnsCapture.capturing ? '暂停采集' : '开始采集' }}</button></div><div class="action-block"><strong>清空查询日志</strong><small>删除当前审计记录，不影响 DNS 解析。</small><button class="compact-button danger" @click="clearDnsLogs">清空日志</button></div></aside></div>
           </template>
         </section>
 

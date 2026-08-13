@@ -127,14 +127,14 @@
           <div>
             <div class="data-block"><div class="section-head"><h2>规则数据</h2><span id="capture-state" class="hint">--</span></div><div id="rule-data" class="data-table"><div class="empty">载入中</div></div></div>
             <div class="data-block">
-              <div class="section-head"><h2>精简内容过滤</h2><span id="adblock-state" class="pill direct">读取中</span></div>
+              <div class="section-head"><h2>内容过滤</h2><span id="adblock-state" class="pill direct">读取中</span></div>
               <div class="filter-card">
                 <div class="filter-mode" aria-label="内容过滤模式">
                   <button data-mode="off">关闭</button>
                   <button data-mode="observe">观察</button>
                   <button data-mode="block">拦截</button>
                 </div>
-                <div class="filter-note">国内精简广告与成人内容分别维护。观察模式只统计命中，不阻断访问；拦截模式返回 NXDOMAIN。</div>
+                <div class="filter-note">国内广告与成人内容分别维护。观察模式只统计命中，不阻断访问；拦截模式返回 NXDOMAIN。</div>
                 <div class="filter-summary">
                   <div class="update-item"><span class="update-label">近期命中</span><span id="adblock-hits" class="update-value">--</span></div>
                   <div class="update-item"><span class="update-label">放行域名</span><span id="adblock-allow-count" class="update-value">--</span></div>
@@ -516,7 +516,7 @@
       $('#adblock-sources').innerHTML = sources.map(source => { const observing = mode === 'observe'; const note = source.enabled ? '已载入 MosDNS' : observing ? '仅在后台比对日志' : '当前未载入'; const text = source.enabled ? `${num(source.loaded_count)} 已生效` : observing ? '观察池' : '待命'; const tone = source.enabled && source.loaded_count === source.rule_count ? 'direct' : source.enabled ? 'slow' : observing ? 'proxy' : 'slow'; return `<div class="filter-source"><div><strong>${esc(source.label)}</strong><small>${note}</small></div><span class="mono">${num(source.rule_count)} 条</span><span class="pill ${tone}">${text}</span></div>`; }).join('') || '<div class="empty">尚未生成过滤规则</div>';
       const top = Array.isArray(data.top_domains) ? data.top_domains : [];
       $('#adblock-top').textContent = top.length ? `近期命中：${top.map(item => `${item.domain}（${num(item.count)}）`).join('、')}` : '尚无观察或拦截记录。';
-      $('#adblock-detail').textContent = `${data.message || '尚未准备精简过滤规则'} · 国内广告 ${num(hits.cn_ads || 0)} 次，成人内容 ${num(hits.adult || 0)} 次 · ${updateTime(data.completed_at || data.updated_at)}`;
+      $('#adblock-detail').textContent = `${data.message || '尚未准备内容过滤规则'} · 国内广告 ${num(hits.cn_ads || 0)} 次，成人内容 ${num(hits.adult || 0)} 次 · ${updateTime(data.completed_at || data.updated_at)}`;
       $('#adblock-update').disabled = busy;
       $('#adblock-auto-toggle').disabled = busy;
       $('#adblock-auto-toggle').textContent = data.auto_enabled ? '关闭自动更新' : '开启自动更新';
@@ -537,7 +537,7 @@
       return null;
     }
     async function updateAdblock() {
-      try { await maintenanceApi('/adblock/update', {method:'POST', body:'{}'}); toast('已开始使用本地网络更新精简规则'); await pollAdblock(); await loadData(); }
+      try { await maintenanceApi('/adblock/update', {method:'POST', body:'{}'}); toast('已开始使用本地网络更新内容过滤规则'); await pollAdblock(); await loadData(); }
       catch (error) { toast(`过滤规则更新失败：${error.message}`, true); await loadAdblock(true); }
     }
     async function setAdblockMode(mode) {
