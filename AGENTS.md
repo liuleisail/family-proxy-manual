@@ -585,3 +585,10 @@ RouterOS 变更要求：
 - 生产部署（2026-08-14）：已按备份流程部署到 Z4Pro，备份为 `/var/backups/family-proxy/20260814-101552`；生产 `rules.html` 与本地修复源码哈希一致，`scripts/verify-server.sh` 通过。浏览器访问生产 `/rules` 已正常进入统一登录页，未使用或记录登录凭据，因此未声称完成登录后的页面交互复验。
 - 部署链路修复：`scripts/deploy-family-proxy-ui` 现在会备份并安装旧版 `rules.html`，并将旧版页面与 QR 运行时纳入 `build-info` 指纹；`scripts/sync-z4pro-source` 将 `verify-server.sh` 纳入关键文件校验，避免旧版核验脚本残留。
 - 最新生产部署（2026-08-14）：二次修复已部署，构建 ID 为 `a222bd633fee`，备份为 `/var/backups/family-proxy/20260814-104311`，`scripts/verify-server.sh` 通过。同步脚本现在按内容直接同步完整 `frontend/dist`，并将 `runtime/rules.html` 纳入关键文件校验，避免新哈希资源或旧版页面变更漏传。
+
+### 2026-08-14 总览活动连接卡片跳转修复
+
+- 变更：总览页“活动连接”KPI 卡片补齐与“已接管设备/当前出口/DNS 平均处理”一致的交互；支持点击或 Enter 键跳转到 `traffic` 流量观察视图，并显示统一的悬停箭头反馈。
+- 版本：仍为 `v0.11.12`，本次未 bump 版本号。
+- 本地验证：临时构建目录中的 `npm run typecheck` 与 `npm run build` 通过；46 项 Python 回归通过；生成前端资源为 `index-DVmGmsAE.css`、`index-DROpo0xI.js`。
+- 生产状态：截至本次交接尚未部署。`z4pro` 的 `codexops` 入口可读服务但 `sudo -n` 需要密码；`z4pro-change` 的 `codex-change` 入口返回 shell 不可用。部署前需恢复经授权的非交互 root 入口，再按 `scripts/sync-z4pro-source` 和 `scripts/deploy-family-proxy-ui` 的备份流程执行，并记录新的 backup/build-info。
