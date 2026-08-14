@@ -220,6 +220,7 @@ const ruleSetInterval = ref('86400')
 const ruleSetBehavior = ref('domain')
 const ruleSetFormat = ref('mrs')
 const ruleSetEditorIndex = ref(-1)
+const ruleSetSourceMetadata = ref<Record<string, JsonRecord>>({})
 
 const ruleSetPresetItems: JsonRecord[] = [
   { id: 'telegram-ip', name: 'Telegram IP', group: 'Telegram', url: 'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/telegram.mrs', behavior: 'ipcidr', format: 'mrs', policy: 'TG-Auto', priority: 'high', interval: 86400 },
@@ -1320,7 +1321,18 @@ async function saveRules() {
 
 function openRuleSetEditor(index = -1) {
   const current = index >= 0 ? rulesPayload.value.rule_sets?.[index] : undefined
-  const source = current?.sources?.[0] || {}
+  const sources = arrayFrom(current?.sources)
+  const presetUrls = new Set(ruleSetPresetItems.map((item) => item.url))
+  ruleSetSourceMetadata.value = Object.fromEntries(sources.map((source: JsonRecord) => [
+    source.url,
+    {
+      key: source.key,
+      behavior: source.behavior,
+      format: source.format,
+      manual: !presetUrls.has(source.url),
+    },
+  ]))
+  const source = sources.find((item: JsonRecord) => !presetUrls.has(item.url)) || sources[0] || {}
   ruleSetEditorIndex.value = index
   ruleSetName.value = current?.name || ''
   ruleSetUrls.value = arrayFrom(current?.sources).map((item: JsonRecord) => item.url).join('\n')
@@ -1341,6 +1353,7 @@ function applyRuleSetPreset(event: Event) {
   const wasEmpty = urls.length === 0
   if (!urls.includes(preset.url)) urls.push(preset.url)
   ruleSetUrls.value = urls.join('\n')
+  ruleSetSourceMetadata.value[preset.url] = { key: ruleSetSourceMetadata.value[preset.url]?.key, behavior: preset.behavior, format: preset.format, manual: false }
   if (!ruleSetName.value.trim()) ruleSetName.value = preset.group || preset.name
   if (wasEmpty) {
     ruleSetPolicy.value = preset.policy || ruleSetPolicy.value
@@ -1350,6 +1363,30 @@ function applyRuleSetPreset(event: Event) {
   ruleSetBehavior.value = preset.behavior || ruleSetBehavior.value
   ruleSetFormat.value = preset.format || ruleSetFormat.value
   notify(`${preset.name} 已追加到规则集合草稿`)
+}
+
+function syncRuleSetSourceMetadata() {
+  const behavior = ruleSetBehavior.value
+  const format = ruleSetFormat.value
+  const urls = [...new Set(ruleSetUrls.value.split(/\n/).map((value) => value.trim()).filter(Boolean))]
+  const metadata = { ...ruleSetSourceMetadata.value }
+  urls.forEach((url) => {
+    metadata[url] = metadata[url] || { behavior, format, manual: true }
+  })
+  Object.keys(metadata).forEach((url) => {
+    if (!urls.includes(url)) delete metadata[url]
+  })
+  ruleSetSourceMetadata.value = metadata
+}
+
+function syncRuleSetManualSources() {
+  syncRuleSetSourceMetadata()
+  const behavior = ruleSetBehavior.value
+  const format = ruleSetFormat.value
+  ruleSetSourceMetadata.value = Object.fromEntries(Object.entries(ruleSetSourceMetadata.value).map(([url, source]) => [
+    url,
+    source.manual ? { ...source, behavior, format } : source,
+  ]))
 }
 
 function addRuleSet() {
@@ -1367,7 +1404,11 @@ function addRuleSet() {
   const current = [...(rulesPayload.value.rule_sets || [])]
   const existing = ruleSetEditorIndex.value >= 0 ? current[ruleSetEditorIndex.value] : undefined
   const stableKey = existing?.key || key
-  const sources = urls.map((url, index) => ({ key: `${stableKey}-${index + 1}`, url, behavior: ruleSetBehavior.value, format: ruleSetFormat.value }))
+  syncRuleSetSourceMetadata()
+  const sources = urls.map((url, index) => {
+    const metadata = ruleSetSourceMetadata.value[url] || { behavior: ruleSetBehavior.value, format: ruleSetFormat.value }
+    return { key: metadata.key || `${stableKey}-${index + 1}`, url, behavior: metadata.behavior || ruleSetBehavior.value, format: metadata.format || ruleSetFormat.value }
+  })
   const candidate = { key: stableKey, name, sources, policy: ruleSetPolicy.value, priority: ruleSetPriority.value, interval: Number(ruleSetInterval.value) }
   if (ruleSetEditorIndex.value >= 0) current[ruleSetEditorIndex.value] = candidate
   else current.push(candidate)
@@ -2015,6 +2056,6 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); if (airportTestPol
     <div v-if="dnsUpstreamsOpen" class="modal-backdrop" @click.self="dnsUpstreamsOpen = false"><form class="modal-card wide-editor" @submit.prevent="saveDnsUpstreams"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="dnsUpstreamsOpen = false"><X :size="17" /></button><span class="eyebrow">DNS UPSTREAMS</span><h2>{{ dnsUpstreamEditSide === 'foreign' ? '编辑国外解析地址' : '编辑国内解析地址' }}</h2><p>一行一个地址；带有 `|` 的内容会作为拨号地址保留。保存时会先做健康检查，失败不会替换当前配置。</p><label v-if="dnsUpstreamEditSide !== 'foreign'">国内上游<textarea v-model="dnsDomesticDraft" spellcheck="false" placeholder="223.5.5.5&#10;https://dns.alidns.com/dns-query" /></label><label v-if="dnsUpstreamEditSide === 'foreign'">国外上游<textarea v-model="dnsForeignDraft" spellcheck="false" placeholder="https://1.1.1.1/dns-query" /></label><div class="modal-actions"><button type="button" class="secondary-button" @click="dnsUpstreamsOpen = false">取消</button><button class="primary-button" type="submit" :disabled="busy === 'dns-upstreams'">校验并应用</button></div></form></div>
     <div v-if="airportPoolEditor" class="modal-backdrop" @click.self="airportPoolEditor = ''"><form class="modal-card" @submit.prevent="saveAirportPoolMode"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="airportPoolEditor = ''"><X :size="17" /></button><span class="eyebrow">POOL MODE</span><h2>编辑 {{ airportPoolEditor }}</h2><p>模式只改变当前候选池的选择方式，不会修改订阅内容。</p><label>候选池模式<select v-model="airportPoolMode"><option value="fallback">故障切换：按顺序使用候选</option><option value="url-test">自动测速：按延迟和健康度选择</option><option value="select">手动选择：保持当前节点</option></select></label><div class="modal-actions"><button type="button" class="secondary-button" @click="airportPoolEditor = ''">取消</button><button class="primary-button" type="submit" :disabled="busy === 'airport-mode'">保存模式</button></div></form></div>
     <div v-if="ruleCardEditorOpen" class="modal-backdrop" @click.self="closeRuleCardEditor"><form class="modal-card wide-editor rule-card-editor" @submit.prevent="closeRuleCardEditor"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="closeRuleCardEditor"><X :size="17" /></button><span class="eyebrow">RULE CARD</span><h2>{{ ruleCardTitle(ruleCardEditorKey, ruleCardEntries(ruleCardEditorKey)) }}</h2><p>修改会直接写入当前草稿；跨卡片的优先级请回到卡片网格拖动调整。</p><label v-if="ruleCardEditorKey.startsWith('__custom__')">卡片名称<input :value="ruleCardLabel(ruleCardEditorKey)" maxlength="40" placeholder="留空则显示匹配内容" @input="setRuleCardLabel(ruleCardEditorKey, $event)" /></label><div v-if="ruleCardEntries(ruleCardEditorKey).length" class="rule-card-editor-list"><div v-for="entry in ruleCardEntries(ruleCardEditorKey)" :key="`${entry.index}-${entry.raw}`" class="rule-card-editor-row"><div class="editor-rule-top"><span>第 {{ entry.index + 1 }} 条</span><span v-if="ruleIsProtected(entry.raw)" class="system-badge">系统保护</span></div><template v-if="ruleAdvanced"><input class="control raw-control" :value="entry.raw" :readonly="ruleIsProtected(entry.raw)" @input="setRawRule(entry.index, $event)" /></template><template v-else><div class="editor-two-column"><label>匹配方式<select class="control" :value="entry.model.type" :disabled="ruleIsProtected(entry.raw)" @change="setRuleFromEvent(entry.index, 'type', $event)"><option value="DOMAIN">域名</option><option value="DOMAIN-SUFFIX">域名及子域名</option><option value="DOMAIN-KEYWORD">域名关键词</option><option value="GEOSITE">网站分类</option><option value="GEOIP">地区 IP</option><option value="IP-CIDR">IPv4 网段</option><option value="IP-CIDR6">IPv6 网段</option><option value="MATCH">兜底</option></select></label><label>匹配内容<input class="control" :value="entry.model.value" :readonly="ruleIsProtected(entry.raw) || entry.model.type === 'MATCH'" placeholder="例如 example.com" @input="setRuleFromEvent(entry.index, 'value', $event)" /></label><label>出口<select class="control" :value="entry.model.policy" :disabled="ruleIsProtected(entry.raw)" @change="setRuleFromEvent(entry.index, 'policy', $event)"><option v-for="policy in rulePolicies" :key="policy" :value="policy">{{ policy }}</option></select></label></div></template><div class="modal-actions editor-row-actions"><span v-if="ruleIsProtected(entry.raw)" class="muted-caption">系统规则不可改写</span><button v-else type="button" class="compact-button danger" @click="removeRule(entry.index)"><Trash2 :size="14" />删除此规则</button></div></div></div><div v-else class="empty-inline">此卡片暂时没有可编辑规则</div><div class="modal-actions"><button v-if="ruleCardEditorKey !== '__default__' && !ruleCardEditorKey.startsWith('set:')" type="button" class="secondary-button" @click="addRuleToCard(ruleCardEditorKey)"><Plus :size="15" />新增到此卡片</button><button type="submit" class="primary-button">完成</button></div></form></div>
-    <div v-if="ruleSetEditorOpen" class="modal-backdrop" @click.self="ruleSetEditorOpen = false"><form class="modal-card rule-set-editor" @submit.prevent="addRuleSet"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="ruleSetEditorOpen = false"><X :size="17" /></button><span class="eyebrow">RULE SET</span><h2>{{ ruleSetEditorIndex >= 0 ? '编辑规则集合' : '新增规则集合' }}</h2><p>支持多条 HTTPS 来源；由现有 Proxy 候选池下载，失败时保留上一份本地缓存。</p><label>常用集合<select @change="applyRuleSetPreset"><option value="">选择后追加旧版预置来源</option><option v-for="preset in ruleSetPresetItems" :key="preset.id" :value="preset.id">{{ preset.name }} · {{ preset.group }}</option></select></label><label>集合名称<input v-model="ruleSetName" maxlength="40" placeholder="例如 我的 AI 规则" /></label><label>出口<select v-model="ruleSetPolicy"><option v-if="!rulePolicies.includes(ruleSetPolicy)" :value="ruleSetPolicy">{{ ruleSetPolicy }}</option><option v-for="policy in rulePolicies" :key="policy" :value="policy">{{ policy }}</option></select></label><label>规则集 HTTPS 地址<textarea v-model="ruleSetUrls" spellcheck="false" placeholder="https://raw.githubusercontent.com/.../rules.mrs&#10;一行一条" /></label><div class="editor-two-column"><label>匹配类型<select v-model="ruleSetBehavior"><option value="domain">域名</option><option value="ipcidr">IP 网段</option><option value="classical">复合规则</option></select></label><label>文件格式<select v-model="ruleSetFormat"><option value="mrs">MRS（二进制）</option><option value="yaml">YAML</option><option value="text">文本</option></select></label><label>匹配优先级<select v-model="ruleSetPriority"><option value="normal">普通优先级</option><option value="high">高优先级</option></select></label><label>更新周期<select v-model="ruleSetInterval"><option value="21600">每 6 小时</option><option value="86400">每天</option><option value="604800">每周</option></select></label></div><div class="data-note-line">旧版集合预置只追加到草稿，点击“保存到草稿”并通过校验后才会生效。</div><div class="modal-actions"><button type="button" class="secondary-button" @click="ruleSetEditorOpen = false">取消</button><button class="primary-button" type="submit">保存到草稿</button></div></form></div>
+    <div v-if="ruleSetEditorOpen" class="modal-backdrop" @click.self="ruleSetEditorOpen = false"><form class="modal-card rule-set-editor" @submit.prevent="addRuleSet"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="ruleSetEditorOpen = false"><X :size="17" /></button><span class="eyebrow">RULE SET</span><h2>{{ ruleSetEditorIndex >= 0 ? '编辑规则集合' : '新增规则集合' }}</h2><p>支持多条 HTTPS 来源；由现有 Proxy 候选池下载，失败时保留上一份本地缓存。</p><label>常用集合<select @change="applyRuleSetPreset"><option value="">选择后追加旧版预置来源</option><option v-for="preset in ruleSetPresetItems" :key="preset.id" :value="preset.id">{{ preset.name }} · {{ preset.group }}</option></select></label><label>集合名称<input v-model="ruleSetName" maxlength="40" placeholder="例如 我的 AI 规则" /></label><label>出口<select v-model="ruleSetPolicy"><option v-if="!rulePolicies.includes(ruleSetPolicy)" :value="ruleSetPolicy">{{ ruleSetPolicy }}</option><option v-for="policy in rulePolicies" :key="policy" :value="policy">{{ policy }}</option></select></label><label>规则集 HTTPS 地址<textarea v-model="ruleSetUrls" spellcheck="false" @input="syncRuleSetSourceMetadata" placeholder="https://raw.githubusercontent.com/.../rules.mrs&#10;一行一条" /></label><div class="editor-two-column"><label>手动来源的匹配类型<select v-model="ruleSetBehavior" @change="syncRuleSetManualSources"><option value="domain">域名</option><option value="ipcidr">IP 网段</option><option value="classical">复合规则</option></select></label><label>手动来源的文件格式<select v-model="ruleSetFormat" @change="syncRuleSetManualSources"><option value="mrs">MRS（二进制）</option><option value="yaml">YAML</option><option value="text">文本</option></select></label><label>匹配优先级<select v-model="ruleSetPriority"><option value="normal">普通优先级</option><option value="high">高优先级</option></select></label><label>更新周期<select v-model="ruleSetInterval"><option value="21600">每 6 小时</option><option value="86400">每天</option><option value="604800">每周</option></select></label></div><div class="data-note-line">预设来源保留各自的匹配类型；手动来源会跟随下方选择更新。</div><div class="modal-actions"><button type="button" class="secondary-button" @click="ruleSetEditorOpen = false">取消</button><button class="primary-button" type="submit">保存到草稿</button></div></form></div>
   </div>
 </template>

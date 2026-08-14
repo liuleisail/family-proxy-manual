@@ -39,7 +39,9 @@ fingerprint_inputs = (
     Path('/opt/family-proxy-ui/family-proxy-ui.py'),
     Path('/opt/family-proxy-ui/family-proxy-gateway.py'),
     Path('/opt/family-proxy-ui/VERSION'),
+    Path('/opt/family-proxy-ui/rules.html'),
     Path('/opt/family-proxy-ui/frontend/index.html'),
+    Path('/opt/family-proxy-ui/frontend/qrcode-browser.js'),
 )
 fingerprint_lines = ''.join(f'{hashlib.sha256(path.read_bytes()).hexdigest()}\n' for path in fingerprint_inputs)
 fingerprint = hashlib.sha256(fingerprint_lines.encode()).hexdigest()[:12]
