@@ -17,9 +17,15 @@ rsync -azc \
     "$TARGET:$remote_stage/"
 ssh "$TARGET" sudo rsync -azc "$remote_stage/" "$REMOTE_DIR/"
 
+# The remote source tree can retain older hashed Vite assets. Copy the complete
+# current build through sudo so newly generated filenames are present before
+# the manifest comparison below.
+rsync -azc --rsync-path="sudo rsync" frontend/dist/ "$TARGET:$REMOTE_DIR/frontend/dist/"
+
 key_files=(
     runtime/family-proxy-gateway.py
     runtime/family-proxy-ui.py
+    runtime/rules.html
     runtime/mosdns/updater.py
     runtime/mosdns/dashboard.html
     routeros/04-health-netwatch.rsc
@@ -29,6 +35,7 @@ key_files=(
     tests/test_routeros_health_netwatch.py
     scripts/sync-z4pro-source
     scripts/deploy-family-proxy-ui
+    scripts/verify-server.sh
     scripts/install-mosdns-management.sh
     frontend/dist/index.html
     frontend/dist/qrcode-browser.js

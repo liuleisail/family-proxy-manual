@@ -575,3 +575,13 @@ RouterOS 变更要求：
 - 备用机场 2 已导入 170 节点，但 TG-Notify 组里仅 2 个备用节点，且其中只有 1 个符合 TG 池地域规则（POOLS["TG"] 关键词），无法把 TG 池整体替换为备用节点；机场 API 受 CSRF 保护，修改候选池需经管理页操作。
 - 结论修正：前台 MTProto 正常说明代理节点非瓶颈；后台推送失败更可能是 iOS 推送通道（APNs）在受管局域网被影响——候选根因仍为 A) IPv6 被防漏链拒绝、B) UDP 443 被 QUIC 规则拒绝（5G 均不经过这些规则）。
 - 待办（需用户批准 + 先 RouterOS 备份）：受控试验 ① 放行 .189 UDP 443；② 放行 .189 IPv6；确认生效项后收敛为最小规则并固化，无效即回滚。
+
+### 2026-08-14 规则集合手动来源类型回填修复
+
+- 现象：在规则集合卡片中手动输入 HTTPS 地址，再选择“复合规则”和“文本”并保存到草稿后，卡片及再次编辑仍显示 `domain · mrs`。
+- 根因：旧版 `/rules` 页面在地址输入时先用默认值创建来源对象；后续下拉框只更新界面，没有更新这个已创建对象。保存时对象中的默认 `behavior/format` 被保留。新版控制台也会把 URL 作为集合来源重新生成，存在同类覆盖风险。
+- 修复：`runtime/rules.html` 和 `frontend/src/App.vue` 对已保存来源按 URL 区分内置预设与手动来源；非预设 URL 继续视为手动来源，编辑时行为类型/文件格式会回写该来源，预设来源保持自身类型。`manual` 仅为前端编辑态字段，不会提交到规则集持久化数据。
+- 验证：旧版内嵌脚本 `node --check`、46 项 Python 回归、前端 `npm run typecheck` 和 `npm run build` 全部通过；Playwright 模拟已有 `domain · mrs` 手动来源编辑为“复合规则/文本”，来源详情、草稿卡片、校验应用后的卡片及再次编辑均显示 `复合规则 · TEXT` / `classical · text`。
+- 生产部署（2026-08-14）：已按备份流程部署到 Z4Pro，备份为 `/var/backups/family-proxy/20260814-101552`；生产 `rules.html` 与本地修复源码哈希一致，`scripts/verify-server.sh` 通过。浏览器访问生产 `/rules` 已正常进入统一登录页，未使用或记录登录凭据，因此未声称完成登录后的页面交互复验。
+- 部署链路修复：`scripts/deploy-family-proxy-ui` 现在会备份并安装旧版 `rules.html`，并将旧版页面与 QR 运行时纳入 `build-info` 指纹；`scripts/sync-z4pro-source` 将 `verify-server.sh` 纳入关键文件校验，避免旧版核验脚本残留。
+- 最新生产部署（2026-08-14）：二次修复已部署，构建 ID 为 `a222bd633fee`，备份为 `/var/backups/family-proxy/20260814-104311`，`scripts/verify-server.sh` 通过。同步脚本现在按内容直接同步完整 `frontend/dist`，并将 `runtime/rules.html` 纳入关键文件校验，避免新哈希资源或旧版页面变更漏传。
