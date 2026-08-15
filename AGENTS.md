@@ -593,9 +593,9 @@ RouterOS 变更要求：
 - 本地验证：临时构建目录中的 `npm run typecheck` 与 `npm run build` 通过；46 项 Python 回归通过；生成前端资源为 `index-DVmGmsAE.css`、`index-DROpo0xI.js`。
 - 生产状态：已于 2026-08-15 部署，build ID `66e114efc14c`（`deployed_at 20260815-092052`），备份 `/var/backups/family-proxy/20260815-092052`，`verify-server.sh` 通过。部署入口已恢复（`codexops` 的 `sudo -n` 可用），但 `90-codexops-nopasswd` 授予 `(ALL : ALL) NOPASSWD: ALL` 的宽泛权限，超出 `deploy-family-proxy-ui` 最小授权，建议后续收窄并复核最终 sudoers。
 
-## 15. 2026-08-15 全方位审计与优化（代码在 PR #87，已部署本地验证中）
+## 15. 2026-08-15 全方位审计与优化（历史基线）
 
-以下为一次全面审计、代码优化与线上部署的最新交接基线。**代码变更在分支 `agent/audit-and-optimization` 的 PR #87，尚未合并到 main**；但相关改动已部署到 Z4Pro 生产（build `66e114efc14c`）进行验证，因此本文件（main）同步记录线上状态，确保换模型后能据 main 接管。
+以下为一次全面审计、代码优化与线上部署的历史交接基线。相关改动已部署到 Z4Pro 生产（build `66e114efc14c`）进行验证；当前有效规则和 APNs 处理以第 17 节为准。
 
 ### 审计结论
 
@@ -606,11 +606,11 @@ RouterOS 变更要求：
 ### 已部署到 Z4Pro 的改动（来自 PR #87，生产已生效）
 
 - 部署了已提交未部署的「总览活动连接卡片→流量观察」跳转修复（生产 build `a222bd633fee` → `66e114efc14c`，前端 `index-DROpo0xI.js`/`index-DVmGmsAE.css`）。
-- 同步了代码仓库优化（见 PR #87）：APNs 直连模板补齐、异常静默改日志、NO_PROXY/接口硬编码改配置、nanoid 升级——其中前两项已随部署源同步/上线。
+- 同步了代码仓库优化（历史 PR #87）：异常静默改日志、NO_PROXY/接口硬编码改配置、nanoid 升级；APNs 直连模板方案已由第 17 节的 Mihomo 代理方案取代。
 
-### PR #87 内容（待本地验证后合并 main）
+### 历史 PR #87 内容
 
-- A1 补回 `routeros/02-prepare-controller.rsc` 的 `family_apple_direct` + `Apple APNs direct` 规则（消除代码↔RB5009 漂移，重导模板不再丢失该规则）。
+- A1 的整段 `family_apple_direct` + `Apple APNs direct` 方案已作废；当前模板清理该旧对象，详见第 17 节。
 - A2 `frontend/package-lock.json` 根版本对齐 0.11.12。
 - A3 `runtime/family-mihomo-sub-import.py` 两处 `except Exception: pass` 改为记录 stderr。
 - A4 `runtime/mosdns/updater.py` NO_PROXY 改读 `FAMILY_MOSDNS_LAN_CIDR`。
@@ -627,6 +627,46 @@ RouterOS 变更要求：
 - `90-codexops-nopasswd` 的 `NOPASSWD: ALL` 过宽，建议收窄为最小 `deploy-family-proxy-ui` 入口并复核 sudoers。
 - `FAMILY_MOSDNS_LAN_CIDR` 目前仅 `updater.py` 内部可覆盖，未接 systemd/安装脚本渲染。
 
-### 合并前待办
+### 当前状态
 
-- 用户在本地（Z4Pro）验证一段时间确认无问题后，合并 PR #87 到 main；合并时注意 AGENTS.md 与 main 上本节的关系（PR 内第 15 节为更详细的版本，合并后以 PR 版为准，本节的「代码在 PR」表述改为「已合并」）。
+- 本次授权后的 APNs 规则、RouterOS 模板、UI 预设和交接记录已在当前提交合并到 `main`；历史 PR 分支不再作为 APNs 方案来源。
+
+## 16. 2026-08-15 MosDNS-T 更新源修正（已部署）
+
+- 现象：维护页将运行中的第三方 `jasonxtt/mosdns-t:latest`（核心版本可能显示 `0.7.1`）与官方 `IrineSistiana/mosdns` 的 `5.x` Release 混在同一版本信息中，造成错误的跨项目更新提示。
+- 修复：`runtime/mosdns/updater.py` 改读 `jasonxtt/mosdns` Tags（只接受 `vX.Y.Z` 主项目标签）；实际是否可升级仍只由第三方 Docker 镜像 digest 比对决定。维护页和 release 弹窗均标记为 MosDNS-T 第三方项目，并链接其 Tags。
+- 版本边界：MosDNS-T 版本不得与官方 MosDNS 版本比较；第三方 Tags、`jasonxtt/mosdns-t:latest` digest 和运行时健康检查是三类不同证据。
+- 生产部署：Family Proxy 控制平面 build `ff6c82982fd9`（`deployed_at 20260815-110916`），备份目录为 `/var/backups/family-proxy/20260815-110916`；独立 MosDNS 管理服务最后一次备份为 `/var/backups/family-proxy/20260815-111257/mosdns-management`。
+- 部署验证：本地 52 项 Python 测试、编译和 `git diff --check` 通过；Z4Pro `verify-server.sh` 通过；MosDNS 管理 API、维护页面、`family-mosdns-updater`、Family Proxy 两个服务和 `mosdns-t`/管理 UI 容器均已核验。`mosdns-t` 核心未重建，RouterOS、DHCP DNS、53 端口和当前上游配置未修改。
+
+## 17. 2026-08-15 Telegram 后台推送 APNs 旁路修复（已授权落地）
+
+本节是当前 APNs/TG 推送路径的有效基线，覆盖第 15 节中“整段 `17.0.0.0/8` Apple APNs 直连模板”的历史描述；后续不得按旧模板重新添加该 RouterOS 直连绕过。
+
+### 现象与根因证据
+
+- 受管 iPhone `192.168.2.189` 在局域网后台收不到 Telegram 推送，5G 正常；Telegram 前台收发正常。`TG-Auto` 用户流量与 `TG-Notify` 系统通知流量必须继续分离。
+- Surge 配置 `/Users/liulei/Library/Mobile Documents/iCloud~com~nssurge~inc/Documents/iPhone-Flowr-Ponte.conf` 将 `push.apple.com` 和 `Apple_APNs.list` 送入代理；旁路运行时此前却有 RouterOS `family-mihomo-shared Apple APNs direct` 规则，目标表为整个 `17.0.0.0/8`，因此 Mihomo APNs 规则命中为 0。
+- 生产 APNs 来源已确认是 `behavior=classical`、`format=text`，包含 `push.apple.com`、APNs IPv4/IPv6 fallback；问题不是 MRS 格式，而是 RouterOS 前置直连与运行时错误策略 `AI-Auto`。
+
+### 备份与实际变更
+
+- RouterOS 通过现有受限 API 成功生成二进制备份 `family-proxy-prechange-20260815-0324.backup`（约 1.7 MB）；`/export hide-sensitive` 仍返回 `not enough permissions (9)`，没有声称存在文本导出。
+- Z4Pro 规则状态、Mihomo 配置和 APNs 来源备份在 `/var/backups/family-proxy/20260815-0324-telegram-apns/`，未包含在仓库。
+- 将 `/etc/family-proxy-ui/rule-sets.json` 的 `apple-push` 出口从 `AI-Auto` 改为 `Proxy-Auto`，使用现有 `--apply-current` 重生成并重启校验 Mihomo。
+- 删除 RouterOS 的旧 `family-mihomo-shared Apple APNs direct` 规则、`family_apple_direct` 的 `17.0.0.0/8` 条目和本次 A/B 临时地址表；`192.168.2.189` 仍保留在 `family_mihomo_devices`。
+- 代码新增 Apple APNs 预设（`classical + text + Proxy-Auto`），RouterOS `02-prepare-controller.rsc` 会清理旧整段 `17/8` 直连对象，TG-Auto/TG-Notify 规则未改动。
+
+### 验证结果
+
+- RouterOS：APNs 直连规则数量 `0`、`family_apple_direct` 的 `17/8` 条目数量 `0`、`.189` 纳管成员仍为 `1`。
+- Mihomo：`.189 -> 17.188.178.173:5223` 命中 `family-apple-push-apple-apns-1`，出口为 `Proxy-Auto`；采样时下行/上行计数持续增长，APNs RuleSet 命中数从 `0` 增长到 `4`。
+- 同时观察到 `.189` 的 Telegram DC 连接继续命中 `TG-Auto`；`TG-Notify` 没有被并入用户 Telegram 路径。`family-mihomo-tproxy-auto` 和 `family-mihomo-sub-import` 均为 active。
+- 本地隔离 Python 环境完整回归 `54 tests OK`；Python 编译、旧版规则页 JavaScript 语法和 `git diff --check` 通过。前端在临时本机依赖目录完成 `vue-tsc` 与 Vite build；NAS 挂载下的 `npm ci` 曾出现 `TAR_ENTRY_ERROR EIO`，未将其当作代码失败。
+- 尚未取得用户对“后台实际弹出一条 Telegram 通知”的最终可见确认；APNs 网络/策略路径已证实，显示层仍需用户用另一账号在 Telegram 后台时发送新消息复测。
+
+### 回滚
+
+- RouterOS 即时回滚：恢复 `family_apple_direct` 的 `17.0.0.0/8` 地址条目，并恢复 `family-mihomo-shared Apple APNs direct` 规则的 `src-address-list=family_mihomo_devices`、`dst-address-list=family_apple_direct`；必要时使用本次二进制备份恢复。
+- Z4Pro 规则回滚：恢复 `/var/backups/family-proxy/20260815-0324-telegram-apns/rule-sets.json`，再执行 `sudo /usr/bin/python3 /opt/family-proxy-ui/family-mihomo-sub-import.py --apply-current`。
+- 回滚后必须重新核对 RouterOS 规则、Mihomo RuleSet 命中、TPROXY 计数和真实 iPhone 后台通知，不以服务 active 代替业务验证。

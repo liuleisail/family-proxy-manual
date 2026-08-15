@@ -65,8 +65,8 @@ COMPONENT_RELEASE_SOURCES = {
         "url": "https://github.com/MetaCubeX/mihomo/releases",
     },
     "mosdns": {
-        "label": "MosDNS 上游 GitHub Release",
-        "url": "https://github.com/IrineSistiana/mosdns/releases",
+        "label": "MosDNS-T 第三方项目 Tags",
+        "url": "https://github.com/jasonxtt/mosdns/tags",
     },
     "routeros": {
         "label": "MikroTik RouterOS 官方稳定版 Changelog",
@@ -645,15 +645,32 @@ def read_platform_update_status():
                 "routeros": {"state": "not_applicable"}, "z4pro": {"state": "not_applicable"}}
     except (OSError, json.JSONDecodeError) as exc:
         raise RouterError("系统更新状态读取失败") from exc
-    return payload if isinstance(payload, dict) else {"checked_at": 0}
+    if not isinstance(payload, dict):
+        return {"checked_at": 0}
+    result = dict(payload)
+    mosdns = result.get("mosdns")
+    source = COMPONENT_RELEASE_SOURCES["mosdns"]
+    if isinstance(mosdns, dict) and str(mosdns.get("release_source") or "") != source["label"]:
+        mosdns = dict(mosdns)
+        mosdns["release_source"] = source["label"]
+        mosdns["release_url"] = source["url"]
+        mosdns["release_version"] = ""
+        mosdns["release_notes"] = "MosDNS-T 第三方项目版本以 Tags 和镜像 digest 为准，不与官方 MosDNS 5.x 版本比较。"
+        mosdns["latest_version"] = str(mosdns.get("latest_image") or "未知")
+        result["mosdns"] = mosdns
+    return result
 
 
 def component_release_metadata(component, detail="", notes="", published=""):
     source = COMPONENT_RELEASE_SOURCES[component]
+    default_notes = (
+        "MosDNS-T 是第三方整合项目；版本以其 Tags 和 Docker 镜像 digest 为准，不与官方 MosDNS 5.x 版本比较。"
+        if component == "mosdns" else "官方未提供逐项变更说明"
+    )
     return {
         "release_source": source["label"],
         "release_url": source["url"],
-        "release_notes": str(notes or detail or "官方未提供逐项变更说明"),
+        "release_notes": str(notes or detail or default_notes),
         "latest_published": str(published or ""),
     }
 
@@ -816,20 +833,28 @@ def mosdns_component_update_status(check=False):
         time.sleep(1)
     phase = str(payload.get("phase", "unknown"))
     checked_at = str(payload.get("checked_at") or payload.get("updated_at") or "")
+    latest_image = str(payload.get("latest_image") or "")
+    mosdns_source = COMPONENT_RELEASE_SOURCES["mosdns"]
+    current_source = str(payload.get("release_source") or "") == mosdns_source["label"]
+    release_version = str(payload.get("release_version") or "") if current_source else ""
+    release_notes = str(payload.get("release_notes") or "") if current_source else ""
+    release_url = str(payload.get("release_url") or "") if current_source else ""
+    latest_published = (payload.get("latest_published") or checked_at) if current_source else checked_at
     return {
         "state": "update_available" if payload.get("update_available") else ("check_failed" if phase == "error" else phase),
         "available": bool(payload.get("update_available")),
         "current_version": str(payload.get("current_version") or payload.get("current_image") or "未知"),
-        "latest_version": str(payload.get("latest_image") or "未知"),
+        "latest_version": release_version or latest_image or "未知",
+        "latest_image": latest_image,
         "detail": str(payload.get("message") or "MosDNS 更新状态尚未读取"),
         "checked_at": checked_at,
         **component_release_metadata(
             "mosdns", payload.get("message") or "MosDNS 更新状态尚未读取",
-            payload.get("release_notes") or payload.get("message") or "MosDNS 上游正式版变更说明请打开官方 Release 页面",
-            payload.get("latest_published") or checked_at,
+            release_notes or payload.get("message") or "MosDNS-T 第三方项目版本以 Tags 和镜像 digest 为准",
+            latest_published,
         ),
-        "release_url": str(payload.get("release_url") or COMPONENT_RELEASE_SOURCES["mosdns"]["url"]),
-        "release_version": str(payload.get("release_version") or ""),
+        "release_url": release_url or mosdns_source["url"],
+        "release_version": release_version,
     }
 
 
@@ -4279,6 +4304,34 @@ MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
     1,
 ).replace(
     '</script></body></html>', _REMOTE_WG_SCRIPT + '</script></body></html>',
+    1,
+).replace(
+    'MosDNS</h2><p>DNS 解析内核，不改变现有分流规则',
+    'MosDNS-T</h2><p>第三方 DNS 分流整合，不等同于官方 MosDNS',
+    1,
+).replace(
+    '<span class="label">整合镜像源</span>',
+    '<span class="label">第三方镜像/版本</span>',
+    1,
+).replace(
+    "$('#mosdns-latest').textContent=shortImage(d.latest_image);",
+    "$('#mosdns-latest').textContent=d.release_version||shortImage(d.latest_image||d.latest_version);",
+    1,
+).replace(
+    "mosdns:'https://github.com/IrineSistiana/mosdns/releases'",
+    "mosdns:'https://github.com/jasonxtt/mosdns/tags'",
+    1,
+).replace(
+    "let version=d.release_version||d.latest_version||d.current_version||'未知版本'",
+    "let version=component==='mosdns'?(d.release_version||d.latest_version||'以第三方镜像 digest 为准'):(d.release_version||d.latest_version||d.current_version||'未知版本')",
+    1,
+).replace(
+    "$('#mihomo-release-title').textContent=label+' 当前正式版更新内容';",
+    "$('#mihomo-release-title').textContent=component==='mosdns'?'MosDNS-T 第三方项目版本信息':label+' 当前正式版更新内容';",
+    1,
+).replace(
+    "'正式版本：'+version",
+    "(component==='mosdns'?'项目版本：':'正式版本：')+version",
     1,
 )
 

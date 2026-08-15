@@ -221,7 +221,7 @@ RouterOS 不应额外创建一个不受限制的全权账号。管理页面应�
 
 Mihomo 的“维护”页默认只读。检查更新只接受 Docker Hub `latest`，且要求存在与其镜像摘要完全一致的 `v数字.数字.数字` 正式标签；Alpha、Beta、RC、Nightly 等版本不会进入检测结果。仓库不可达或两者摘要不一致时显示失败且不拉取、不重启。点击“升级并验证”后，系统才会备份当前 `config.yaml` 和 Compose 文件、为旧镜像保存本地回滚标签、拉取正式镜像、用现有配置校验，再重建唯一的 `family-mihomo-fallback` 容器。控制接口或 `Proxy-Auto` 策略组验证失败会自动恢复旧镜像和原 Compose；不会启动任何历史停用容器，也不会自动升级。
 
-维护页的“系统更新与通知”每天约 09:15 检查一次（随机延后最多 10 分钟），并可手动检查。RouterOS 读取已设置的官方更新通道；Z4Pro 读取极空间 ZOS 自带升级服务的最近一次官方结果；Mihomo 与 MosDNS 仅执行镜像元数据比对。Mihomo 只检测并展示正式发布版本，Alpha、Beta、RC、Nightly 等预发布版会被忽略。其余组件发现版本变化时，会使用已启用的 Telegram 告警仅推送一次；不执行 RouterOS、ZOS、Docker 或 `apt` 升级，也不会重启任何服务。系统更新请仍在 RouterOS 或极空间官方界面确认后手动完成。
+维护页的“系统更新与通知”每天约 09:15 检查一次（随机延后最多 10 分钟），并可手动检查。RouterOS 读取已设置的官方更新通道；Z4Pro 读取极空间 ZOS 自带升级服务的最近一次官方结果；Mihomo 与 MosDNS-T 仅执行镜像元数据比对。MosDNS-T 是第三方整合项目，版本信息读取其自身 Tags，不与官方 MosDNS 5.x 版本比较；实际升级仍以 `jasonxtt/mosdns-t:latest` 的镜像 digest 变化为准。Mihomo 只检测并展示正式发布版本，Alpha、Beta、RC、Nightly 等预发布版会被忽略。其余组件发现版本变化时，会使用已启用的 Telegram 告警仅推送一次；不执行 RouterOS、ZOS、Docker 或 `apt` 升级，也不会重启任何服务。系统更新请仍在 RouterOS 或极空间官方界面确认后手动完成。
 
 若家庭网络无法直连 Docker Hub，可把 `systemd/docker-mihomo-proxy.conf` 安装为 Docker 服务的 `http-proxy.conf`。该配置只让 Docker 守护进程通过本机 `127.0.0.1:7890` 拉取镜像，NAS 默认网关、局域网访问和既有容器运行流量不改。应用配置需重启 Docker；先确认 `docker info` 的 `Live Restore Enabled` 为 `true`，并备份、记录容器状态后再操作。
 
