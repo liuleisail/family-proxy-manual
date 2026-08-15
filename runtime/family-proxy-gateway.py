@@ -652,7 +652,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.FORBIDDEN)
             return
         parsed = urlsplit(self.path)
-        if parsed.path == HEALTH_PATH and self.client_address[0] == "__FAMILY_ROUTER_IP__":
+        if (parsed.path == HEALTH_PATH
+                and self.client_address[0] == "__FAMILY_ROUTER_IP__"
+                and not valid_session(self.headers.get("Cookie", ""))):
             self.proxy(HEALTH_BACKEND_PATH)
             return
         if parsed.path == "/favicon.ico":
