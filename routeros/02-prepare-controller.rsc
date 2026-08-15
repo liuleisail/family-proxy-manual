@@ -6,11 +6,15 @@
 :local sharedTable "family_mihomo_shared"
 :local sharedMark "family_mihomo_conn"
 :local cnList "family_cn_ipv4"
+:local appleDirectList "family_apple_direct"
 :local sharedTag "family-mihomo-shared"
 
 /ip firewall address-list
 :if ([:len [find where list="local_lan_ipv4" and address=$lanCidr]] = 0) do={
   add list=local_lan_ipv4 address=$lanCidr comment="family-mihomo local LAN bypass"
+}
+:if ([:len [find where list=$appleDirectList and address="17.0.0.0/8"]] = 0) do={
+  add list=$appleDirectList address=17.0.0.0/8 comment="family Apple APNs direct"
 }
 
 /ip firewall mangle
@@ -47,6 +51,14 @@
 }
 :if ([:len [find where comment=($sharedTag . " CN direct")]] = 0) do={
   add chain=prerouting action=accept src-address-list=$sharedList dst-address-list=$cnList comment=($sharedTag . " CN direct") place-before=$connectionMarker
+}
+:local cnDirect [find where comment=($sharedTag . " CN direct")]
+:local appleDirect [find where comment=($sharedTag . " Apple APNs direct")]
+:if ([:len $appleDirect] = 0) do={
+  add chain=prerouting action=accept src-address-list=$sharedList dst-address-list=$appleDirectList comment=($sharedTag . " Apple APNs direct") place-before=$cnDirect
+} else={
+  set $appleDirect chain=prerouting action=accept src-address-list=$sharedList dst-address-list=$appleDirectList
+  move $appleDirect destination=$cnDirect
 }
 :if ([:len [find where comment=($sharedTag . " route to z4pro")]] = 0) do={
   add chain=prerouting action=mark-routing new-routing-mark=$sharedTable passthrough=no src-address-list=$sharedList connection-mark=$sharedMark comment=($sharedTag . " route to z4pro") place-before=$mangleAnchor

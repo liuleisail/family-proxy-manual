@@ -54,6 +54,7 @@ DNS_SERVER = os.environ.get("FAMILY_MOSDNS_DNS_SERVER", "127.0.0.1")
 DEFAULT_SOCKS5 = os.environ.get("FAMILY_MOSDNS_SOCKS5", "172.31.53.1:7890")
 ADBLOCK_RULES_HOST = os.environ.get("FAMILY_MOSDNS_RULES_HOST", DEFAULT_SOCKS5.rsplit(":", 1)[0])
 ADBLOCK_RULES_PORT = int(os.environ.get("FAMILY_MOSDNS_RULES_PORT", "18103"))
+LAN_CIDR = os.environ.get("FAMILY_MOSDNS_LAN_CIDR", "192.168.2.0/24")
 RULE_SOURCES = {
     "geosite_cn": {"label": "国内域名", "minimum": 80000, "minimum_ratio": 0.7},
     "geosite_no_cn": {"label": "国外域名", "minimum": 15000, "minimum_ratio": 0.7},
@@ -274,7 +275,7 @@ def crane_command(args, timeout=180):
     environment.update({
         "HTTP_PROXY": REGISTRY_PROXY,
         "HTTPS_PROXY": REGISTRY_PROXY,
-        "NO_PROXY": "127.0.0.1,localhost,192.168.2.0/24,172.31.53.0/24",
+        "NO_PROXY": f"127.0.0.1,localhost,{LAN_CIDR},172.31.53.0/24",
     })
     return command([CRANE, *args], timeout=timeout, env=environment)
 

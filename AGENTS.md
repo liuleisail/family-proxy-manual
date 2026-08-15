@@ -592,3 +592,34 @@ RouterOS 变更要求：
 - 版本：仍为 `v0.11.12`，本次未 bump 版本号。
 - 本地验证：临时构建目录中的 `npm run typecheck` 与 `npm run build` 通过；46 项 Python 回归通过；生成前端资源为 `index-DVmGmsAE.css`、`index-DROpo0xI.js`。
 - 生产状态：截至本次交接尚未部署。`z4pro` 的 `codexops` 入口可读服务但 `sudo -n` 需要密码；`z4pro-change` 的 `codex-change` 入口返回 shell 不可用。部署前需恢复经授权的非交互 root 入口，再按 `scripts/sync-z4pro-source` 和 `scripts/deploy-family-proxy-ui` 的备份流程执行，并记录新的 backup/build-info。
+
+## 15. 2026-08-14 全方位审计与代码仓库优化记录
+
+以下为一次全面只读审计及已落地代码仓库改动的记录（线上未做任何变更）。
+
+### 审计基线
+
+- 仓库 `main` = `origin/main`，HEAD `35ec047`，工作区在改动前干净，无冲突标记，无已提交密钥/订阅。
+- 版本一致：`VERSION`=0.11.12 == `runtime BUILD_VERSION` == `frontend/package.json`。
+- 46 项 Python 回归通过；前端 `vue-tsc` + `vite build` 在临时目录通过，dist 与源码一致；前端↔后端 `/api/*` 契约无孤儿端点。
+
+### 审计发现（线上漂移，未在本次改动中触碰）
+
+- 漂移 A：RB5009 线上已有 `family_apple_direct`（`17.0.0.0/8`）+ mangle `Apple APNs direct`（`place-before CN direct`），但代码主线模板缺失——分支 `agent/apple-apns-direct`（`4248d1e`）从未合并。本次已把该规则补回模板（见下方 A1），代码与线上重新对齐。
+- 漂移 B：HEAD `35ec047`（总览活动连接卡片跳转）的 dist 已提交未部署，生产仍为 `a222bd633fee`；部署阻塞于 `z4pro` 非交互 sudo 入口，待用户授权恢复。
+- 漂移 C：Z4Pro 部署源副本 `/home/codexops/family-proxy-manual-main/` 的 `rules.html`、`dashboard.html`、`verify-server.sh` 落后于仓库，需重跑 `sync-z4pro-source`。
+- 陈旧的 8 个远程未合并分支均已通过 squash PR 合入 main（`codex/rule-set-source-type-fix` 若误合并会回退 dist），未清理，等用户决策。
+
+### 已落地代码仓库改动（A 类，零线上影响，未提交/未推送）
+
+- A1 补回 APNs 直连模板：`routeros/02-prepare-controller.rsc` 增加 `family_apple_direct` 地址表与 `Apple APNs direct` mangle 规则（`place-before CN direct`）；`routeros/README.md` 增加 APNs 说明与手工回滚命令；`README.md` 增加 Apple Push 直连说明。与线上 RB5009 现有规则一致，重导模板不再丢失该规则。
+- A2 `frontend/package-lock.json` 根版本 `0.11.10` → `0.11.12`，与 `package.json` 对齐。
+- A3 `runtime/family-mihomo-sub-import.py` 两处 `except Exception: pass` 改为记录到 stderr：回滚时 `restart_mihomo()` 失败（原 1345 行）与 `monitor_loop` 静默吞异常（原 1763 行），避免回滚/监控静默失效。
+- A4 `runtime/mosdns/updater.py` 的 `crane_command` NO_PROXY 硬编码 `192.168.2.0/24` 改为读 `FAMILY_MOSDNS_LAN_CIDR`（默认仍是 `192.168.2.0/24`，行为不变，新增可覆盖入口）。
+- A4b `scripts/family-mihomo-tproxy-auto` 的 postrouting SNAT `oifname "kvmbr0"` 硬编码改为读 `FAMILY_CAPTURE_INTERFACE`（与 `router.env` 既有键一致，Z4Pro 值仍为 `kvmbr0`，行为不变），并在 `source_config` 增加该校验；`bash -n` 通过。
+
+### 验证与交接注意
+
+- 改动后 46 项 Python 回归通过，`py_compile` 通过；改动尚未 commit/push，等待用户确认后提交。
+- `FAMILY_MOSDNS_LAN_CIDR` 目前仅 `updater.py` 内部可覆盖，尚未接到 systemd 单元/安装脚本；如需在 `router.env` 集中配置 LAN 网段，需后续补 `systemd/family-mosdns-updater.service.in` 与安装脚本渲染（低优先级）。
+- 未执行的待授权项：部署 Finding 2 的 UI 修复（B1）、重跑 `sync-z4pro-source`（B2）、`nanoid` 依赖升级（C1）、陈旧分支清理（A5/C）。

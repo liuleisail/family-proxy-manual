@@ -358,6 +358,7 @@ RouterOS 对 `family_mihomo_devices` 中的所有纳管设备快速拒绝外网 
 
 - 国内应用、购物、短视频和本地服务优先直连。
 - 接管设备的中国 IPv4 流量由 RouterOS 在策略打标前直接送往 WAN；国外 TCP/UDP 才进入 Z4Pro 和 Mihomo TPROXY。Z4Pro 的国内直转仅作为防错兜底，不能替代 RouterOS 前置直连，否则会形成 `RouterOS -> Z4Pro -> RouterOS` 的额外往返。
+- 接管设备访问 Apple Push 官方 `17.0.0.0/8` 时，由 RouterOS 在连接打标前直接送往 WAN，使 iPhone/iPad 的 APNs 通知不依赖 Z4Pro、Mihomo 或机场节点。该例外只保障系统推送通道；Telegram 消息正文仍按 `TG-Auto` 和候选池代理，不会因此直连。
 - Z4Pro 的中国 IPv4 集合每周从 APNIC 官方数据源通过本地直连更新，更新前校验条目数量，更新后只重载旁路转发规则，不重启 Docker 容器。启用 `ROUTER_CN_AUTO_SYNC=true` 时，同一任务只同步 RouterOS 的 `family_cn_ipv4` 地址表：差异超过 20% 会拒绝，变更前保存 JSON，先加后删，最终对账失败会自动恢复；不会修改 mangle、NAT 或路由表。
 - AI 使用所有非香港候选池；日本、新加坡、美国优先，台湾、韩国及其他地区作为补充，不使用香港节点。
 - 视频、即时通信和搜索使用各自业务策略，不把所有流量粗暴导向一个节点。
