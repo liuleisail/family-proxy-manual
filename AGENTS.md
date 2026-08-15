@@ -416,7 +416,7 @@ RouterOS 变更要求：
 - 本仓库位于 NAS 挂载（/Volumes/NAS/...），挂载层不保留文件执行位（git 索引 644 的文件在文件系统上显示为 700/755）。已设置 `git config core.fileMode false`，git status 不再把这种元数据漂移当作修改；提交时脚本执行位以 git 索引为准，不要用 chmod 在挂载层反复纠正。
 - 生产 Z4Pro 控制平面已从 0.11.9 升级到 0.11.10（upgrade-server.sh），备份在 `/var/backups/family-proxy/20260813-122556/`；升级前快照在 `/var/backups/family-proxy/pre-upgrade-20260813-122437/`。
 - 生产 `router.env` 补齐了 v0.11.10 必填键 `ROUTER_MODE=routeros`（按键名最小追加，未改动其它行）。
-- Z4Pro 运维副本在 `/home/codexops/family-proxy-manual-main/`（由仓库 rsync 同步，非 git 仓库）；`/home/codexops/family-proxy-manual/` 是历史混合部署目录，勿再当作升级源。
+- Z4Pro 运维副本在 `/home/codexops/family-proxy-manual/`（由仓库 rsync 同步，非 git 仓库），是 `deploy-family-proxy-ui` 的 `SOURCE_DIR` 且与生产 `/opt` 哈希一致；`/home/codexops/family-proxy-manual-main/` 是一次性陈旧副本（`rules.html` 哈希与生产不一致），勿再当作部署源。
 
 ### 端口与组件澄清
 
@@ -591,4 +591,42 @@ RouterOS 变更要求：
 - 变更：总览页“活动连接”KPI 卡片补齐与“已接管设备/当前出口/DNS 平均处理”一致的交互；支持点击或 Enter 键跳转到 `traffic` 流量观察视图，并显示统一的悬停箭头反馈。
 - 版本：仍为 `v0.11.12`，本次未 bump 版本号。
 - 本地验证：临时构建目录中的 `npm run typecheck` 与 `npm run build` 通过；46 项 Python 回归通过；生成前端资源为 `index-DVmGmsAE.css`、`index-DROpo0xI.js`。
-- 生产状态：截至本次交接尚未部署。`z4pro` 的 `codexops` 入口可读服务但 `sudo -n` 需要密码；`z4pro-change` 的 `codex-change` 入口返回 shell 不可用。部署前需恢复经授权的非交互 root 入口，再按 `scripts/sync-z4pro-source` 和 `scripts/deploy-family-proxy-ui` 的备份流程执行，并记录新的 backup/build-info。
+- 生产状态：已于 2026-08-15 部署，build ID `66e114efc14c`（`deployed_at 20260815-092052`），备份 `/var/backups/family-proxy/20260815-092052`，`verify-server.sh` 通过。部署入口已恢复（`codexops` 的 `sudo -n` 可用），但 `90-codexops-nopasswd` 授予 `(ALL : ALL) NOPASSWD: ALL` 的宽泛权限，超出 `deploy-family-proxy-ui` 最小授权，建议后续收窄并复核最终 sudoers。
+
+## 15. 2026-08-15 全方位审计与优化（代码在 PR #87，已部署本地验证中）
+
+以下为一次全面审计、代码优化与线上部署的最新交接基线。**代码变更在分支 `agent/audit-and-optimization` 的 PR #87，尚未合并到 main**；但相关改动已部署到 Z4Pro 生产（build `66e114efc14c`）进行验证，因此本文件（main）同步记录线上状态，确保换模型后能据 main 接管。
+
+### 审计结论
+
+- 仓库 `main` = `origin/main`（HEAD `35ec047`），工作区干净，无冲突标记，无已提交密钥。
+- 版本一致：`VERSION`=0.11.12 == `BUILD_VERSION` == `frontend/package.json`；46 项 Python 回归通过；前端 `typecheck`+`build` 通过。
+- 前端↔后端 `/api/*` 契约无孤儿端点；界面未发现新的功能性 bug。
+
+### 已部署到 Z4Pro 的改动（来自 PR #87，生产已生效）
+
+- 部署了已提交未部署的「总览活动连接卡片→流量观察」跳转修复（生产 build `a222bd633fee` → `66e114efc14c`，前端 `index-DROpo0xI.js`/`index-DVmGmsAE.css`）。
+- 同步了代码仓库优化（见 PR #87）：APNs 直连模板补齐、异常静默改日志、NO_PROXY/接口硬编码改配置、nanoid 升级——其中前两项已随部署源同步/上线。
+
+### PR #87 内容（待本地验证后合并 main）
+
+- A1 补回 `routeros/02-prepare-controller.rsc` 的 `family_apple_direct` + `Apple APNs direct` 规则（消除代码↔RB5009 漂移，重导模板不再丢失该规则）。
+- A2 `frontend/package-lock.json` 根版本对齐 0.11.12。
+- A3 `runtime/family-mihomo-sub-import.py` 两处 `except Exception: pass` 改为记录 stderr。
+- A4 `runtime/mosdns/updater.py` NO_PROXY 改读 `FAMILY_MOSDNS_LAN_CIDR`。
+- A4b `scripts/family-mihomo-tproxy-auto` `oifname kvmbr0` 改读 `FAMILY_CAPTURE_INTERFACE`。
+- nanoid 3.3.17→3.3.18（修复高危 GHSA-2v37-7h3g-55p8，`dist` 不变）。
+
+### 已清理
+
+- 本地分支 `codex/rule-set-source-type-fix` + 远程 8 个未合并陈旧分支（`agent/apple-apns-direct`、`agent/apple-ui-release-011`、`agent/auto-failover-warning`、`agent/dns-race-overview`、`agent/legacy-wireguard-maintenance`、`agent/release-0.11.10`、`codex/rule-set-source-type-fix`、`fix/network-overview-pulse`）。
+
+### 遗留观察项（待处理）
+
+- `/usr/local/sbin/deploy-family-proxy-ui` 仍是旧版（缺 rules.html 备份/安装逻辑）；本次用源目录 `/home/codexops/family-proxy-manual/scripts/deploy-family-proxy-ui` 完成部署。后续应把当前版同步到 `/usr/local/sbin/`。
+- `90-codexops-nopasswd` 的 `NOPASSWD: ALL` 过宽，建议收窄为最小 `deploy-family-proxy-ui` 入口并复核 sudoers。
+- `FAMILY_MOSDNS_LAN_CIDR` 目前仅 `updater.py` 内部可覆盖，未接 systemd/安装脚本渲染。
+
+### 合并前待办
+
+- 用户在本地（Z4Pro）验证一段时间确认无问题后，合并 PR #87 到 main；合并时注意 AGENTS.md 与 main 上本节的关系（PR 内第 15 节为更详细的版本，合并后以 PR 版为准，本节的「代码在 PR」表述改为「已合并」）。
