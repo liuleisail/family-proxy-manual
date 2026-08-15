@@ -1,11 +1,17 @@
 # 家庭网络控制台：手动运维说明
 
-当前前端控制台版本：`0.11.10`。
+当前前端控制台版本：`0.11.13`。
 
 发布时必须使用同一份仓库提交构建前端并运行 `scripts/deploy-family-proxy-ui`；
 该脚本会同时安装 UI、gateway、前端资源和 `build-info.json`，验证 gated health 后才算部署成功。
 RouterOS 健康检查固定走旁路主机的 `18088`，不要从 NAS 或 Mac 的普通 curl 结果判断旁路是否正常。
 页面显示的 build ID 来自实际安装文件内容指纹，不代表 GitHub 提交号；发布前需先通过 `scripts/verify-release.sh`，再由维护者提交并推送。
+
+### `v0.11.13` 发布摘要
+
+- Apple APNs 规则预设使用 `classical + text` 和 `Proxy-Auto`，并清理 RouterOS 整段 `17.0.0.0/8` 直连绕过，恢复旁路设备的 Telegram 后台推送路径。
+- 修复 RouterOS 来源访问管理网关时，登录成功后首页仍被健康探针 JSON 覆盖的问题。
+- 补充 APNs 规则、网关会话和版本发布回归检查；生产部署包含备份和 gated health 验证。
 
 ### `v0.11.10` 发布摘要
 

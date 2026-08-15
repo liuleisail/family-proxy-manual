@@ -670,3 +670,11 @@ RouterOS 变更要求：
 - RouterOS 即时回滚：恢复 `family_apple_direct` 的 `17.0.0.0/8` 地址条目，并恢复 `family-mihomo-shared Apple APNs direct` 规则的 `src-address-list=family_mihomo_devices`、`dst-address-list=family_apple_direct`；必要时使用本次二进制备份恢复。
 - Z4Pro 规则回滚：恢复 `/var/backups/family-proxy/20260815-0324-telegram-apns/rule-sets.json`，再执行 `sudo /usr/bin/python3 /opt/family-proxy-ui/family-mihomo-sub-import.py --apply-current`。
 - 回滚后必须重新核对 RouterOS 规则、Mihomo RuleSet 命中、TPROXY 计数和真实 iPhone 后台通知，不以服务 active 代替业务验证。
+
+## 18. 2026-08-15 v0.11.13 发布记录
+
+- 版本统一为 `0.11.13`：`VERSION`、`frontend/package.json`、`frontend/package-lock.json` 根包、`BUILD_VERSION` 和新版侧栏回退值保持一致。
+- 本版本包含 Apple APNs `classical + text + Proxy-Auto` 预设、RouterOS 旧 APNs 直连对象清理、网关登录会话修复和对应回归测试。
+- Z4Pro 已部署并验证：无 Cookie 的 RouterOS 请求仍返回健康探针；带登录会话的同一来源返回管理 HTML。部署备份为 `/var/backups/family-proxy/20260815-120828`，四个控制面服务均 active。
+- 本地隔离依赖环境完整回归为 `55 tests OK`；前端发布前需完成 `vue-tsc`、Vite build 和 `scripts/verify-release.sh`。
+- GitHub Release 地址：`https://github.com/liuleisail/family-proxy-manual/releases/tag/v0.11.13`。
