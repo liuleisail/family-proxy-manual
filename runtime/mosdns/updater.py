@@ -23,8 +23,11 @@ IMAGE = "jasonxtt/mosdns-t:latest"
 CONTAINER = "family-mosdns-t"
 CRANE = "/opt/family-mosdns-updater/crane"
 REGISTRY_PROXY = "http://127.0.0.1:7890"
-UPSTREAM_RELEASE_API = "https://api.github.com/repos/IrineSistiana/mosdns/releases/latest"
-UPSTREAM_RELEASE_URL = "https://github.com/IrineSistiana/mosdns/releases"
+PROJECT_TAGS_API = "https://api.github.com/repos/jasonxtt/mosdns/tags"
+PROJECT_TAGS_URL = "https://github.com/jasonxtt/mosdns/tags"
+PROJECT_RELEASE_SOURCE = "MosDNS-T 第三方项目 Tags"
+PROJECT_RELEASE_NOTES = "这是 MosDNS-T 第三方整合项目；版本以其 Tags 和 Docker 镜像 digest 为准，不与官方 MosDNS 5.x 版本比较。"
+PROJECT_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$")
 COMPOSE_DIR = Path(os.environ.get("FAMILY_MOSDNS_COMPOSE_DIR", "/var/lib/family-proxy/docker/family-mosdns-t"))
 STATE_DIR = Path("/etc/family-proxy-ui")
 CONFIG_PATH = STATE_DIR / "mosdns-updater.json"
@@ -165,8 +168,21 @@ def save_config(value):
     atomic_json(CONFIG_PATH, value)
 
 
+def normalize_status_payload(value):
+    result = dict(value) if isinstance(value, dict) else {}
+    if result.get("release_source") == PROJECT_RELEASE_SOURCE:
+        return result
+    result["release_source"] = PROJECT_RELEASE_SOURCE
+    result["release_url"] = PROJECT_TAGS_URL
+    result["release_version"] = ""
+    result["release_notes"] = PROJECT_RELEASE_NOTES
+    result["latest_published"] = ""
+    result["latest_version"] = str(result.get("latest_image") or "未知")
+    return result
+
+
 def status():
-    return load_json(STATUS_PATH, {"phase": "idle", "message": "尚未检查软件更新"})
+    return normalize_status_payload(load_json(STATUS_PATH, {"phase": "idle", "message": "尚未检查软件更新"}))
 
 
 def rule_status():
@@ -283,20 +299,30 @@ def remote_image_id():
     manifest = json.loads(crane_command(["manifest", IMAGE, "--platform=linux/amd64"], timeout=60))
     digest = manifest.get("config", {}).get("digest")
     if not digest:
-        raise RuntimeError("官方镜像清单缺少配置标识")
+        raise RuntimeError("MosDNS-T 第三方镜像清单缺少配置标识")
     return digest
 
 
-def upstream_release():
-    """Read the latest stable upstream release without making it a hard dependency."""
+def latest_project_tag(tags):
+    candidates = []
+    for item in tags if isinstance(tags, list) else []:
+        name = str(item.get("name") or "").strip() if isinstance(item, dict) else ""
+        match = PROJECT_TAG_RE.fullmatch(name)
+        if match:
+            candidates.append((tuple(int(value) for value in match.groups()), name))
+    return max(candidates)[1] if candidates else "未知"
+
+
+def third_party_release():
+    """Read MosDNS-T tags; never compare them with official MosDNS versions."""
     fallback = {
-        "release_source": "MosDNS 上游 GitHub Release",
-        "release_url": UPSTREAM_RELEASE_URL,
-        "release_notes": "暂未读取到 MosDNS 上游正式版逐项说明；请打开官方 Release 页面查看。",
+        "release_source": PROJECT_RELEASE_SOURCE,
+        "release_url": PROJECT_TAGS_URL,
+        "release_notes": PROJECT_RELEASE_NOTES,
         "release_version": "未知",
         "latest_published": "",
     }
-    request = urllib.request.Request(UPSTREAM_RELEASE_API, headers={"User-Agent": "family-proxy-mosdns-updater"})
+    request = urllib.request.Request(PROJECT_TAGS_API, headers={"User-Agent": "family-proxy-mosdns-updater"})
     openers = [
         urllib.request.build_opener(),
         urllib.request.build_opener(
@@ -307,14 +333,10 @@ def upstream_release():
         try:
             with opener.open(request, timeout=12) as response:
                 payload = json.loads(response.read().decode("utf-8", "replace"))
-            if not isinstance(payload, dict) or payload.get("draft") or payload.get("prerelease"):
+            latest = latest_project_tag(payload)
+            if latest == "未知":
                 return fallback
-            fallback.update({
-                "release_url": str(payload.get("html_url") or UPSTREAM_RELEASE_URL),
-                "release_notes": str(payload.get("body") or fallback["release_notes"]).strip()[:20000],
-                "release_version": str(payload.get("tag_name") or "未知"),
-                "latest_published": str(payload.get("published_at") or ""),
-            })
+            fallback["release_version"] = latest
             return fallback
         except (OSError, ValueError, urllib.error.URLError):
             continue
@@ -1177,12 +1199,12 @@ def metrics_summary():
 
 def do_check():
     with worker_lock:
-        set_status("checking", "正在检查 MosDNS 整合 Docker 镜像")
+        set_status("checking", "正在检查 MosDNS-T 第三方整合 Docker 镜像")
         try:
             local = running_image_id()
             remote = remote_image_id()
             available = local != remote
-            release = upstream_release()
+            release = third_party_release()
             set_status(
                 "available" if available else "up_to_date",
                 "发现可用更新" if available else "当前已经是最新版本",

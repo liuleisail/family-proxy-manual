@@ -48,6 +48,14 @@
 :if ([:len [find where comment=($sharedTag . " CN direct")]] = 0) do={
   add chain=prerouting action=accept src-address-list=$sharedList dst-address-list=$cnList comment=($sharedTag . " CN direct") place-before=$connectionMarker
 }
+# APNs must reach Mihomo so its classical/text rule can select Proxy-Auto.
+# Remove the legacy whole-17/8 RouterOS bypass if an older template created it.
+:foreach appleDirectRule in=[find where comment=($sharedTag . " Apple APNs direct")] do={
+  remove $appleDirectRule
+}
+:foreach appleDirectEntry in=[find where list="family_apple_direct" and address="17.0.0.0/8"] do={
+  remove $appleDirectEntry
+}
 :if ([:len [find where comment=($sharedTag . " route to z4pro")]] = 0) do={
   add chain=prerouting action=mark-routing new-routing-mark=$sharedTable passthrough=no src-address-list=$sharedList connection-mark=$sharedMark comment=($sharedTag . " route to z4pro") place-before=$mangleAnchor
 }

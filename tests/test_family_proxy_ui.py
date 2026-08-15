@@ -1,6 +1,8 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "runtime" / "family-proxy-ui.py"
@@ -103,16 +105,18 @@ class MaintenanceReleaseInfoTests(unittest.TestCase):
         self.assertIn("function openComponentRelease", page)
         self.assertIn("releaseRecords[prefix]=item", page)
 
-    def test_release_sources_are_limited_to_official_component_pages(self):
+    def test_release_sources_are_scoped_to_component_pages(self):
         page = family_proxy_ui.MIHOMO_MAINTENANCE_PAGE
 
         for source in (
             "https://github.com/MetaCubeX/mihomo/releases",
-            "https://github.com/IrineSistiana/mosdns/releases",
+            "https://github.com/jasonxtt/mosdns/tags",
             "https://mikrotik.com/download/changelogs?channelFilter=stable",
             "https://download.zspace.cn/",
         ):
             self.assertIn(source, page)
+        self.assertIn("MosDNS-T</h2>", page)
+        self.assertNotIn("IrineSistiana/mosdns", page)
 
     def test_component_release_metadata_has_consistent_contract(self):
         metadata = family_proxy_ui.component_release_metadata(
@@ -122,6 +126,51 @@ class MaintenanceReleaseInfoTests(unittest.TestCase):
         self.assertEqual(metadata["release_source"], "MikroTik RouterOS 官方稳定版 Changelog")
         self.assertEqual(metadata["release_notes"], "官方通道没有可用更新")
         self.assertTrue(metadata["release_url"].startswith("https://mikrotik.com/download/changelogs"))
+
+    def test_mosdns_release_metadata_is_third_party_scoped(self):
+        metadata = family_proxy_ui.component_release_metadata("mosdns")
+
+        self.assertEqual(metadata["release_source"], "MosDNS-T 第三方项目 Tags")
+        self.assertEqual(metadata["release_url"], "https://github.com/jasonxtt/mosdns/tags")
+        self.assertIn("不与官方 MosDNS 5.x 版本比较", metadata["release_notes"])
+
+    def test_mosdns_status_ignores_legacy_official_release_metadata(self):
+        payload = {
+            "phase": "up_to_date",
+            "current_version": "0.7.1",
+            "latest_image": "sha256:third-party",
+            "release_source": "MosDNS 上游 GitHub Release",
+            "release_url": "https://github.com/IrineSistiana/mosdns/releases",
+            "release_version": "v5.4",
+            "release_notes": "official notes",
+        }
+
+        with patch.object(family_proxy_ui.Path, "read_text", return_value=json.dumps(payload)):
+            result = family_proxy_ui.mosdns_component_update_status()
+
+        self.assertEqual(result["release_source"], "MosDNS-T 第三方项目 Tags")
+        self.assertEqual(result["release_version"], "")
+        self.assertNotIn("IrineSistiana", result["release_url"])
+
+    def test_platform_status_cleans_legacy_mosdns_release_metadata(self):
+        payload = {
+            "checked_at": 123,
+            "mosdns": {
+                "available": True,
+                "latest_image": "sha256:third-party",
+                "release_source": "MosDNS 上游 GitHub Release",
+                "release_url": "https://github.com/IrineSistiana/mosdns/releases",
+                "release_version": "v5.4",
+            },
+        }
+
+        with patch.object(family_proxy_ui.Path, "read_text", return_value=json.dumps(payload)):
+            result = family_proxy_ui.read_platform_update_status()
+
+        self.assertTrue(result["mosdns"]["available"])
+        self.assertEqual(result["mosdns"]["latest_version"], "sha256:third-party")
+        self.assertEqual(result["mosdns"]["release_version"], "")
+        self.assertNotIn("IrineSistiana", result["mosdns"]["release_url"])
 
 
 if __name__ == "__main__":
