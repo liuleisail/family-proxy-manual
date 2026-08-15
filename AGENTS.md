@@ -610,7 +610,7 @@ RouterOS 变更要求：
 - 漂移 C（已澄清）：实际部署源是 `/home/codexops/family-proxy-manual/`（与生产 `/opt` 哈希一致），并非旧记录里的 `-main` 副本；`-main` 是一次性陈旧副本，已由 `sync-z4pro-source` 无关地存在，不必再当部署源。
 - 陈旧的 8 个远程未合并分支均已通过 squash PR 合入 main（`codex/rule-set-source-type-fix` 若误合并会回退 dist），已在 2026-08-15 清理（本地 1 个 + 远程 8 个）。
 
-### 已落地代码仓库改动（A 类，已提交并推送，commit `4c8758b`）
+### 已落地代码仓库改动（A 类，已提交到分支 `agent/audit-and-optimization`，commit `4c8758b`）
 
 - A1 补回 APNs 直连模板：`routeros/02-prepare-controller.rsc` 增加 `family_apple_direct` 地址表与 `Apple APNs direct` mangle 规则（`place-before CN direct`）；`routeros/README.md` 增加 APNs 说明与手工回滚命令；`README.md` 增加 Apple Push 直连说明。与线上 RB5009 现有规则一致，重导模板不再丢失该规则。
 - A2 `frontend/package-lock.json` 根版本 `0.11.10` → `0.11.12`，与 `package.json` 对齐。
@@ -627,7 +627,7 @@ RouterOS 变更要求：
 
 用户已授权并依次完成以下五项：
 
-1. **commit/push**：A 类改动已提交 `4c8758b` 并推送 origin/main。
+1. **提交为 PR**：A 类改动提交 `4c8758b`，通过分支 `agent/audit-and-optimization` 发起 PR #87（base main），**暂未合并到 main**，待本地（Z4Pro）验证一段时间无问题后再合并。
 2. **恢复部署入口**：`z4pro` 的 `sudo -n` 已可用（`90-codexops-nopasswd` 授予 `NOPASSWD: ALL`）。注意该授权过宽，超出最小 `deploy-family-proxy-ui` 入口，后续应视需要收窄并复核最终 sudoers。
 3. **B2 同步**：`scripts/sync-z4pro-source` 成功，部署源 `/home/codexops/family-proxy-manual/` 的 `frontend/dist` 更新为 `index-DROpo0xI.js`/`index-DVmGmsAE.css`（与仓库一致）。
 4. **B1 部署**：`sudo /home/codexops/family-proxy-manual/scripts/deploy-family-proxy-ui` 成功，生产 build 从 `a222bd633fee` → `66e114efc14c`（deployed_at `20260815-092052`），备份 `/var/backups/family-proxy/20260815-092052`；`verify-server.sh` 通过，`family-proxy-ui`/`family-proxy-gateway`/`family-mihomo-sub-import` 均 active。活动连接卡片跳转修复已上线。
