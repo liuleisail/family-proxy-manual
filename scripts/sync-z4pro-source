@@ -12,9 +12,13 @@ trap cleanup EXIT
 
 rsync -azc \
     VERSION DEPLOYMENT.md README.md deploy/ routeros/ runtime/ scripts/ tests/ \
-    frontend/package.json frontend/package-lock.json frontend/index.html \
-    frontend/tsconfig.json frontend/vite.config.ts frontend/src/ frontend/dist/ \
     "$TARGET:$remote_stage/"
+rsync -azc \
+    frontend/package.json frontend/package-lock.json frontend/index.html \
+    frontend/tsconfig.json frontend/vite.config.ts \
+    "$TARGET:$remote_stage/frontend/"
+rsync -azc frontend/src/ "$TARGET:$remote_stage/frontend/src/"
+rsync -azc frontend/dist/ "$TARGET:$remote_stage/frontend/dist/"
 ssh "$TARGET" sudo rsync -azc "$remote_stage/" "$REMOTE_DIR/"
 
 # The remote source tree can retain older hashed Vite assets. Copy the complete
