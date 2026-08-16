@@ -870,3 +870,48 @@ RouterOS 变更要求：
 - 演练：手动 `docker stop msd_lite iperf3` → `systemctl restart docker` → recover 自动拉起 msd_lite（iperf3 由自身策略恢复），手动关闭的 4 容器保持 exited。
 - 恢复服务幂等，重复运行安全；32 个该运行容器全部运行，mosdns ready:true、Netwatch up。
 - **后续 daemon 配置变更（镜像源等）可放心重启 docker**，容器不再中断；唯一注意是 `live-restore` 下 daemon 升级大版本仍需评估兼容性。
+
+## 28. 2026-08-16 Z4Pro 单点故障分析与 Netwatch 降级缺陷（待修复）
+
+### Z4Pro 挂掉的实际影响面（已演练验证）
+
+- **普通设备（非旁路）**：DHCP 下发公共 DNS（223.5.5.5/119.29.29.29），直连上网 → **不受 Z4Pro 影响**。
+- **旁路设备（family_mihomo_devices）**：Netwatch `family-mihomo-tproxy-health`（检测 192.168.2.156:18088）down-script 自动禁用 mangle mark-connection/mark-routing → 流量回直连。**降级机制存在，但存在缺陷（见下）**。
+- **家庭服务（Emby/HA/Homebridge 等）**：全在 Z4Pro → 全部不可用（无法避免，除非异地备份）。
+- **DNS**：旁路设备的 DNS 被 NAT 劫持到 MosDNS（192.168.2.156:53），Z4Pro 挂掉后若劫持规则不关闭则旁路设备 DNS 全断。
+
+### ⚠️ Netwatch up/down-script 引号缺陷（真实高可用缺口，已演练复现）
+
+- down/up-script 中 `find where ... to-ports=53` 和 `connection-mark=family_mihomo_conn` **缺引号** → RouterOS 按字符串比较匹配不到 → **DNS 劫持 nat 规则（31/32）和 filter 规则（13）永远不会被禁用/启用**，`connection remove` 也失效。
+- 实测：模拟 Z4Pro 挂掉（iptables 屏蔽 18088）→ mangle 16/17 正确禁用，但 nat 31/32 仍指向死掉的 MosDNS → 旁路设备 DNS 全断。
+- 带引号后验证可匹配：`to-ports="53"` → *60BB;*60BC、`connection-mark="family_mihomo_conn"` → *54、`/ip/firewall/connection` → 活动连接。
+
+### 修复命令（等可写账号执行；codexops SSH/API 均只读）
+
+down-script 中替换：
+```
+/ip firewall nat disable [find where action=dst-nat and to-addresses=192.168.2.156 and to-ports=53]
+→ /ip firewall nat disable [find where action=dst-nat and to-addresses=192.168.2.156 and to-ports="53"]
+/ip firewall filter disable [find where action=accept and connection-mark=family_mihomo_conn]
+→ /ip firewall filter disable [find where action=accept and connection-mark="family_mihomo_conn"]
+/ipv6 firewall filter disable [find where action=jump and jump-target=family_mihomo_auto_v6]
+→ /ipv6 firewall filter disable [find where action=jump and jump-target="family_mihomo_auto_v6"]
+/ip firewall connection remove [find where connection-mark=family_mihomo_conn]
+→ /ip firewall connection remove [find where connection-mark="family_mihomo_conn"]
+```
+up-script 同样替换 enable。字段规律：`to-ports`、`connection-mark`、`jump-target` 需引号；`action`、`to-addresses`、`new-connection-mark`、`new-routing-mark` 不需要。
+
+### RouterOS 入口现状（2026-08-16）
+
+- SSH 端口 2222（非 22），只对 192.168.2.0/24；codexops 只读（`not enough permissions`）。
+- API 8728 只对 192.168.2.156 开放；`family-proxy-ui` 账号受限（`/log/warning` 等写操作报 `no such command`，部分 print/find 报错不稳定）。
+- **高权限账号：SSH 2222 用户 `liuleisail-1`（密码用户持有，不写入本仓库）**，可执行 /tool/netwatch 等写操作。登录方式：`sshpass -e ssh -p 2222 liuleisail-1@192.168.2.1`（交互式 expect 亦可）。
+
+### ✅ 已修复并验证（2026-08-16 18:17）
+
+- 用高权限账号将 up/down-script 中的 `to-ports=53` → `to-ports="53"`、`connection-mark=family_mihomo_conn` → `connection-mark="family_mihomo_conn"`、`jump-target=family_mihomo_auto_v6` → `jump-target="family_mihomo_auto_v6"`。
+- **演练验证（完整闭环）**：
+  - 降级（屏蔽 Z4Pro:18088，45s 后 Netwatch down）：mangle 16/17、**DNS 劫持 nat 31/32、filter 13 全部带 X 禁用** ✓（修复前 31/32/13 不关闭）
+  - 恢复（解除屏蔽，45s 后 Netwatch up）：31/32/13/16/17 全部重新启用 ✓
+- 旁路设备在 Z4Pro 挂掉时：流量回直连 + DNS 回公共 DNS，不再全断。
+- 修复用脚本留痕：`/tmp/fix-netwatch.py`（API 方式，因账号受限弃用）、`/tmp/fpm-bin/ros-fix.rsc`（SSH 变量方式，成功）——均在本地 Mac，未入仓库。
