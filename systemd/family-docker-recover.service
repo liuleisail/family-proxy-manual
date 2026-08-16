@@ -1,0 +1,12 @@
+[Unit]
+Description=Recover family Docker containers after daemon restart
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/family-docker-recover
+
+[Install]
+WantedBy=multi-user.target

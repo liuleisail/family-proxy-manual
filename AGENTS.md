@@ -923,3 +923,23 @@ up-script 同样替换 enable。字段规律：`to-ports`、`connection-mark`、
 - **结论**：docker 容器挂掉场景**与** Z4Pro 整体挂掉场景都受 Netwatch 降级保护；普通设备（公共 DNS+直连）始终不受影响。
 - **恢复**：mihomo 容器启动后 7893 恢复、18088 恢复 200、Netwatch up、规则全部重新启用（disabled count=0）。
 - **已知观察**：gateway 进程活着但 docker 依赖挂掉时会返回 503（功能降级但可被 Netwatch 识别），属设计内降级信号，无需额外处理。
+
+## 29. 2026-08-16 Netwatch 模板回归保护（模板已修复，线上已验证）
+
+- 发现仓库 `routeros/04-health-netwatch.rsc` 仍使用未加引号的 `to-ports=53`、`connection-mark=family_mihomo_conn` 和 `jump-target=family_mihomo_auto_v6`；线上 RouterOS 已是 18:17 修复版，但未来重新导入模板可能回归 DNS 降级缺陷。
+- 模板现改为对这些值选择器使用引号，并将 `proxyIp` 改为空值；未填写现场 Z4Pro 地址时立即报错，避免误导入历史占位地址。
+- `tests/test_routeros_health_netwatch.py` 新增引号、空地址保护和旧占位地址回归断言。线上 RouterOS 已在 18:17 由高权限账号完成同样修复并通过完整 down/up 演练；本次未重复写入 RouterOS。
+
+## 30. 2026-08-16 Docker 恢复 timer 持久化修复（已部署并验证）
+
+- 发现线上 `family-docker-recover.service` 使用 `Type=oneshot` 加 `RemainAfterExit=yes`，导致 `family-docker-recover.timer` 虽有 `OnUnitActiveSec=5min`，实际长期显示 `Trigger=n/a`，未能证明周期恢复会重复执行。
+- 仓库新增 `scripts/family-docker-recover`、`systemd/family-docker-recover.service`、`systemd/family-docker-recover.timer` 和排除清单示例；service 不再保持 active，timer 可在每次 service 执行后重新调度。
+- `scripts/install-server.sh` 现在会备份并安装这些文件、保留已有 `/etc/family-proxy-ui/docker-recover-exclude.conf`，并启用恢复 service/timer。生产已备份至 `/var/backups/family-proxy/20260816-190613-docker-recover-timer`，随后执行 daemon-reload 并只重启恢复 service/timer；未重启 Docker、RouterOS 或旁路容器。
+- 生产验证：service `Result=success` 且执行后为 `inactive/dead`；timer 为 `active (waiting)`，下一次触发时间为 2026-08-16 19:12:05，且 `list-timers` 已显示该触发时间；恢复日志显示排除清单中的 tailscale、rustdesk-hbbs、rustdesk-hbbr 被跳过，启动 0 个退出容器；Docker `live_restore=true`，运行 29 个、退出 8 个。
+
+## 31. 2026-08-16 AI/TG 备用机场来源选择（已应用并部署验证）
+
+- 备用机场 1 已导入并通过最近一次全量稳定性测速；JP-AI、SG-AI、US-AI、其他-AI 和 TG 候选池各切换为 5 个备用机场 1 节点。YouTube 使用的 HK-视频池和 Proxy 池保持原值；TG-Notify、TG-出口的系统通知/派生出口保持原值。
+- 变更前候选池、池设置、测速记录、来源元数据和 Mihomo 配置备份在 Z4Pro `/var/backups/family-proxy/20260816-194940-ai-tg-backup1/`。管理后端通过配置校验、Mihomo 重载、控制接口、AI 探针和 Telegram 探针。
+- `runtime/family-mihomo-sub-import.py` 新增按池保存机场筛选范围的 `/api/pool-source-scope`；选择并锁定来源只生成待测范围，不立即改线上候选。全量稳定性测速只测试已锁定范围，未锁定池（包括 YouTube 的 `HK-视频`）保持原值，最终仍须“复测并生效”。
+- 控制面部署备份为 Z4Pro `/var/backups/family-proxy/20260816-195852/`；`/airport/` 页面已在桌面和 390px 移动视口验证来源选择入口，浏览器控制台无错误，四个服务 active，Mihomo 控制接口和 AI/TG 探针可用。回滚优先使用上述候选池备份或页面“回退上一版”恢复候选池。

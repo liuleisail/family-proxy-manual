@@ -33,6 +33,7 @@ class MihomoBootstrapTests(unittest.TestCase):
             "CANDIDATES": providers / "candidates.json",
             "PREVIOUS": providers / "candidates.previous.json",
             "SUGGESTIONS": providers / "pool-suggestions.json",
+            "POOL_SOURCE_SELECTION": providers / "pool-source-selection.json",
             "MIHOMO_CONFIG": root / "config.yaml",
             "VERSIONS": root / "config-versions",
         }
@@ -94,6 +95,48 @@ class MihomoBootstrapTests(unittest.TestCase):
         self.assertIn("Proxy-Auto", groups["HK-视频"]["proxies"])
         self.assertIn("Proxy-Auto", groups["TG-Auto"]["proxies"])
         self.assertEqual(groups["AI-Auto"]["proxies"], ["Proxy-Auto"])
+
+    def test_source_pool_candidates_prefer_recently_tested_source_nodes(self):
+        records = [
+            {"name": "[备用1] 美国慢", "raw": "美国慢", "source": "backup1"},
+            {"name": "[备用1] 美国快", "raw": "美国快", "source": "backup1"},
+            {"name": "[主力] 美国节点", "raw": "美国节点", "source": "primary"},
+        ]
+        tests = {"results": [
+            {"name": "[备用1] 美国慢", "success": 3, "delay": 220, "jitter": 20},
+            {"name": "[备用1] 美国快", "success": 3, "delay": 80, "jitter": 4},
+        ]}
+        with patch.object(MODULE, "nodes", return_value=records), \
+             patch.object(MODULE, "source_slots", return_value=["primary", "backup1"]), \
+             patch.object(MODULE, "read_json", return_value=tests):
+            result = MODULE.source_pool_candidates("US-AI", "backup1")
+
+        self.assertEqual(result, ["[备用1] 美国快", "[备用1] 美国慢"])
+
+    def test_source_scoped_suggestions_keep_unselected_pool_unchanged(self):
+        current = {name: [] for name in MODULE.POOLS}
+        current["HK-视频"] = ["[主力] 香港旧节点"]
+        records = [
+            {"name": "[备用1] 美国稳定", "raw": "美国稳定", "source": "backup1"},
+            {"name": "[主力] 香港旧节点", "raw": "香港旧节点", "source": "primary"},
+        ]
+        results = [{"name": "[备用1] 美国稳定", "pool": "US-AI", "success": 3,
+                    "delay": 80, "jitter": 4}]
+        scopes = {pool: None for pool in MODULE.POOLS}
+        scopes["US-AI"] = "backup1"
+        with patch.object(MODULE, "nodes", return_value=records), \
+             patch.object(MODULE, "pools", return_value=current):
+            proposal = MODULE.build_suggestions(results, scopes, current)
+
+        self.assertEqual(proposal["pools"]["US-AI"], ["[备用1] 美国稳定"])
+        self.assertEqual(proposal["pools"]["HK-视频"], ["[主力] 香港旧节点"])
+        self.assertEqual(proposal["source_selections"]["US-AI"], "backup1")
+        self.assertIsNone(proposal["source_selections"]["HK-视频"])
+
+    def test_airport_source_selector_is_exposed_in_legacy_pool_page(self):
+        self.assertIn("/api/pool-source-scope", MODULE.PAGE)
+        self.assertIn("锁定机场范围", MODULE.PAGE)
+        self.assertIn("sourceOptions", MODULE.PAGE)
 
     def test_container_installer_has_non_overwrite_guard_for_runtime_config(self):
         script = (ROOT / "scripts" / "install-mihomo-container.sh").read_text()

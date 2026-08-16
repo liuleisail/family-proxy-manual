@@ -50,6 +50,8 @@ class FirstRunSetupTests(unittest.TestCase):
         self.assertIn("apply-runtime-mode", script)
         self.assertIn("family-mihomo-tproxy-auto", script)
         self.assertIn("refresh-mihomo-geodata.py", script)
+        self.assertIn("family-mihomo-sub-import.py", script)
+        self.assertIn("family-mihomo-sub-import.service", script)
         self.assertIn('install -m 644 "$SOURCE_DIR/VERSION" "$TARGET_DIR/VERSION"', script)
 
     def test_z4pro_sync_uses_content_checksums_without_delete(self):

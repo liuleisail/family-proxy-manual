@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Recover Docker containers after a daemon restart or host boot.
+# Containers explicitly stopped by the user must be listed in the exclude file.
+set -u
+
+EXCLUDE_FILE="${FAMILY_DOCKER_RECOVER_EXCLUDE:-/etc/family-proxy-ui/docker-recover-exclude.conf}"
+
+for _ in $(seq 1 30); do
+  if docker info >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+if ! docker info >/dev/null 2>&1; then
+  echo "docker daemon not ready after 60s" >&2
+  exit 1
+fi
+
+is_excluded() {
+  local name="$1"
+  [ -r "$EXCLUDE_FILE" ] || return 1
+  grep -qxF "$name" "$EXCLUDE_FILE"
+}
+
+restarted=0
+for id in $(docker ps -aq --filter "status=exited"); do
+  name=$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's#^/##')
+  policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$id" 2>/dev/null)
+  [ -n "$name" ] || continue
+  case "$policy" in
+    always|unless-stopped) ;;
+    *) continue ;;
+  esac
+  if is_excluded "$name"; then
+    echo "skip $name (user-stopped, in exclude list)"
+    continue
+  fi
+  echo "start $name (policy=$policy)"
+  docker start "$id" >/dev/null 2>&1 && restarted=$((restarted + 1)) \
+    || echo "failed to start $name" >&2
+done
+
+echo "family-docker-recover: started $restarted container(s)"

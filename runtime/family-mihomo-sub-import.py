@@ -48,7 +48,7 @@ POOLS = {
 }
 AI_REGIONAL_POOLS = ("JP-AI", "SG-AI", "US-AI")
 HK_NODE = re.compile(r"(?:香港|hong[ -]?kong|(?<![a-z])hkg?(?![a-z]))", re.I)
-SUGGESTION_SCHEMA = 3
+SUGGESTION_SCHEMA = 4
 CANDIDATES = PROVIDERS / "candidates.json"
 PREVIOUS = PROVIDERS / "candidates.previous.json"
 POOL_SETTINGS = PROVIDERS / "pool-settings.json"
@@ -57,6 +57,7 @@ LAST_TESTS = PROVIDERS / "last-tests.json"
 CONFIRM_TESTS = PROVIDERS / "last-confirm-tests.json"
 POOL_PROBES = PROVIDERS / "pool-probes.json"
 SUGGESTIONS = PROVIDERS / "pool-suggestions.json"
+POOL_SOURCE_SELECTION = PROVIDERS / "pool-source-selection.json"
 SOURCES = PROVIDERS / "sources.json"
 RUNTIME_STATE = PROVIDERS / "runtime-state.json"
 RUNTIME_EVENTS = PROVIDERS / "runtime-events.json"
@@ -409,11 +410,70 @@ def validate_pool_settings(value):
     return cleaned
 
 
+def source_selections():
+    """Return pending per-pool airport scopes; None means keep current scope."""
+    data = read_json(POOL_SOURCE_SELECTION, {})
+    raw = data.get("pools", {}) if isinstance(data, dict) else {}
+    valid_slots = set(source_slots())
+    selected = {}
+    for pool in POOLS:
+        value = raw.get(pool) if isinstance(raw, dict) else None
+        if value in ("", "current"):
+            value = None
+        if value != "all" and value not in valid_slots:
+            value = None
+        selected[pool] = value
+    return selected
+
+
+def set_source_selection(pool, slot):
+    """Save a pending airport scope without changing the active candidate pool."""
+    if pool not in POOLS:
+        raise ValueError("无效业务候选池")
+    with TEST_STATE_LOCK:
+        if TEST_STATE["running"]:
+            raise ValueError("测速正在进行，完成后才能修改机场筛选范围")
+    if slot in (None, "", "current"):
+        slot = None
+    elif slot != "all" and slot not in source_slots():
+        raise ValueError("无效机场来源")
+    selected = source_selections()
+    selected[pool] = slot
+    atomic_json(POOL_SOURCE_SELECTION, {"pools": selected})
+    # A pending source change invalidates a suggestion generated from an older scope.
+    SUGGESTIONS.unlink(missing_ok=True)
+    with TEST_STATE_LOCK:
+        TEST_STATE.update({"finished_at": None, "error": None, "action": None,
+                           "phase": None, "proposal_ready": False, "applied": False})
+    return {"pool": pool, "source": slot, "source_selections": selected, "pools": pools()}
+
+
+def scoped_pool_nodes(pool, slot):
+    """Return every imported node eligible for one explicitly selected scope."""
+    if slot is None:
+        return []
+    return [node["name"] for node in nodes()
+            if (slot == "all" or node["source"] == slot) and pool_matches(pool, node)]
+
+
+def validate_source_scoped_pools(value, selections):
+    """Reject a draft that escapes its airport scope before confirmation."""
+    indexed = node_index()
+    for pool, slot in (selections or {}).items():
+        if slot is None:
+            continue
+        for name in value.get(pool, []):
+            if slot != "all" and indexed[name]["source"] != slot:
+                raise ValueError(f"{pool} 含有不属于所选机场的节点")
+    return value
+
+
 def suggestions():
     data = read_json(SUGGESTIONS, {})
     if data.get("schema") != SUGGESTION_SCHEMA:
         return {
             "pools": {name: [] for name in POOLS},
+            "source_selections": source_selections(),
             "generated_at": None,
             "ready": False,
             "reason": "候选池标准已更新，请重新进行全量稳定性测速",
@@ -421,6 +481,11 @@ def suggestions():
     proposal = data.get("pools") if isinstance(data.get("pools"), dict) else {}
     return {
         "pools": {name: list(proposal.get(name, []))[:5] for name in POOLS},
+        "source_selections": {
+            pool: (data.get("source_selections", {}).get(pool)
+                   if isinstance(data.get("source_selections"), dict) else source_selections().get(pool))
+            for pool in POOLS
+        },
         "generated_at": data.get("generated_at"),
         "ready": bool(data.get("ready")),
         "reason": data.get("reason"),
@@ -437,6 +502,33 @@ def pool_matches(pool, node):
             pool_matches(regional_pool, node) for regional_pool in AI_REGIONAL_POOLS
         )
     return any(word.casefold() in node["raw"].casefold() for word in POOLS[pool])
+
+
+def source_pool_candidates(pool, slot="all"):
+    """Return up to five source-scoped candidates, preferring recent tests."""
+    if pool not in POOLS:
+        raise ValueError("无效业务候选池")
+    if slot != "all" and slot not in source_slots():
+        raise ValueError("无效机场来源")
+    test_data = read_json(LAST_TESTS, {})
+    recent = {
+        item.get("name"): item
+        for item in (test_data.get("results", []) if isinstance(test_data, dict) else [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    eligible = [
+        node for node in nodes()
+        if (slot == "all" or node["source"] == slot) and pool_matches(pool, node)
+    ]
+
+    def rank(node):
+        result = recent.get(node["name"], {})
+        success = int(result.get("success") or 0)
+        delay = result.get("delay") if result.get("delay") is not None else 999999
+        jitter = result.get("jitter") if result.get("jitter") is not None else 999999
+        return (success != 3, int(delay), float(jitter), node["name"])
+
+    return [node["name"] for node in sorted(eligible, key=rank)[:5]]
 
 
 def test_score(result):
@@ -478,25 +570,44 @@ def emergency_catalog(selected=None):
     return result
 
 
-def build_suggestions(results):
+def build_suggestions(results, source_scopes=None, current=None):
+    """Build stable suggestions while respecting explicitly selected sources.
+
+    A None scope keeps the active pool unchanged. This is what protects pools
+    such as YouTube when only AI or Telegram has been assigned to another airport.
+    """
     indexed = node_index()
     result_by_name = {item["name"]: item for item in results}
+    result_by_pool_name = {
+        (item.get("pool"), item["name"]): item for item in results if item.get("pool")
+    }
+    active = current or pools()
+    scopes = source_scopes if source_scopes is not None else {pool: "all" for pool in POOLS}
     proposed = {}
+    missing = []
     for pool in POOLS:
+        scope = scopes.get(pool)
+        if scope is None:
+            proposed[pool] = list(active.get(pool, []))[:5]
+            continue
         eligible = []
         for name, node in indexed.items():
             result = result_by_name.get(name)
+            if (pool, name) in result_by_pool_name:
+                result = result_by_pool_name[(pool, name)]
             if not result or result.get("success") != 3 or result.get("delay") is None:
                 continue
-            if pool_matches(pool, node):
+            if (scope == "all" or node["source"] == scope) and pool_matches(pool, node):
                 eligible.append({"name": name, "source": node["source"], "score": test_score(result)})
         proposed[pool] = rank_pool_candidates(eligible)
-    missing = [pool for pool, entries in proposed.items() if not entries]
+        if not proposed[pool]:
+            missing.append(pool)
     return {
         "pools": proposed,
         "generated_at": datetime.now().astimezone().isoformat(),
         "schema": SUGGESTION_SCHEMA,
         "ready": not missing,
+        "source_selections": {pool: scopes.get(pool) for pool in POOLS},
         "reason": ("、".join(missing) + " 没有连续三次成功的节点") if missing else None,
     }
 
@@ -1058,6 +1169,25 @@ def test_nodes(names, progress=None, result_path=LAST_TESTS):
     return results
 
 
+def persist_last_test_results(results):
+    """Keep one best record per node for pool cards and later source ranking."""
+    best = {}
+    for item in results:
+        name = item.get("name")
+        if not name:
+            continue
+        previous = best.get(name)
+        score = (item.get("success") != 3, item.get("delay") or 999999,
+                 item.get("jitter") if item.get("jitter") is not None else 999999)
+        old_score = ((previous.get("success") != 3, previous.get("delay") or 999999,
+                      previous.get("jitter") if previous.get("jitter") is not None else 999999)
+                     if previous else None)
+        if previous is None or score < old_score:
+            best[name] = dict(item)
+    atomic_json(LAST_TESTS, {"tested_at": datetime.now().astimezone().isoformat(),
+                             "results": sorted(best.values(), key=lambda item: item["name"])})
+
+
 def test_pool_candidates(selected, progress=None):
     """Confirm each pool against its own service, not one generic URL."""
     tasks = [(pool, name) for pool, entries in selected.items() for name in entries]
@@ -1244,10 +1374,23 @@ def test_status():
 def start_test_all():
     if not TEST_JOB_LOCK.acquire(blocking=False):
         return {"started": False, **test_status()}
-    names = nodes()
+    source_scopes = source_selections()
+    current = pools()
+    selected = {
+        pool: scoped_pool_nodes(pool, slot)
+        for pool, slot in source_scopes.items() if slot is not None
+    }
+    if not selected:
+        TEST_JOB_LOCK.release()
+        raise ValueError("请先在至少一个业务池锁定机场范围")
+    empty = [pool for pool, entries in selected.items() if not entries]
+    if empty:
+        TEST_JOB_LOCK.release()
+        raise ValueError("所选机场在以下业务池没有符合地域规则的节点：" + "、".join(empty))
+    total = sum(len(entries) for entries in selected.values())
     now = datetime.now().astimezone().isoformat()
     with TEST_STATE_LOCK:
-        TEST_STATE.update({"running": True, "total": len(names), "completed": 0,
+        TEST_STATE.update({"running": True, "total": total, "completed": 0,
                            "started_at": now, "finished_at": None, "error": None,
                            "action": "full-test", "phase": "nodes", "proposal_ready": False, "applied": False})
 
@@ -1257,7 +1400,9 @@ def start_test_all():
 
     def run():
         try:
-            proposal = build_suggestions(test_all(update_progress))
+            results = test_pool_candidates(selected, update_progress)
+            persist_last_test_results(results)
+            proposal = build_suggestions(results, source_scopes, current)
             github = github_candidates(proposal["pools"])
             if github:
                 with TEST_STATE_LOCK:
@@ -1355,9 +1500,11 @@ def start_replace_and_clear_slot(slot):
 
 
 def start_retest_apply(value):
-    if not suggestions()["ready"]:
+    proposal = suggestions()
+    if not proposal["ready"]:
         raise ValueError("请先完成全量稳定性测速并生成完整建议")
     selected = validate_pools(value, allow_generic_proxy=True)
+    validate_source_scoped_pools(selected, proposal.get("source_selections"))
     if not TEST_JOB_LOCK.acquire(blocking=False):
         return {"started": False, **test_status()}
     github = github_candidates(selected)
@@ -1397,7 +1544,8 @@ def start_retest_apply(value):
                 confirmed[pool] = rank_pool_candidates(stable)
             final = validate_pools(confirmed)
             save_pools(final)
-            atomic_json(SUGGESTIONS, {"pools": final, "generated_at": now, "ready": True,
+            atomic_json(SUGGESTIONS, {"pools": final, "generated_at": now, "schema": SUGGESTION_SCHEMA,
+                                      "source_selections": proposal.get("source_selections"), "ready": True,
                                       "reason": None, "applied_at": datetime.now().astimezone().isoformat()})
             with TEST_STATE_LOCK:
                 TEST_STATE.update({"running": False, "completed": TEST_STATE["total"],
@@ -1829,13 +1977,17 @@ PAGE = PAGE.replace(_history_marker, _stable_marker + _history_marker, 1)
 # Keep the subscription landing page small. The full node catalogue is only
 # needed once the user opens the candidate-pool tab.
 PAGE = PAGE.replace("if(id==='runtime')loadStatus()", "if(id==='pools')loadPools();if(id==='runtime')loadStatus()")
-PAGE = PAGE.replace("let all=[],pools={},delays={};", "let all=[],pools={},activePools={},suggestion=null,delays={},catalogLoaded=false,testPoll=null,probePoll=null,probeData={};")
+PAGE = PAGE.replace("let all=[],pools={},delays={};", "let all=[],pools={},activePools={},sourceOptions=[],suggestion=null,delays={},catalogLoaded=false,testPoll=null,probePoll=null,probeData={};")
 PAGE = PAGE.replace("poolNames=['HK-视频','JP-AI','SG-AI','US-AI','TG','Proxy']", "poolNames=['HK-视频','JP-AI','SG-AI','US-AI','其他-AI','TG','Proxy']")
 PAGE = PAGE.replace("async function load(){let d=await api('/api/state');", "async function load(){let d=await api('/api/nodes');")
-PAGE = PAGE.replace("renderPools()}function options", "catalogLoaded=true;renderPools()}async function loadSummary(){let d=await api('/api/state');document.querySelector('#slots').innerHTML=d.slots.map(slotCard).join('');pools=d.pools;if(d.tests&&d.tests.tested_at)document.querySelector('#testStatus').textContent='上次稳定性测速：'+d.tests.tested_at}async function loadPools(){if(catalogLoaded){await loadProbeReport();return}try{await load();await refreshTestStatus();await loadProbeReport()}catch(e){pageError(e)}}function pageError(e){let box=document.querySelector('#pageStatus');if(!box){box=document.createElement('div');box.id='pageStatus';box.className='status bad';document.querySelector('.intro').append(box)}box.innerHTML='页面数据加载失败。<button class=\"btn\" onclick=\"loadSummary().catch(pageError)\">重试</button>';console.error(e)}function options")
+PAGE = PAGE.replace(
+    "renderPools()}function options",
+    "catalogLoaded=true;renderPools()}async function loadSummary(){let d=await api('/api/state');document.querySelector('#slots').innerHTML=d.slots.map(slotCard).join('');sourceOptions=d.slots||sourceOptions;sourceSelections=d.source_selections||sourceSelections;pools=d.pools;if(d.tests&&d.tests.tested_at)document.querySelector('#testStatus').textContent='上次稳定性测速：'+d.tests.tested_at}async function loadPools(){if(catalogLoaded){await loadProbeReport();return}try{await load();await refreshTestStatus();await loadProbeReport()}catch(e){pageError(e)}}function pageError(e){let box=document.querySelector('#pageStatus');if(!box){box=document.createElement('div');box.id='pageStatus';box.className='status bad';document.querySelector('.intro').append(box)}box.innerHTML='页面数据加载失败。<button class=\"btn\" onclick=\"loadSummary().catch(pageError)\">重试</button>';console.error(e)}function options",
+    1,
+)
 PAGE = PAGE.replace("}load()", "}loadSummary().catch(pageError)")
 PAGE = PAGE.replace("async function imp(s){", "async function addSource(){try{await api('/api/sources',{method:'POST',body:'{}'});await loadSummary()}catch(e){pageError(e)}}async function deleteSource(s){if(!confirm('删除机场会清空该来源的节点；若节点正在被当前候选池使用，操作将被拒绝。确定删除？'))return;try{await api('/api/source-remove',{method:'POST',body:JSON.stringify({slot:s})});await loadSummary()}catch(e){alert(e.message)}}async function imp(s){")
-PAGE = PAGE.replace("all=d.nodes;pools=d.pools;", "all=d.nodes;activePools=d.pools;suggestion=d.suggestions||null;pools=suggestion&&suggestion.generated_at?suggestion.pools:activePools;")
+PAGE = PAGE.replace("all=d.nodes;pools=d.pools;", "all=d.nodes;activePools=d.pools;sourceOptions=d.slots||sourceOptions;sourceSelections=d.source_selections||sourceSelections;suggestion=d.suggestions||null;pools=suggestion&&suggestion.generated_at?suggestion.pools:activePools;")
 PAGE = PAGE.replace('<div class="toolbar"><input id="filter" placeholder="筛选节点名称">', '<div class="toolbar" id="poolToolbar"><input id="filter" placeholder="筛选节点名称">')
 PAGE = PAGE.replace('<button class="btn primary" onclick="testAll()">稳定性测速</button><button class="btn" onclick="save()">校验并应用</button>', '<button class="btn primary" onclick="testAll()">全量稳定性测速</button><button class="btn" onclick="confirmApply()">复测并生效</button>')
 PAGE = PAGE.replace(
@@ -1844,6 +1996,7 @@ PAGE = PAGE.replace(
     1,
 )
 PAGE = PAGE.replace('<div class="section-title"><h2>业务候选池</h2></div>', '<div class="section-title"><h2>业务可达性报告</h2><span class="muted">只验证当前候选池，不改变排序或出口</span></div><div id="probeGrid" class="probe-grid"></div><div class="section-title"><h2>待生效候选池</h2><span class="muted">测速建议不会自动替换当前出口</span></div>')
+PAGE = PAGE.replace('测速建议不会自动替换当前出口', '先锁定机场范围并测速；复测通过后才替换当前出口')
 _old_speed_test = "async function testAll(){let status=document.querySelector('#testStatus');try{status.textContent='正在对每个节点连续测试三次，本次操作完成后即停止…';status.className='status';let d=await api('/api/test-all',{method:'POST',body:'{}'});delays=Object.fromEntries(d.results.map(function(x){return [x.name,x]}));status.textContent='测速完成：'+d.results.filter(function(x){return x.ok}).length+'/'+d.results.length+' 稳定可用';renderPools()}catch(e){status.textContent=e.message;status.className='status bad'}}"
 _new_speed_test = "function showTestStatus(d){let status=document.querySelector('#testStatus');clearTimeout(testPoll);if(d.running){status.textContent=(d.action==='retest-apply'?'候选池复测中：':'全量测速（含 GitHub 专项）中：')+d.completed+'/'+d.total+' 个节点已完成；可继续浏览页面';status.className='status';testPoll=setTimeout(refreshTestStatus,1000);return}if(d.error){status.textContent=(d.action==='retest-apply'?'复测未生效：':'测速未完成：')+d.error;status.className='status bad';return}if(d.finished_at&&d.action==='retest-apply'){status.textContent=d.applied?'复测、GitHub 专项、配置校验和运行验证均通过，候选池已生效':'复测完成，但未生效';status.className=d.applied?'status':'status bad';catalogLoaded=false;loadPools();return}if(d.finished_at&&d.action==='full-test'){status.textContent=d.suggestions&&d.suggestions.ready?'全量测速和 GitHub 专项已完成，已生成待生效建议；确认后点击“复测并生效”':'测速完成，但有业务池没有连续三次成功的节点';status.className=d.suggestions&&d.suggestions.ready?'status':'status bad';catalogLoaded=false;loadPools();return}if(d.suggestions&&d.suggestions.ready){status.textContent='已生成待生效建议；当前出口保持不变，点击“复测并生效”后才会更新';status.className='status';return}if(d.last_tested_at){status.textContent='上次稳定性测速：'+d.last_tested_at}}async function refreshTestStatus(){try{showTestStatus(await api('/api/test-status'))}catch(e){let status=document.querySelector('#testStatus');status.textContent='测速状态读取失败：'+e.message;status.className='status bad'}}async function testAll(){try{showTestStatus(await api('/api/test-all',{method:'POST',body:'{}'}))}catch(e){let status=document.querySelector('#testStatus');status.textContent=e.message;status.className='status bad'}}async function confirmApply(){let status=document.querySelector('#testStatus');try{showTestStatus(await api('/api/retest-apply',{method:'POST',body:JSON.stringify({pools:pools})}))}catch(e){status.textContent=e.message;status.className='status bad'}}"
 _new_speed_test = _new_speed_test.replace(
@@ -1883,8 +2036,14 @@ PAGE = PAGE.replace(
     "配置校验和重启验证均通过，候选节点已按测速结果排序",
     1,
 )
+PAGE = PAGE.replace(
+    "</style>",
+    ".pool-source{display:grid;grid-template-columns:1fr auto;gap:8px;padding:0 14px 10px}.pool-source select{width:100%;height:36px;border:1px solid #48484a;border-radius:7px;background:#2c2c2e;color:#fff;padding:0 11px;font:13px inherit;outline:none}.pool-source select:focus{border-color:#0a84ff;box-shadow:0 0 0 3px rgba(10,132,255,.2)}@media(max-width:760px){.pool-source{grid-template-columns:1fr}.pool-source .btn{width:100%}}</style>",
+    1,
+)
 _auto_replace_clear_js = r'''const familyShowTestStatus=showTestStatus;showTestStatus=function(d){let status=document.querySelector('#testStatus');if(d.action==='replace-clear'){clearTimeout(testPoll);if(d.running){status.textContent='正在复测其余机场节点并自动替换候选池：'+d.completed+'/'+d.total+'；可继续浏览页面';status.className='status';testPoll=setTimeout(refreshTestStatus,1000);return}if(d.error){status.textContent='自动替换未执行：'+d.error;status.className='status bad';return}if(d.finished_at){status.textContent=d.applied?'已复测、替换候选池并清空该机场节点；配置校验和运行验证均通过':'自动替换未完成';status.className=d.applied?'status':'status bad';let completion=d.action+':'+d.finished_at;if(handledTestCompletion!==completion){handledTestCompletion=completion;catalogLoaded=false;loadPools()}return}}familyShowTestStatus(d)};async function dropSlot(s){if(!confirm('将自动复测其余机场节点、替换全部受影响业务池，验证成功后才清空此机场。确定继续？'))return;try{showTestStatus(await api('/api/replace-clear',{method:'POST',body:JSON.stringify({slot:s})}))}catch(e){let status=document.querySelector('#testStatus');status.textContent=e.message;status.className='status bad'}}'''
-PAGE = PAGE.replace('</script></body></html>', _auto_replace_clear_js + '</script></body></html>', 1)
+_source_scope_js = r'''function sourceChoices(){return '<option value="">保持当前机场范围</option><option value="all">全部机场</option>'+sourceOptions.filter(function(s){return s.imported}).map(function(s){return '<option value="'+esc(s.slot)+'">'+esc(s.label)+'</option>'}).join('')}const familyRenderPools=renderPools;renderPools=function(){familyRenderPools();poolNames.forEach(function(pool){let select=document.querySelector('#source-'+pool),button=select&&select.nextElementSibling;if(select)select.value=sourceSelections[pool]||'';if(button)button.textContent='锁定机场范围'})};async function applySource(pool){let source=(document.querySelector('#source-'+pool)||{}).value||null;if(!confirm(source?'将锁定 '+pool+' 只从所选机场生成待测节点；当前出口不会改变。确定继续？':'将清除 '+pool+' 的机场限制，当前出口不会改变。确定继续？'))return;let status=document.querySelector('#testStatus');status.textContent='正在保存 '+pool+' 的机场筛选范围…';status.className='status';try{let result=await api('/api/pool-source-scope',{method:'POST',body:JSON.stringify({pool:pool,source:source})});sourceSelections=result.source_selections||sourceSelections;activePools=result.pools;pools=activePools;suggestion=null;catalogLoaded=true;renderPools();status.textContent=source?pool+' 已锁定机场范围；当前出口未改变，请执行“全量稳定性测速”':'已恢复 '+pool+' 的当前机场范围；当前出口未改变'}catch(error){status.textContent=error.message;status.className='status bad'}}'''
+PAGE = PAGE.replace('</script></body></html>', _auto_replace_clear_js + _source_scope_js + '</script></body></html>', 1)
 
 _probe_marker = "function options(pool){"
 _probe_js = r'''function stampProbe(value){if(!value)return '尚无记录';let d=new Date(value);return isNaN(d.getTime())?value:d.toLocaleString()}function renderProbeReport(data){probeData=data||{};clearTimeout(probePoll);let grid=document.querySelector('#probeGrid');if(!grid)return;let running=probeData.running||{};grid.innerHTML=poolNames.map(function(pool){let item=(probeData.pools||{})[pool]||{},busy=Boolean(running.running&&running.pool===pool),latest=item.tested_at?'最近专项复测：'+stampProbe(item.tested_at):'尚无专项复测',result=item.stable_count?'连续三次通过 '+item.stable_count+'/'+item.candidate_count+' 个候选 · 中位 '+item.median_delay+' ms · 最大抖动 '+item.max_jitter+' ms':(item.completed_count?'本次没有连续三次成功的节点':'等待业务专项复测'),error=running.error&&running.pool===pool?'<div class="status bad">复测失败：'+esc(running.error)+'</div>':'';return '<article class="card probe-card"><div class="card-head"><h3>'+esc(pool)+'</h3><span class="count">'+(item.candidate_count||0)+'/5</span></div><div class="probe-target">'+esc(item.protocol||'HTTPS')+' · '+esc(item.target||'')+'</div><div class="probe-meta">发起位置：'+esc(item.location||'Z4Pro 经 Mihomo')+'<br>'+esc(latest)+'</div><div class="probe-result">'+esc(result)+'</div>'+error+'<div class="probe-actions"><button class="btn" '+(busy?'disabled':'')+' onclick="probePool(\''+pool+'\')">'+(busy?'正在复测 '+running.completed+'/'+running.total:'复测此业务池')+'</button></div></article>'}).join('');if(running.running)probePoll=setTimeout(loadProbeReport,1000)}async function loadProbeReport(){try{renderProbeReport(await api('/api/probes'))}catch(e){let grid=document.querySelector('#probeGrid');if(grid)grid.innerHTML='<div class="status bad">业务探针报告读取失败：'+esc(e.message)+'</div>'}}async function probePool(pool){try{let active=activePools[pool]||[];renderProbeReport({pools:probeData.pools||{},running:{running:true,pool:pool,total:active.length,completed:0}});renderProbeReport({pools:probeData.pools||{},running:await api('/api/pool-probe',{method:'POST',body:JSON.stringify({pool:pool})})})}catch(e){let grid=document.querySelector('#probeGrid');if(grid)grid.insertAdjacentHTML('afterbegin','<div class="status bad">无法开始专项复测：'+esc(e.message)+'</div>')}}'''
@@ -1906,15 +2065,15 @@ _render_start = PAGE.find("function renderPools(){")
 _render_end = PAGE.find("function add(p){", _render_start)
 if _render_start < 0 or _render_end < 0:
     raise RuntimeError("candidate pool template marker missing")
-_pool_editor_js = r'''function poolModeLabel(mode){return ({select:'手动选择',fallback:'故障切换','url-test':'自动测速'})[mode]||'故障切换'}let editingPool=null,poolSaveInProgress=false;function setPoolEditorBusy(busy,message){let editor=document.querySelector('#poolEditor'),status=document.querySelector('#poolEditorStatus'),save=document.querySelector('#poolEditorSave');status.textContent=message||'';status.className='status'+(busy?'':'');save.disabled=busy;save.textContent=busy?'正在应用…':'保存并应用';editor.querySelectorAll('button[value="cancel"],select').forEach(function(control){control.disabled=busy})}function openPoolEditor(pool){if(poolSaveInProgress)return;editingPool=pool;document.querySelector('#poolEditorTitle').textContent='编辑 '+pool;document.querySelector('#poolMode').value=(poolSettings[pool]||{}).type||'fallback';setPoolEditorBusy(false,'');document.querySelector('#poolEditor').showModal()}async function savePoolMode(){if(!editingPool||poolSaveInProgress)return;let status=document.querySelector('#testStatus'),mode=document.querySelector('#poolMode').value,pool=editingPool,count=(pools[pool]||[]).length;poolSaveInProgress=true;setPoolEditorBusy(true,mode==='url-test'?'正在对 '+count+' 个候选连续测速 3 次，请勿重复点击…':'正在校验并应用设置，请勿重复点击…');try{status.textContent='正在校验、测速并应用 '+pool+' 的测速方式…';status.className='status';let next=Object.assign({},poolSettings);next[pool]={type:mode};let result=await api('/api/pool-settings',{method:'POST',body:JSON.stringify({settings:next})});poolSettings=result.settings;activePools=result.pools;pools=result.pools;document.querySelector('#poolEditor').close();status.textContent=pool+' 已切换为'+poolModeLabel(mode)+(result.reordered&&result.reordered.length?'；已按连续三次测速的稳定性、延迟和抖动重新排序':'')+'，配置校验和运行验证均通过';editingPool=null;renderPools();await loadStatus()}catch(e){status.textContent=e.message;status.className='status bad';setPoolEditorBusy(false,e.message)}finally{poolSaveInProgress=false;if(!document.querySelector('#poolEditor').open)setPoolEditorBusy(false,'')}}'''
-_render_pools_js = r'''function derivedExitCard(name,exit){let rows=(exit.nodes||[]).map(function(node){return '<div class="node"><div class="node-name">'+esc(node)+(metric(node)?'<span class="delay">'+metric(node)+'</span>':'')+'</div></div>'}).join('');return '<article class="card pool-card"><div class="card-head"><div class="pool-title"><h2>'+esc(exit.label||name)+'</h2><span class="mode-pill">派生只读</span></div><span class="count">'+(exit.nodes||[]).length+'/5</span></div><div class="muted" style="padding:0 14px 12px">'+esc(exit.description||'由业务候选池自动组成；不能单独编辑。')+'</div>'+rows+'</article>'}function renderPools(){let cards=poolNames.map(function(pool){let rows=pools[pool].map(function(name,i){return '<div class="node"><div class="node-name">'+esc(name)+(metric(name)?'<span class="delay">'+metric(name)+'</span>':'')+'</div><div class="node-tools"><button class="icon-btn" aria-label="上移" title="上移" onclick="move(\''+pool+'\','+i+',-1)">&#8593;</button><button class="icon-btn" aria-label="下移" title="下移" onclick="move(\''+pool+'\','+i+',1)">&#8595;</button><button class="icon-btn remove" aria-label="移除" title="移除" onclick="removeNode(\''+pool+'\','+i+')">&times;</button></div></div>'}).join('');let mode=(poolSettings[pool]||{}).type||'fallback';return '<article class="card pool-card"><div class="card-head"><div class="pool-title"><h2>'+esc(pool)+'</h2><span class="mode-pill">'+esc(poolModeLabel(mode))+'</span></div><div><span class="count">'+pools[pool].length+'/5</span><button class="icon-btn" aria-label="编辑" title="编辑" onclick="openPoolEditor(\''+pool+'\')">&#9998;</button></div></div><div class="add-node"><select id="sel-'+pool+'">'+options(pool)+'</select><button class="btn" onclick="add(\''+pool+'\')">加入</button></div>'+rows+'</article>'});Object.keys(derivedExits).forEach(function(name){cards.push(derivedExitCard(name,derivedExits[name]))});document.querySelector('#poolGrid').innerHTML=cards.join('')}'''
+_pool_editor_js = r'''function poolModeLabel(mode){return ({select:'手动选择',fallback:'故障切换','url-test':'自动测速'})[mode]||'故障切换'}function sourceChoices(){return '<option value="all">全部机场</option>'+sourceOptions.filter(function(s){return s.imported}).map(function(s){return '<option value="'+esc(s.slot)+'">'+esc(s.label)+'</option>'}).join('')}let editingPool=null,poolSaveInProgress=false;async function applySource(pool){let source=(document.querySelector('#source-'+pool)||{}).value||'all';if(!confirm('将用所选机场的相关节点替换 '+pool+' 当前候选，最多保留 5 个并立即应用。确定继续？'))return;let status=document.querySelector('#testStatus');status.textContent='正在按机场筛选并校验 '+pool+'…';status.className='status';try{let result=await api('/api/pool-source',{method:'POST',body:JSON.stringify({pool:pool,source:source})});activePools=result.pools;pools=result.pools;suggestion=null;catalogLoaded=true;renderPools();status.textContent=pool+' 已按所选机场更新并通过配置校验；已保留 '+result.selected_count+' 个候选节点'}catch(error){status.textContent=error.message;status.className='status bad'}}function setPoolEditorBusy(busy,message){let editor=document.querySelector('#poolEditor'),status=document.querySelector('#poolEditorStatus'),save=document.querySelector('#poolEditorSave');status.textContent=message||'';status.className='status'+(busy?'':'');save.disabled=busy;save.textContent=busy?'正在应用…':'保存并应用';editor.querySelectorAll('button[value="cancel"],select').forEach(function(control){control.disabled=busy})}function openPoolEditor(pool){if(poolSaveInProgress)return;editingPool=pool;document.querySelector('#poolEditorTitle').textContent='编辑 '+pool;document.querySelector('#poolMode').value=(poolSettings[pool]||{}).type||'fallback';setPoolEditorBusy(false,'');document.querySelector('#poolEditor').showModal()}async function savePoolMode(){if(!editingPool||poolSaveInProgress)return;let status=document.querySelector('#testStatus'),mode=document.querySelector('#poolMode').value,pool=editingPool,count=(pools[pool]||[]).length;poolSaveInProgress=true;setPoolEditorBusy(true,mode==='url-test'?'正在对 '+count+' 个候选连续测速 3 次，请勿重复点击…':'正在校验并应用设置，请勿重复点击…');try{status.textContent='正在校验、测速并应用 '+pool+' 的测速方式…';status.className='status';let next=Object.assign({},poolSettings);next[pool]={type:mode};let result=await api('/api/pool-settings',{method:'POST',body:JSON.stringify({settings:next})});poolSettings=result.settings;activePools=result.pools;pools=result.pools;document.querySelector('#poolEditor').close();status.textContent=pool+' 已切换为'+poolModeLabel(mode)+(result.reordered&&result.reordered.length?'；已按连续三次测速的稳定性、延迟和抖动重新排序':'')+'，配置校验和运行验证均通过';editingPool=null;renderPools();await loadStatus()}catch(e){status.textContent=e.message;status.className='status bad';setPoolEditorBusy(false,e.message)}finally{poolSaveInProgress=false;if(!document.querySelector('#poolEditor').open)setPoolEditorBusy(false,'')}}'''
+_render_pools_js = r'''function derivedExitCard(name,exit){let rows=(exit.nodes||[]).map(function(node){return '<div class="node"><div class="node-name">'+esc(node)+(metric(node)?'<span class="delay">'+metric(node)+'</span>':'')+'</div></div>'}).join('');return '<article class="card pool-card"><div class="card-head"><div class="pool-title"><h2>'+esc(exit.label||name)+'</h2><span class="mode-pill">派生只读</span></div><span class="count">'+(exit.nodes||[]).length+'/5</span></div><div class="muted" style="padding:0 14px 12px">'+esc(exit.description||'由业务候选池自动组成；不能单独编辑。')+'</div>'+rows+'</article>'}function renderPools(){let cards=poolNames.map(function(pool){let rows=pools[pool].map(function(name,i){return '<div class="node"><div class="node-name">'+esc(name)+(metric(name)?'<span class="delay">'+metric(name)+'</span>':'')+'</div><div class="node-tools"><button class="icon-btn" aria-label="上移" title="上移" onclick="move(\''+pool+'\','+i+',-1)">&#8593;</button><button class="icon-btn" aria-label="下移" title="下移" onclick="move(\''+pool+'\','+i+',1)">&#8595;</button><button class="icon-btn remove" aria-label="移除" title="移除" onclick="removeNode(\''+pool+'\','+i+')">&times;</button></div></div>'}).join('');let mode=(poolSettings[pool]||{}).type||'fallback';return '<article class="card pool-card"><div class="card-head"><div class="pool-title"><h2>'+esc(pool)+'</h2><span class="mode-pill">'+esc(poolModeLabel(mode))+'</span></div><div><span class="count">'+pools[pool].length+'/5</span><button class="icon-btn" aria-label="编辑" title="编辑" onclick="openPoolEditor(\''+pool+'\')">&#9998;</button></div></div><div class="pool-source"><select id="source-'+pool+'">'+sourceChoices()+'</select><button class="btn" onclick="applySource(\''+pool+'\')">按机场填充</button></div><div class="add-node"><select id="sel-'+pool+'">'+options(pool)+'</select><button class="btn" onclick="add(\''+pool+'\')">加入</button></div>'+rows+'</article>'});Object.keys(derivedExits).forEach(function(name){cards.push(derivedExitCard(name,derivedExits[name]))});document.querySelector('#poolGrid').innerHTML=cards.join('')}'''
 PAGE = PAGE[:_render_start] + _pool_editor_js + _render_pools_js + PAGE[_render_end:]
 PAGE = PAGE.replace("grid.innerHTML=poolNames.map(function(pool){", "grid.innerHTML=poolNames.concat(['GitHub-Auto']).map(function(pool){")
 PAGE = PAGE.replace("<h3>'+esc(pool)+'</h3>", "<h3>'+esc(pool==='GitHub-Auto'?'GitHub 专用自动出口':pool)+'</h3>")
 PAGE = PAGE.replace("let active=activePools[pool]||[];renderProbeReport", "let active=pool==='GitHub-Auto'?((derivedExits[pool]||{}).nodes||[]):(activePools[pool]||[]);renderProbeReport")
-PAGE = PAGE.replace("let all=[],pools={},activePools={},suggestion=null,delays={}", "let all=[],pools={},activePools={},derivedExits={},poolSettings={},suggestion=null,delays={}")
+PAGE = PAGE.replace("let all=[],pools={},activePools={},sourceOptions=[],suggestion=null,delays={}", "let all=[],pools={},activePools={},sourceOptions=[],sourceSelections={},derivedExits={},poolSettings={},suggestion=null,delays={}")
 PAGE = PAGE.replace("pools=d.pools;if(d.tests", "pools=d.pools;poolSettings=d.settings||poolSettings;if(d.tests")
-PAGE = PAGE.replace("all=d.nodes;activePools=d.pools;suggestion=", "all=d.nodes;activePools=d.pools;derivedExits=d.derived_exits||{};poolSettings=d.settings||{};suggestion=")
+PAGE = PAGE.replace("all=d.nodes;activePools=d.pools;sourceOptions=d.slots||sourceOptions;suggestion=", "all=d.nodes;activePools=d.pools;sourceOptions=d.slots||sourceOptions;sourceSelections=d.source_selections||sourceSelections;derivedExits=d.derived_exits||{};poolSettings=d.settings||{};suggestion=")
 PAGE = PAGE.replace(
     "async function rollback(){try{pools=await api('/api/rollback',{method:'POST',body:'{}'});document.querySelector('#testStatus').textContent='已验证并恢复上一版候选池';renderPools()}catch(e){alert(e.message)}}",
     "async function rollback(){try{await api('/api/rollback',{method:'POST',body:'{}'});document.querySelector('#testStatus').textContent='已验证并恢复上一版候选池';catalogLoaded=false;await loadPools()}catch(e){alert(e.message)}}",
@@ -1965,10 +2124,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             tests = read_json(LAST_TESTS, {})
             self.reply(200, {"slots": [slot_state(s) for s in source_slots()], "pools": pools(),
+                             "source_selections": source_selections(),
                              "settings": pool_settings(), "derived_exits": derived_exits(), "tests": {"tested_at": tests.get("tested_at")},
                              "suggestions": suggestions()})
         elif path == "/api/nodes":
             self.reply(200, {"slots": [slot_state(s) for s in source_slots()], "nodes": nodes(), "pools": pools(),
+                             "source_selections": source_selections(),
                              "settings": pool_settings(), "derived_exits": derived_exits(), "tests": read_json(LAST_TESTS, {}),
                              "suggestions": suggestions()})
         elif path == "/api/test-status":
@@ -2000,6 +2161,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/sources": result = add_source()
             elif path == "/api/source-remove": result = delete_source(body["slot"])
             elif path == "/api/pools": result = save_pools(body.get("pools", {}))
+            elif path == "/api/pool-source-scope": result = set_source_selection(body["pool"], body.get("source"))
             elif path == "/api/pool-settings": result = save_pool_settings(body.get("settings", {}))
             elif path == "/api/retest-apply": result = start_retest_apply(body.get("pools", {}))
             elif path == "/api/rollback": result = rollback_pools()

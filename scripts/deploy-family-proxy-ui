@@ -10,6 +10,7 @@ BACKUP_ROOT=/var/backups/family-proxy
 [[ -r $CONFIG ]] || { echo "missing $CONFIG" >&2; exit 1; }
 [[ -f $SOURCE_DIR/runtime/family-proxy-ui.py ]] || { echo "missing UI source" >&2; exit 1; }
 [[ -f $SOURCE_DIR/runtime/family-proxy-gateway.py ]] || { echo "missing gateway source" >&2; exit 1; }
+[[ -f $SOURCE_DIR/runtime/family-mihomo-sub-import.py ]] || { echo "missing candidate-pool source" >&2; exit 1; }
 [[ -f $SOURCE_DIR/runtime/rules.html ]] || { echo "missing legacy rules page" >&2; exit 1; }
 [[ -x $SOURCE_DIR/scripts/render-runtime.py ]] || { echo "missing renderer" >&2; exit 1; }
 [[ -f $SOURCE_DIR/frontend/dist/index.html ]] || { echo "missing frontend build: run (cd frontend && npm install && npm run build)" >&2; exit 1; }
@@ -37,13 +38,14 @@ for helper in apply-family-proxy-mode family-mihomo-tproxy-auto refresh-family-c
 done
 
 python3 "$SOURCE_DIR/scripts/render-runtime.py" "$CONFIG" "$SOURCE_DIR/runtime" "$stage_dir"
-python3 -m py_compile "$stage_dir/family-proxy-ui.py" "$stage_dir/family-proxy-gateway.py"
+python3 -m py_compile "$stage_dir/family-proxy-ui.py" "$stage_dir/family-proxy-gateway.py" "$stage_dir/family-mihomo-sub-import.py"
 grep -q 'HEALTH_PORT = 18088' "$stage_dir/family-proxy-gateway.py" || { echo "gateway health port is not 18088" >&2; exit 1; }
 grep -q 'HEALTH_BACKEND_PATH = "/api/health/gated"' "$stage_dir/family-proxy-gateway.py" || { echo "gateway is not using gated health" >&2; exit 1; }
 version=$(< "$SOURCE_DIR/VERSION")
 source_id=$(printf '%s\n' \
     "$(sha256sum "$stage_dir/family-proxy-ui.py" | awk '{print $1}')" \
     "$(sha256sum "$stage_dir/family-proxy-gateway.py" | awk '{print $1}')" \
+    "$(sha256sum "$stage_dir/family-mihomo-sub-import.py" | awk '{print $1}')" \
     "$(sha256sum "$SOURCE_DIR/VERSION" | awk '{print $1}')" \
     "$(sha256sum "$SOURCE_DIR/runtime/rules.html" | awk '{print $1}')" \
     "$(sha256sum "$SOURCE_DIR/frontend/dist/index.html" | awk '{print $1}')" \
@@ -53,6 +55,7 @@ install -m 644 "$stage_dir/build-info.json" "$TARGET_DIR/build-info.json"
 install -m 644 "$SOURCE_DIR/VERSION" "$TARGET_DIR/VERSION"
 install -m 755 "$stage_dir/family-proxy-ui.py" "$TARGET_DIR/family-proxy-ui.py"
 install -m 755 "$stage_dir/family-proxy-gateway.py" "$TARGET_DIR/family-proxy-gateway.py"
+install -m 755 "$stage_dir/family-mihomo-sub-import.py" "$TARGET_DIR/family-mihomo-sub-import.py"
 install -m 644 "$SOURCE_DIR/runtime/rules.html" "$TARGET_DIR/rules.html"
 install -d -m 755 "$TARGET_DIR/frontend"
 cp -a "$SOURCE_DIR/frontend/dist/." "$TARGET_DIR/frontend/"
@@ -66,8 +69,8 @@ install -m 755 "$SOURCE_DIR/scripts/refresh-mihomo-geodata.py" /usr/local/sbin/r
 install -m 755 "$SOURCE_DIR/scripts/family-mihomo-upgrade" /usr/local/sbin/family-mihomo-upgrade
 install -m 755 "$SOURCE_DIR/scripts/homekit-direct-routes" /usr/local/sbin/homekit-direct-routes
 
-systemctl restart family-proxy-ui.service family-proxy-gateway.service
-systemctl is-active --quiet family-proxy-ui.service family-proxy-gateway.service
+systemctl restart family-proxy-ui.service family-mihomo-sub-import.service family-proxy-gateway.service
+systemctl is-active --quiet family-proxy-ui.service family-mihomo-sub-import.service family-proxy-gateway.service
 
 proxy_ip=$(awk -F= '$1 == "FAMILY_PROXY_IP" { print $2; exit }' "$CONFIG")
 for port in 18087 18088; do

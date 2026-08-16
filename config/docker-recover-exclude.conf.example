@@ -1,0 +1,4 @@
+# Containers intentionally stopped by the user.
+# Add one exact container name per line. Lines beginning with # are ignored.
+# A manual docker stop is not durable for containers with the always policy;
+# keep such containers on unless-stopped when they must remain off.
