@@ -830,3 +830,18 @@ RouterOS 变更要求：
   3. `scripts/family-mihomo-tproxy-auto`：postrouting SNAT `oifname kvmbr0` 改读 `FAMILY_CAPTURE_INTERFACE`（Z4Pro 值仍为 `kvmbr0`，行为不变）。
   4. `runtime/mosdns/updater.py`：`crane_command` NO_PROXY 硬编码改读 `FAMILY_MOSDNS_LAN_CIDR`（默认不变）。
 - 验证：60 项测试、`py_compile`、`bash -n` 通过。合并后 PR #87 关闭。
+
+## 26. 2026-08-16 部署 PR #88+#89 与过程发现
+
+### 已部署（Z4Pro）
+
+- PR #88（MosDNS 修复）+ PR #89（审计有效项）已部署：`install-server.sh --start`（备份 `/var/backups/family-proxy/20260816-163042`）＋ updater 重部署（备份 `mosdns-updater-20260816-162927.py`）。
+- 部署版确认：sub-import 含异常日志、tproxy-auto 含 `FAMILY_CAPTURE_INTERFACE`、updater 含 `LAN_CIDR`。
+- 全量验证：5 服务 active、DNS 国内/国外正常、Netwatch up、共享 mangle/nat/filter 规则全部启用、TPROXY 计数恢复增长、updater `up_to_date`。
+
+### 过程发现与处理
+
+1. **`sync-z4pro-source` 漏同步 sub-import 与 tproxy-auto**：rsync 本应覆盖 `runtime/`、`scripts/`，但这两文件未更新（可能首轮连接中断残留）。已手动 `install` 补到部署源，再重跑 install-server。**建议后续把 `runtime/family-mihomo-sub-import.py` 与 `scripts/family-mihomo-tproxy-auto` 加入 sync 脚本 key_files 校验。**
+2. **router.env 缺 `FAMILY_CAPTURE_INTERFACE`**：新 tproxy-auto 脚本读取该键（校验缺失即退出），生产 router.env 原本没有。已补 `FAMILY_CAPTURE_INTERFACE=kvmbr0`（备份 `router.env-20260816-163345`），TPROXY 同步恢复。**换主机/接口时该键需随之调整。**
+3. **服务重启导致 Netwatch 短暂 down**（16:30:45→16:31:45）：共享规则被 down-script 禁用后由 up-script 恢复；实测 mangle/nat/filter 全部重新启用，属预期瞬断，不扩大为故障。升级/部署后应复查 Netwatch 与共享规则启用状态。
+4. RouterOS codexops 只读，无法用普通入口启用规则；`where ... and disabled=no` 组合查询在该入口下结果不可靠（返回误报 0），应改用 `print stats detail where comment~` 格式核对。
