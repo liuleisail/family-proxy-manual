@@ -1,0 +1,4 @@
+services:
+  mosdns-t:
+    environment:
+      MOSDNS_AUTO_INIT: "false"

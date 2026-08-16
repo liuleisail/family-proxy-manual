@@ -55,6 +55,10 @@ install -d -m 700 "$backup" /opt/family-mosdns-updater
 [[ -f /etc/systemd/system/family-mosdns-updater.service ]] && cp -a /etc/systemd/system/family-mosdns-updater.service "$backup/"
 cp -a "$COMPOSE_DIR/web/index.html" "$backup/dashboard.html"
 cp -a "$COMPOSE_DIR/data/webinfo/upstream_overrides.json" "$backup/upstream_overrides.json"
+[[ -f "$COMPOSE_DIR/compose.override.yml" ]] && cp -a "$COMPOSE_DIR/compose.override.yml" "$backup/"
+
+install -m 0644 "$REPO_DIR/deploy/mosdns-compose.override.yml" "$COMPOSE_DIR/compose.override.yml"
+docker compose -f "$COMPOSE_DIR/compose.yml" -f "$COMPOSE_DIR/compose.override.yml" config -q
 
 install -m 0755 "$REPO_DIR/runtime/mosdns/updater.py" /opt/family-mosdns-updater/app.py
 install -m 0644 "$REPO_DIR/runtime/mosdns/dashboard.html" "$COMPOSE_DIR/web/index.html"

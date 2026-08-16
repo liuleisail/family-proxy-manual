@@ -152,6 +152,18 @@ class MaintenanceReleaseInfoTests(unittest.TestCase):
         self.assertEqual(result["release_version"], "")
         self.assertNotIn("IrineSistiana", result["release_url"])
 
+    def test_mosdns_status_exposes_last_failure_for_maintenance_page(self):
+        payload = {
+            "phase": "available",
+            "update_available": True,
+            "last_failure": {"phase": "rolled_back", "message": "镜像拉取失败"},
+        }
+
+        with patch.object(family_proxy_ui.Path, "read_text", return_value=json.dumps(payload)):
+            result = family_proxy_ui.mosdns_component_update_status()
+
+        self.assertEqual(result["last_failure"]["message"], "镜像拉取失败")
+
     def test_platform_status_cleans_legacy_mosdns_release_metadata(self):
         payload = {
             "checked_at": 123,

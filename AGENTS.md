@@ -726,3 +726,96 @@ RouterOS 变更要求：
 - 后续 MosDNS 升级应走页面「升级并应用」（旧版页「升级并验证」），按钮会显示进度与失败原因；`last_failure` 保留在 status。
 - 若未来镜像需要更高配置 schema 且自动迁移被禁用，需人工按 config_up 包处理配置迁移（当前 v0.7.3 的 schema-4 配置已就位）。
 - PR #88 合并到 main 前，以该分支为准；合并时注意 AGENTS.md 与 main 第 19 节/PR 内第 20-22 节的关系。
+
+## 21. 2026-08-15 接管补充：v0.11.13 APNs/TG 与网关发布证据
+
+本节同步自 `/Users/liulei/Documents/ChatGPT/deep项目/AGENTS.md` 第 12 节，是历史交接记录；处理线上问题前仍须重新采集实时状态，不能把本节数值当作当前状态。
+
+### 关键判断
+
+- 这次局域网 Telegram 后台推送问题不是 RouterOS 丢包；旧规则把整个 `17.0.0.0/8` 强制走 `DIRECT`，绕过了 Mihomo，因此 `Apple_APNs.list` 虽然存在，但运行时规则命中为 `0`。
+- APNs 来源实际是 `behavior=classical`、`format=text`，不能按 MRS 处理；运行时出口应为 `Proxy-Auto`。`TG-Auto` 用户流量和 `TG-Notify` 系统通知流量必须保持独立。
+- 登录后又回到健康 JSON 的原因是网关先按 RouterOS 来源返回健康探针。当前行为应为：只有“RouterOS 来源且无有效会话”返回健康 JSON；带有效登录会话时返回管理 UI HTML。
+
+### 已验证状态
+
+- RouterOS APNs direct rule count 为 `0`；`family_apple_direct` 中 `17.0.0.0/8` 条目为 `0`；`192.168.2.189` 仍在 `family_mihomo_devices`。
+- Mihomo 中 `.189` 的 APNs `5223` 连接命中 Apple APNs RuleSet 和 `Proxy-Auto`；Telegram DC 用户流量仍命中 `TG-Auto`。在没有真实后台新消息测试前，不得声称用户已经看到 Telegram 弹窗。
+- Z4Pro 当时的 v0.11.13 build 为 `b8119c69c330`；部署备份为 `/var/backups/family-proxy/20260815-122338`，APNs 变更前备份为 `/var/backups/family-proxy/20260815-0324-telegram-apns/`；RouterOS 二进制备份为 `family-proxy-prechange-20260815-0324.backup`。RouterOS 文本导出因权限不足失败，不能宣称存在完整文本导出。
+- `scripts/verify-release.sh`、`55 tests OK`、`vue-tsc` 和 Vite production build 已通过；这些是代码/发布验证，不替代真实 iPhone 后台通知验证。
+
+### GitHub、入口与回滚
+
+- 发布提交为 `eb421b6`，网关会话修复提交为 `51e8a6e`；`main` 和 `v0.11.13` 标签已推送，Release 为 `https://github.com/liuleisail/family-proxy-manual/releases/tag/v0.11.13`。
+- 当前统一管理入口是 `http://192.168.2.156:18088/`；`18087` 仅是历史端口，不能恢复到健康探针配置。
+- 回滚优先使用本次 Z4Pro 部署备份、APNs 变更前规则备份和 RouterOS 二进制备份；代码回滚需比较 `v0.11.12` 与 `v0.11.13` 的差异，不得直接覆盖工作区或重新导入包含整段 `17/8` APNs 直连的旧模板。
+
+## 22. 2026-08-15 MosDNS 核心独立更新边界
+
+- MosDNS 核心可以独立更新，不需要同步更新 Family Proxy 控制面、RouterOS 或 Mihomo；统一管理页面部署和 MosDNS 核心更新是两条不同流程。
+- 当前运行的是第三方 `jasonxtt/mosdns-t:latest`，更新依据是第三方镜像 digest，不得拿官方 `IrineSistiana/mosdns` 的 5.x 版本作比较。当前页面只支持检查/更新第三方 `latest`，不支持选择任意历史版本，也不支持直接切换官方 MosDNS。
+- 独立更新入口为 MosDNS 管理页的更新操作，对应 `/dns/maintenance-api/update`。更新器会先备份 Compose、配置、规则和管理数据，再拉取镜像；只有 `mosdns-t` 使用 `docker compose up -d --no-deps --force-recreate` 重建。
+- 更新后必须验证容器运行状态、MosDNS 健康 API、国内/国外 DNS 解析和受影响客户端路径。失败时使用旧镜像回滚标签和本次配置备份恢复；不能以管理服务 active 代替核心更新成功。
+- 上一轮部署只修正了第三方更新源和旧官方版本元数据，没有执行 MosDNS 核心升级；核心版本/镜像 digest 仍须每次线上任务前重新读取。
+
+## 23. 2026-08-16 MosDNS 升级失败根因与修复（分支 agent/fix-mosdns-upgrade）
+
+### 故障现象
+
+- MosDNS 检测到第三方 `jasonxtt/mosdns-t:latest` 更新（v0.7.3，digest `26d792…`），页面点「升级并验证」失败并自动回退；当前容器健康运行旧 digest `3ac037…`（v0.7.1-20260719-ca220de）。
+- 失败细节曾被后续自动检查覆盖，`set_status` 没有保留 `last_failure`。
+
+### 根因（已确认）
+
+- 不是 v0.7.3 配置 schema 不兼容（该版本 schema 仍为 4，不需要换配置包）。
+- 是**镜像拉取阶段在现有代理下超过 updater 的 600 秒超时**：12:29 开始备份，约 10 分钟后进入回退；容器重建时间与回退对应。
+- 次要问题：DNS 健康验证只走 UDP（无 TCP 退避）；页面轮询上限 360 秒（180×2s）不足以覆盖慢速拉取。
+
+### 修复内容（本次 PR）
+
+- `runtime/mosdns/updater.py`：
+  - 镜像拉取超时 600s → `IMAGE_PULL_TIMEOUT`（默认 1800s，可经 `FAMILY_MOSDNS_IMAGE_PULL_TIMEOUT` 覆盖），并增加 `IMAGE_PULL_ATTEMPTS`（默认 2 次，间隔 8s）。
+  - `set_status` 在 `rolled_back`/`error` 时保留 `last_failure`，在 `updated`/`up_to_date` 时清除。
+  - 新增 `dns_probe()`：DNS 验证先 UDP，失败后用 `+tcp` 退避重试；`wait_healthy` 默认 90→180s。
+- `runtime/family-proxy-ui.py`（旧版维护页内嵌 JS）：MosDNS 卡片显示 `last_failure`；轮询上限 180→900 次（覆盖 30 分钟）。
+- `frontend/src/App.vue`（新版控制台，本模型补齐）：`applyMosdns` 增加轮询（每 5s，最长 35 分钟），等待 `updating/rolling_back` 结束并提示结果（成功/回退原因）；MosDNS 行显示 `last_failure`；按钮加 busy 禁用与「升级验证中…」状态。
+- `tests/test_mosdns_updater.py`：新增镜像拉取重试与 `last_failure` 保留测试。
+
+### 验证
+
+- 57 项 Python 回归通过；前端 `vue-tsc` + `vite build` 通过；新 dist `index-ZEya2yRb.js`/`index-DVmGmsAE.css` 与 v0.11.13 提交 dist 的差异仅为未使用的 Tailwind 工具类，无应用样式丢失。
+- 部署（Z4Pro）后：先确认 MosDNS 服务与 DNS 正常；**不要立即重试真实升级**，等确认拉取链路（代理下载速度）正常后再由用户发起一次受控升级验证。
+
+### 交接注意
+
+- 若再次升级失败：读 `/opt/family-mosdns-updater` 的 `status.json`（现在会保留 `last_failure`）、`journalctl -u family-mosdns-updater`、Docker 事件与拉取进度；先看是否仍是代理下载阻塞，再决定是否提高 `FAMILY_MOSDNS_IMAGE_PULL_TIMEOUT`。
+
+## 24. 2026-08-16 MosDNS-T 升级最终修复与线上结果
+
+### 升级按钮双击叠加 confirm 修复（PR #88 commit `2c5079c`）
+
+- 现象：点「升级并验证」弹确认框后，点「好/取消」看似无反应、页面像卡死。
+- 根因：原生 `confirm()` 阻塞主线程，双击的第二次点击被浏览器排队，在确认框关闭后再次触发 `confirm()`，形成叠加弹窗；升级按钮在确认前未禁用。
+- 修复：旧版维护页与新版控制台的升级按钮在弹确认框前先禁用（新版同时设 `busy`），取消则恢复；防止重复触发升级与弹窗叠加。
+- 已部署 build `9d66a91c327d`（备份 `/var/backups/family-proxy/20260816-134938`），verify 通过。
+
+### 现场时间线与根因
+
+- 12:39 左右曾发生一次旧版 `mosdns-t` 容器重建，Docker 记录显示旧容器停止后约秒级恢复；这是 MosDNS 核心短窗口，不能扩大解释为持续全网旁路断连。当前 RouterOS 健康探针仍为 `up`，DNS 国内/国外方向可用。
+- 首次升级失败的直接原因是 `crane` 经本机 7890 代理下载镜像超过原 600 秒超时。Docker daemon 已配置镜像源，同一候选镜像通过 daemon 约 22 秒完成拉取，因此更新器改为 daemon 优先、`crane` 兜底。
+- 候选 v0.7.3 的生产验证又暴露镜像启动时自动拉取 `config_up.zip` 的配置漂移：网络超时后 `process_ot.yaml` 与 `special_groups.yaml` 不一致，日志出现缺少 `sequence_special_ot` 的 FATAL。该行为与 Family Proxy 自己管理持久化配置冲突。
+- 进一步根因：`config_up.zip` 托管在 `raw.githubusercontent.com`，该域名在本网络经机场节点 CONNECT 隧道整体不可达（github.com/raw/objects 全部快速 000），镜像启动时的 schema 3→4 自动迁移因下载超时而失败。
+
+### 最终修复
+
+- `runtime/mosdns/updater.py`：Docker daemon 镜像源优先、代理 `crane` 兜底；镜像拉取重试；`last_failure` 持久化；健康检查支持 UDP/TCP DNS 退避并延长等待；定时任务只自动检查，不再发现更新后自动重建核心。
+- `deploy/mosdns-compose.override.yml`：将 `MOSDNS_AUTO_INIT=false` 固定在 MosDNS 管理 Compose override，防止第三方镜像启动时远程改写持久化配置。安装器会先备份现有 override 再部署；同步脚本显式校验该文件。
+- `runtime/family-proxy-ui.py`：维护 API 透传 `last_failure`，页面显示上次失败原因，轮询窗口覆盖慢速拉取和回退。
+
+### 2026-08-16 最终线上结果
+
+- Z4Pro 管理部署备份：`/var/backups/family-proxy/20260816-160028/mosdns-management`；本次核心升级配置备份：`.../family-mosdns-t/backup/software-update-20260816-160059.tar.gz`。
+- `mosdns-t` 当前 digest `sha256:26d792…`，核心版本 `v0.7.3-20260814-e394297`，容器 `running` 且 `restart=0`；健康 API `ready=true`、schema 4。
+- 页面同源更新接口返回 `updated`；随后只读检查返回 `up_to_date`，容器启动时间未改变，证明自动检测不再触发自动升级。
+- `www.baidu.com`、`www.google.com` 的 UDP 与 TCP DNS 探针均通过；RouterOS、Mihomo、DHCP DNS、旁路规则和当前上游配置未修改。
+- 本地回归为 `60 tests OK`，Python/Bash 语法检查和 `git diff --check` 通过。

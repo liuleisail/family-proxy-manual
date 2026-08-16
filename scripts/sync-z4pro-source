@@ -28,6 +28,7 @@ key_files=(
     runtime/rules.html
     runtime/mosdns/updater.py
     runtime/mosdns/dashboard.html
+    deploy/mosdns-compose.override.yml
     routeros/04-health-netwatch.rsc
     tests/test_first_run_setup.py
     tests/test_mihomo_bootstrap.py

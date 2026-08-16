@@ -55,6 +55,9 @@ DEFAULT_CONFIG = {
 CORE_API = os.environ.get("FAMILY_MOSDNS_CORE_API", "http://172.31.53.2:9099").rstrip("/")
 DNS_SERVER = os.environ.get("FAMILY_MOSDNS_DNS_SERVER", "127.0.0.1")
 DEFAULT_SOCKS5 = os.environ.get("FAMILY_MOSDNS_SOCKS5", "172.31.53.1:7890")
+IMAGE_PULL_TIMEOUT = max(300, int(os.environ.get("FAMILY_MOSDNS_IMAGE_PULL_TIMEOUT", "1800")))
+DOCKER_PULL_TIMEOUT = max(120, int(os.environ.get("FAMILY_MOSDNS_DOCKER_PULL_TIMEOUT", "600")))
+IMAGE_PULL_ATTEMPTS = max(1, int(os.environ.get("FAMILY_MOSDNS_IMAGE_PULL_ATTEMPTS", "2")))
 ADBLOCK_RULES_HOST = os.environ.get("FAMILY_MOSDNS_RULES_HOST", DEFAULT_SOCKS5.rsplit(":", 1)[0])
 ADBLOCK_RULES_PORT = int(os.environ.get("FAMILY_MOSDNS_RULES_PORT", "18103"))
 RULE_SOURCES = {
@@ -199,7 +202,17 @@ def adblock_status_file():
 
 def set_status(phase, message, **extra):
     value = status()
-    value.update({"phase": phase, "message": message, "updated_at": now_iso(), **extra})
+    updated_at = now_iso()
+    value.update({"phase": phase, "message": message, "updated_at": updated_at, **extra})
+    if phase in ("rolled_back", "error"):
+        value["last_failure"] = {
+            "phase": phase,
+            "message": message,
+            "updated_at": updated_at,
+            "backup": value.get("backup", ""),
+        }
+    elif phase in ("updated", "up_to_date"):
+        value.pop("last_failure", None)
     atomic_json(STATUS_PATH, value)
     return value
 
@@ -347,13 +360,38 @@ def download_latest_image():
     backup_dir = COMPOSE_DIR / "backup"
     backup_dir.mkdir(parents=True, exist_ok=True)
     archive = backup_dir / ".mosdns-image-download.tar"
-    try:
-        archive.unlink(missing_ok=True)
-        crane_command(["pull", IMAGE, str(archive), "--platform=linux/amd64", "--format=legacy"], timeout=600)
-        command(["docker", "load", "--input", str(archive)], timeout=300)
-    finally:
-        archive.unlink(missing_ok=True)
-    return command(["docker", "image", "inspect", IMAGE, "--format", "{{.Id}}"], timeout=10)
+    failures = []
+
+    # Docker daemon mirrors are more reliable here than streaming a legacy tar
+    # through the local proxy. Keep crane as a fallback for installations
+    # without a working daemon mirror.
+    for attempt in range(1, IMAGE_PULL_ATTEMPTS + 1):
+        try:
+            command(["docker", "pull", "--platform=linux/amd64", IMAGE], timeout=DOCKER_PULL_TIMEOUT)
+            return command(["docker", "image", "inspect", IMAGE, "--format", "{{.Id}}"], timeout=10)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            failures.append(f"Docker daemon 第 {attempt} 次：{exc}")
+            if attempt < IMAGE_PULL_ATTEMPTS:
+                time.sleep(8)
+
+    for attempt in range(1, IMAGE_PULL_ATTEMPTS + 1):
+        try:
+            archive.unlink(missing_ok=True)
+            crane_command(
+                ["pull", IMAGE, str(archive), "--platform=linux/amd64", "--format=legacy"],
+                timeout=IMAGE_PULL_TIMEOUT,
+            )
+            command(["docker", "load", "--input", str(archive)], timeout=300)
+            return command(["docker", "image", "inspect", IMAGE, "--format", "{{.Id}}"], timeout=10)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            failures.append(f"crane 第 {attempt} 次：{exc}")
+            if attempt < IMAGE_PULL_ATTEMPTS:
+                time.sleep(8)
+        finally:
+            archive.unlink(missing_ok=True)
+    raise RuntimeError(
+        f"MosDNS-T 镜像拉取失败（Docker daemon {IMAGE_PULL_ATTEMPTS} 次，crane {IMAGE_PULL_ATTEMPTS} 次）：{failures[-1]}"
+    )
 
 
 def backup_config():
@@ -361,7 +399,7 @@ def backup_config():
     backup_dir.mkdir(parents=True, exist_ok=True)
     target = backup_dir / f"software-update-{datetime.now().strftime('%Y%m%d-%H%M%S')}.tar.gz"
     candidates = [
-        "compose.yml", "nginx/default.conf", "web/index.html", "auth",
+        "compose.yml", "compose.override.yml", "nginx/default.conf", "web/index.html", "auth",
         "data/config_custom.yaml", "data/sub_config", "data/rule", "data/srs", "data/webinfo",
     ]
     with tarfile.open(target, "w:gz") as archive:
@@ -372,7 +410,23 @@ def backup_config():
     return str(target)
 
 
-def wait_healthy(timeout=90):
+def dns_probe(domain, dns_server):
+    failure = "无响应"
+    for extra in ([], ["+tcp"]):
+        try:
+            answer = command(
+                ["dig", "+tries=2", "+time=3", "+short", *extra, f"@{dns_server}", domain, "A"],
+                timeout=12,
+            )
+            if answer:
+                return answer
+            failure = "没有返回 IPv4 地址"
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            failure = str(exc)
+    raise RuntimeError(f"{domain} DNS 验证失败：{failure}")
+
+
+def wait_healthy(timeout=180):
     deadline = time.time() + timeout
     last_error = "MosDNS 尚未就绪"
     while time.time() < deadline:
@@ -383,9 +437,7 @@ def wait_healthy(timeout=90):
                 if not json.load(response).get("ready"):
                     raise RuntimeError("API 尚未就绪")
             for domain in ("www.baidu.com", "www.google.com"):
-                answer = command(["dig", "+tries=1", "+time=3", "+short", f"@{DNS_SERVER}", domain, "A"], timeout=6)
-                if not answer:
-                    raise RuntimeError(f"{domain} 没有返回 IPv4 地址")
+                dns_probe(domain, DNS_SERVER)
             return
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
             last_error = str(exc)
@@ -1252,7 +1304,7 @@ def do_update():
                     set_status("rolling_back", f"更新验证失败，正在恢复旧镜像：{failure}", backup=backup)
                     command(["docker", "image", "tag", old_image, IMAGE], timeout=15)
                     command(["docker", "compose", "up", "-d", "--no-deps", "--force-recreate", "mosdns-t"], timeout=180)
-                    wait_healthy(60)
+                    wait_healthy(90)
                     set_status("rolled_back", f"新版本验证失败，已恢复旧版本：{failure}", update_available=True, current_image=old_image, current_version=core_version(), backup=backup, completed_at=now_iso())
                     return
                 except Exception as rollback_exc:
@@ -1287,6 +1339,16 @@ def worker_busy():
         return worker_active
 
 
+def auto_check_task():
+    """Run the scheduled check without changing the running core."""
+    do_check()
+    current = status()
+    if current.get("phase") == "error":
+        retry = config()
+        retry["last_auto_check"] = int(time.time() - retry["interval_hours"] * 3600 + 6 * 3600)
+        save_config(retry)
+
+
 def scheduler():
     while True:
         time.sleep(300)
@@ -1305,18 +1367,7 @@ def scheduler():
         if value["auto_enabled"] and now - value["last_auto_check"] >= value["interval_hours"] * 3600:
             value["last_auto_check"] = int(now)
             save_config(value)
-
-            def auto_task():
-                do_check()
-                current = status()
-                if current.get("phase") == "error":
-                    retry = config()
-                    retry["last_auto_check"] = int(time.time() - retry["interval_hours"] * 3600 + 6 * 3600)
-                    save_config(retry)
-                elif current.get("update_available"):
-                    do_update()
-
-            start_worker(auto_task)
+            start_worker(auto_check_task)
 
 
 class Handler(BaseHTTPRequestHandler):
