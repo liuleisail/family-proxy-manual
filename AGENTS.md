@@ -698,3 +698,11 @@ RouterOS 变更要求：
 
 - 用户确认代理拉取链路正常后，发起一次受控 MosDNS 升级验证（页面应显示进度与结果；失败会保留 `last_failure` 原因）。成功后再合并 PR #88 与 #87。
 - 若再次失败：读 `/opt/family-mosdns-updater` 的 status.json（`last_failure`）、`journalctl -u family-mosdns-updater`、Docker 事件与拉取进度；判断是否仍是代理下载阻塞，必要时提高 `FAMILY_MOSDNS_IMAGE_PULL_TIMEOUT`。
+
+### 2026-08-16 追加：升级按钮双击叠加 confirm 修复（build `9d66a91c327d`）
+
+- 现象：点「升级并验证」弹确认框后，点「好/取消」看似无反应、页面像卡死。
+- 根因：原生 `confirm()` 阻塞主线程，双击的第二次点击被浏览器排队，在确认框关闭后再次触发 `confirm()`，形成叠加弹窗；升级按钮在确认前未禁用。
+- 修复（PR #88 追加 commit `2c5079c`）：旧版维护页与新版控制台的升级按钮在弹确认框前先禁用（新版同时设 `busy`），取消则恢复；防止重复触发升级与弹窗叠加。
+- 已部署 build `9d66a91c327d`（备份 `/var/backups/family-proxy/20260816-134938`），verify 通过。
+- 截至本记录：一次受控 MosDNS 升级验证正在进行（拉取阶段，1800s 超时生效中），结果待观察。
