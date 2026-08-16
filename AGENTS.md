@@ -678,3 +678,23 @@ RouterOS 变更要求：
 - Z4Pro 已部署并验证：无 Cookie 的 RouterOS 请求仍返回健康探针；带登录会话的同一来源返回管理 HTML。部署备份为 `/var/backups/family-proxy/20260815-120828`，四个控制面服务均 active。
 - 本地隔离依赖环境完整回归为 `55 tests OK`；前端发布前需完成 `vue-tsc`、Vite build 和 `scripts/verify-release.sh`。
 - GitHub Release 地址：`https://github.com/liuleisail/family-proxy-manual/releases/tag/v0.11.13`。
+
+## 19. 2026-08-16 MosDNS 升级失败修复与当前部署状态
+
+### 当前生产状态（2026-08-16 部署后）
+
+- 控制平面 build：`6b772844bd64`（v0.11.13，`deployed_at 20260816-133525`），备份 `/var/backups/family-proxy/20260816-133525`；`family-proxy-ui`/`family-proxy-gateway`/`family-mosdns-updater`/`family-mihomo-sub-import` 均 active。
+- MosDNS updater 已部署修复版（备份 `/var/backups/family-proxy/mosdns-updater-20260816-133533`，`py_compile` 通过，服务 active）。
+- MosDNS 核心仍运行旧 digest `3ac037…`（v0.7.1），`phase=available`，新镜像 digest `26d792…`（v0.7.3）待受控升级验证；**未自动重试真实升级**。
+
+### 升级失败根因与修复（代码在 PR #88，分支 agent/fix-mosdns-upgrade）
+
+- 根因：镜像拉取在现有代理下超过 updater 原 600s 超时 → 自动回退；失败细节被后续自动检查覆盖。
+- 修复：拉取超时 1800s（`FAMILY_MOSDNS_IMAGE_PULL_TIMEOUT`）＋重试 2 次；`set_status` 保留 `last_failure`；DNS 验证 UDP→TCP 退避；`wait_healthy` 180s；旧版维护页与新控制台均显示 `last_failure` 并延长轮询（新版 `applyMosdns` 每 5s 最长 35 分钟）。
+- 57 项 Python 回归通过；`vue-tsc`+`vite build` 通过。
+- **已部署到 Z4Pro，但代码尚未合并 main**（PR #88 OPEN）；同时 PR #87（全方位审计优化，分支 agent/audit-and-optimization）也仍 OPEN 未合并。合并前以各自分支/PR 为准。
+
+### 待办
+
+- 用户确认代理拉取链路正常后，发起一次受控 MosDNS 升级验证（页面应显示进度与结果；失败会保留 `last_failure` 原因）。成功后再合并 PR #88 与 #87。
+- 若再次失败：读 `/opt/family-mosdns-updater` 的 status.json（`last_failure`）、`journalctl -u family-mosdns-updater`、Docker 事件与拉取进度；判断是否仍是代理下载阻塞，必要时提高 `FAMILY_MOSDNS_IMAGE_PULL_TIMEOUT`。
