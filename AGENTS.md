@@ -845,3 +845,28 @@ RouterOS 变更要求：
 2. **router.env 缺 `FAMILY_CAPTURE_INTERFACE`**：新 tproxy-auto 脚本读取该键（校验缺失即退出），生产 router.env 原本没有。已补 `FAMILY_CAPTURE_INTERFACE=kvmbr0`（备份 `router.env-20260816-163345`），TPROXY 同步恢复。**换主机/接口时该键需随之调整。**
 3. **服务重启导致 Netwatch 短暂 down**（16:30:45→16:31:45）：共享规则被 down-script 禁用后由 up-script 恢复；实测 mangle/nat/filter 全部重新启用，属预期瞬断，不扩大为故障。升级/部署后应复查 Netwatch 与共享规则启用状态。
 4. RouterOS codexops 只读，无法用普通入口启用规则；`where ... and disabled=no` 组合查询在该入口下结果不可靠（返回误报 0），应改用 `print stats detail where comment~` 格式核对。
+
+## 27. 2026-08-16 Docker 重启事故与"万无一失"容器恢复加固
+
+### 事故经过
+
+- 为让 daemon 镜像源（registry-mirrors）生效执行 `systemctl restart docker`，结果 7 个 `unless-stopped` 容器（embyserver、emby-host-proxy、iptv_compat、msd_lite、tailscale、openlist、family-mihomo-dashboard）**未自动恢复**，家庭旁路代理断连。
+- 次生故障：`family-mihomo-tproxy-auto`（Type=oneshot、无 Restart=）在 mihomo 容器就绪前执行 `sync` 超时失败且不重试。
+
+### 根因（Docker 行为坑）
+
+1. **daemon 优雅重启时，容器以 exit 0 退出并被当作"stopped"**；`unless-stopped` 策略不会恢复这类容器（`always` 才会）。`daemon.json` 默认 `live-restore: false` 导致 daemon 重启=全部容器停止。
+2. **`always` 策略不尊重手动停止**：手动 `docker stop` 的容器在下次 daemon 重启时仍会被 docker 自动拉起（本次 rustdesk-hbbs/hbbr 实测复现）。想"手动关闭后保持关闭"必须用 `unless-stopped`。
+
+### 加固措施（全部已部署并演练验证）
+
+1. **`live-restore: true`**（`/etc/docker/daemon.json`，备份 `daemon.json-20260816-175814-pre-liverestore`）：daemon 重启时容器不停止，从根上消除断连。
+2. **`/usr/local/sbin/family-docker-recover` + `family-docker-recover.service`**（PartOf=docker.service，docker 重启连带触发）＋ **`family-docker-recover.timer`**（OnBootSec=3min / OnUnitActiveSec=5min 兜底）：启动所有 `always/unless-stopped` 且 **不在排除清单** 的 exited 容器。
+3. **排除清单 `/etc/family-proxy-ui/docker-recover-exclude.conf`**：用户手动关闭的容器名（当前：tailscale、rustdesk-hbbs、rustdesk-hbbr、smbox），recover 永不启动它们。**用户以后手动关闭某容器，请加进此清单**；若某容器策略为 `always` 还想保持关闭，需同时 `docker update --restart=unless-stopped <name>`。
+4. **`family-mihomo-tproxy-auto.service` 加 `Restart=on-failure` / `RestartSec=20`**（备份 `family-mihomo-tproxy-auto.service-20260816-1801xx`）：启动顺序竞争失败后自动重试。
+
+### 验证结论
+
+- 演练：手动 `docker stop msd_lite iperf3` → `systemctl restart docker` → recover 自动拉起 msd_lite（iperf3 由自身策略恢复），手动关闭的 4 容器保持 exited。
+- 恢复服务幂等，重复运行安全；32 个该运行容器全部运行，mosdns ready:true、Netwatch up。
+- **后续 daemon 配置变更（镜像源等）可放心重启 docker**，容器不再中断；唯一注意是 `live-restore` 下 daemon 升级大版本仍需评估兼容性。
