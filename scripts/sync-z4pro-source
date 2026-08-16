@@ -25,6 +25,7 @@ rsync -azc --rsync-path="sudo rsync" frontend/dist/ "$TARGET:$REMOTE_DIR/fronten
 key_files=(
     runtime/family-proxy-gateway.py
     runtime/family-proxy-ui.py
+    runtime/family-mihomo-sub-import.py
     runtime/rules.html
     runtime/mosdns/updater.py
     runtime/mosdns/dashboard.html
@@ -38,6 +39,13 @@ key_files=(
     scripts/deploy-family-proxy-ui
     scripts/verify-server.sh
     scripts/install-mosdns-management.sh
+    scripts/apply-runtime-mode
+    scripts/family-mihomo-tproxy-auto
+    scripts/family-mihomo-upgrade
+    scripts/homekit-direct-routes
+    scripts/refresh-cn-ipv4
+    scripts/refresh-mihomo-geodata.py
+    scripts/sync-routeros-cn-ipv4.py
     frontend/dist/index.html
     frontend/dist/qrcode-browser.js
 )
@@ -45,7 +53,7 @@ for file in "${key_files[@]}"; do
     remote_file=$(ssh "$TARGET" mktemp /tmp/family-proxy-key.XXXXXX)
     scp -q "$file" "$TARGET:$remote_file"
     mode=644
-    [[ "$file" == scripts/* ]] && mode=755
+    [[ "$file" == scripts/* || "$file" == runtime/family-mihomo-sub-import.py ]] && mode=755
     ssh "$TARGET" sudo install -m "$mode" "$remote_file" "$REMOTE_DIR/$file"
     ssh "$TARGET" rm -f "$remote_file"
 done
