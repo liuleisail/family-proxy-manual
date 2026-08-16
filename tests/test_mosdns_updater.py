@@ -44,10 +44,10 @@ class MosdnsTagTests(unittest.TestCase):
         self.assertEqual(result["release_version"], "")
         self.assertNotIn("IrineSistiana", result["release_url"])
 
-    def test_image_pull_prefers_daemon_mirror_after_a_transient_failure(self):
+    def test_image_pull_prefers_explicit_mirror_after_daemon_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(family_mosdns_updater, "COMPOSE_DIR", Path(directory)), \
-                    patch.object(family_mosdns_updater, "command", side_effect=[RuntimeError("mirror timeout"), "", "sha256:new"]), \
+                    patch.object(family_mosdns_updater, "command", side_effect=[RuntimeError("daemon 1"), RuntimeError("daemon 2"), "", "", "sha256:new"]), \
                     patch.object(family_mosdns_updater, "crane_command") as crane, \
                     patch.object(family_mosdns_updater.time, "sleep"):
                 self.assertEqual(family_mosdns_updater.download_latest_image(), "sha256:new")
@@ -59,8 +59,21 @@ class MosdnsTagTests(unittest.TestCase):
                     patch.object(family_mosdns_updater, "command", side_effect=RuntimeError("daemon unavailable")), \
                     patch.object(family_mosdns_updater, "crane_command", side_effect=RuntimeError("proxy timeout")), \
                     patch.object(family_mosdns_updater.time, "sleep"):
-                with self.assertRaisesRegex(RuntimeError, "Docker daemon 2 次，crane 2 次"):
+                with self.assertRaisesRegex(RuntimeError, "镜像站 docker.1ms.run"):
                     family_mosdns_updater.download_latest_image()
+
+    def test_preflight_rejects_unhealthy_new_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            compose_dir = Path(directory)
+            (compose_dir / "data").mkdir(parents=True)
+            (compose_dir / "data" / "config_custom.yaml").write_text("dummy")
+            with patch.object(family_mosdns_updater, "COMPOSE_DIR", compose_dir), \
+                    patch.object(family_mosdns_updater, "command", return_value=""), \
+                    patch.object(family_mosdns_updater.time, "sleep"), \
+                    patch.object(family_mosdns_updater.time, "time", side_effect=[0, 0, 91]), \
+                    patch("urllib.request.urlopen", side_effect=OSError("refused")):
+                with self.assertRaises(family_mosdns_updater.ImagePreflightError):
+                    family_mosdns_updater.verify_new_image("sha256:new")
 
     def test_set_status_preserves_failure_until_success(self):
         with tempfile.TemporaryDirectory() as directory:
