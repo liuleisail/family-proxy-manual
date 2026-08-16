@@ -110,7 +110,7 @@ type UpdatePayload = { state?: string; status?: string; current?: string; latest
 type PlatformPayload = { mode?: string; checked_at?: number; host?: UpdatePayload; routeros?: UpdatePayload; z4pro?: UpdatePayload; mihomo?: UpdatePayload; mosdns?: UpdatePayload }
 type DnsLog = JsonRecord & { query_name?: string; client_ip?: string; query_type?: string; duration_ms?: number; response_code?: string; query_time?: string }
 type AirportSource = { slot: string; label: string; imported?: boolean; nodes?: number; updated_at?: string }
-type AirportState = { slots?: AirportSource[]; nodes?: Array<{ name?: string; source?: string; label?: string }>; pools?: Record<string, string[]>; settings?: Record<string, JsonRecord>; tests?: JsonRecord; suggestions?: JsonRecord; derived_exits?: JsonRecord }
+type AirportState = { slots?: AirportSource[]; nodes?: Array<{ name?: string; source?: string; label?: string }>; pools?: Record<string, string[]>; source_selections?: Record<string, string | null>; settings?: Record<string, JsonRecord>; tests?: JsonRecord; suggestions?: JsonRecord; derived_exits?: JsonRecord }
 type RulePayload = { rules?: string[]; version?: string; policies?: string[]; protected?: string[]; rule_sets?: JsonRecord[]; rule_sets_version?: string; rule_card_labels?: Record<string, string>; rule_card_labels_version?: string }
 
 const views = [
@@ -198,6 +198,7 @@ const airportFilter = ref('')
 const airportPoolEditor = ref('')
 const airportPoolMode = ref('fallback')
 const airportCsrf = ref('')
+const airportSourceSelections = ref<Record<string, string | null>>({})
 
 const rulesPayload = ref<RulePayload>({ rules: [] })
 const ruleDraft = ref<string[]>([])
@@ -915,8 +916,13 @@ async function loadAirportState() {
       airportApi<AirportState>('/api/nodes'),
     ])
     const merged = { ...state, ...catalog, pools: state.pools || catalog.pools, settings: state.settings || catalog.settings }
+    const suggestion = merged.suggestions && typeof merged.suggestions === 'object' ? merged.suggestions : {}
+    const pendingPools = suggestion.ready && !suggestion.applied_at && suggestion.pools && typeof suggestion.pools === 'object'
+      ? suggestion.pools as Record<string, string[]>
+      : null
     airportState.value = merged
-    airportPools.value = Object.fromEntries(Object.entries(merged.pools || {}).map(([key, values]) => [key, [...values]]))
+    airportSourceSelections.value = { ...(merged.source_selections || {}) }
+    airportPools.value = Object.fromEntries(Object.entries(pendingPools || merged.pools || {}).map(([key, values]) => [key, [...values]]))
     airportSettings.value = merged.settings || {}
     return merged
   } catch (error) {
@@ -943,6 +949,46 @@ function airportFilteredNodes(pool: string) {
   const query = airportFilter.value.trim().toLowerCase()
   const used = new Set(airportPools.value[pool] || [])
   return (airportState.value.nodes || []).filter((node) => !used.has(String(node.name || '')) && (!query || String(node.name || '').toLowerCase().includes(query)))
+}
+
+function airportSourceLabelForSlot(slot: string) {
+  return airportSources.value.find((source) => source.slot === slot)?.label || slot
+}
+
+function airportSourceLabel(pool: string) {
+  const selection = airportSourceSelections.value[pool]
+  if (!selection) return '保持当前生效范围'
+  if (selection === 'all') return '全部已导入机场'
+  return airportSourceLabelForSlot(selection)
+}
+
+async function setAirportSourceSelection(pool: string, event: Event) {
+  const select = event.target as HTMLSelectElement
+  const next = select.value || null
+  const previous = airportSourceSelections.value[pool] || ''
+  if (next === (previous || null)) return
+  if (!window.confirm(next
+    ? `将把 ${pool} 的全量测速范围锁定为${next === 'all' ? '全部已导入机场' : airportSourceLabelForSlot(next)}；当前出口不会改变。继续吗？`
+    : `将清除 ${pool} 的机场范围限制；当前出口不会改变。继续吗？`)) {
+    select.value = previous
+    return
+  }
+  busy.value = `airport-source-${pool}`
+  try {
+    const result = await airportApi<JsonRecord>('/api/pool-source-scope', {
+      method: 'POST',
+      body: JSON.stringify({ pool, source: next }),
+    })
+    airportSourceSelections.value = { ...((result.source_selections || {}) as Record<string, string | null>) }
+    airportPools.value = Object.fromEntries(Object.entries((result.pools || {}) as Record<string, string[]>).map(([key, values]) => [key, [...values]]))
+    await loadAirportState()
+    notify(next ? `${pool} 已锁定${next === 'all' ? '全部已导入机场' : airportSourceLabelForSlot(next)}，请执行全量稳定性测速` : `${pool} 已恢复当前生效机场范围`)
+  } catch (error) {
+    select.value = previous
+    notify(error instanceof Error ? error.message : '机场范围保存失败')
+  } finally {
+    busy.value = ''
+  }
 }
 
 function addAirportNode(pool: string, node: string) {
@@ -1813,10 +1859,6 @@ async function refreshAirportTestStatus() {
     if (airportTestPrevRunning && !running) {
       airportTestPrevRunning = false
       stopAirportTestPolling()
-      const pools = ((status.suggestions || {}) as { pools?: Record<string, string[]> }).pools
-      if (pools && Object.keys(pools).length) {
-        airportPools.value = Object.fromEntries(Object.entries(pools).map(([key, values]) => [key, [...values]]))
-      }
       await loadAirportState()
     }
     airportTestPrevRunning = running
@@ -1934,7 +1976,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); if (airportTestPol
       <div class="sidebar-bottom">
         <div class="mini-availability"><HeartPulse :size="16" /><span>系统可用性</span><strong>{{ ready ? '99.9%' : '检查中' }}</strong></div>
         <a class="secondary-button sidebar-console-switch" href="/legacy" title="回到原版管理界面" aria-label="回到原版管理界面"><ArrowUpRight :size="15" /><span>回到原版</span></a>
-        <div class="sidebar-version">Family Proxy <span :title="String(summary.build_id || '')">{{ summary.version || '0.11.14' }}</span></div>
+        <div class="sidebar-version">Family Proxy <span :title="String(summary.build_id || '')">{{ summary.version || '0.11.15' }}</span></div>
       </div>
     </aside>
 
@@ -2039,7 +2081,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); if (airportTestPol
           </template>
 
           <template v-else-if="airportTab === 'pools'">
-            <section class="surface-card"><div class="toolbar feature-toolbar"><div class="search-field"><Search :size="17" /><input v-model="airportFilter" placeholder="筛选节点名称" /></div><button class="primary-button" :disabled="busy === 'airport-test'" @click="testAirportAll"><Activity :size="15" />三次稳定性测速</button><button class="secondary-button" :disabled="busy === 'airport-retest'" @click="retestAirportPools">复测并生效</button><button class="secondary-button" @click="saveAirportPools">校验并应用</button><button class="compact-button danger" @click="rollbackAirportPools">回退上一版</button></div><div v-if="airportProgressVisible" class="airport-progress"><div class="airport-progress-bar"><span :style="{ width: `${airportTestProgress}%` }" /></div><span>{{ airportTestStatusText }}</span></div><div class="data-note-line">{{ airportTestedAt ? `上次稳定性测速：${timeValue(airportTestedAt)}` : '尚未执行稳定性测速；每次只在人工操作时测试节点。' }}</div></section><div class="pool-grid"><article v-for="pool in airportPoolNames" :key="pool" class="surface-card pool-card"><div class="card-heading"><div><h2>{{ pool }}</h2><span class="muted-caption">{{ (airportPools[pool] || []).length }}/5 个候选</span></div><button class="icon-button small" title="编辑候选池模式" aria-label="编辑候选池模式" @click="openAirportPoolEditor(pool)"><Pencil :size="15" /></button></div><div class="pool-mode"><span class="soft-badge mini">{{ airportSettings[pool]?.type === 'url-test' ? '自动测速' : airportSettings[pool]?.type === 'select' ? '手动选择' : '故障切换' }}</span><span class="muted-caption">按业务专项探针排序</span></div><div v-for="(node, index) in airportPools[pool] || []" :key="node" class="pool-node"><div><strong>{{ node }}</strong><small v-if="airportMetric(node).delay !== undefined">{{ airportMetric(node).delay }} ms · 抖动 {{ airportMetric(node).jitter }} · {{ airportMetric(node).success }}/3</small></div><div class="pool-node-actions"><button class="icon-button small" title="上移" aria-label="上移" @click="moveAirportNode(pool, index, -1)">↑</button><button class="icon-button small" title="下移" aria-label="下移" @click="moveAirportNode(pool, index, 1)">↓</button><button class="icon-button small" title="移除节点" aria-label="移除节点" @click="removeAirportNode(pool, index)"><X :size="14" /></button></div></div><div class="pool-add"><select @change="selectAirportNode(pool, $event)"><option value="">添加候选节点</option><option v-for="node in airportFilteredNodes(pool)" :key="node.name" :value="node.name">{{ node.name }}</option></select></div></article></div>
+            <section class="surface-card"><div class="toolbar feature-toolbar"><div class="search-field"><Search :size="17" /><input v-model="airportFilter" placeholder="筛选节点名称" /></div><button class="primary-button" :disabled="busy === 'airport-test'" @click="testAirportAll"><Activity :size="15" />三次稳定性测速</button><button class="secondary-button" :disabled="busy === 'airport-retest'" @click="retestAirportPools">复测并生效</button><button class="secondary-button" @click="saveAirportPools">校验并应用</button><button class="compact-button danger" @click="rollbackAirportPools">回退上一版</button></div><div v-if="airportProgressVisible" class="airport-progress"><div class="airport-progress-bar"><span :style="{ width: `${airportTestProgress}%` }" /></div><span>{{ airportTestStatusText }}</span></div><div class="data-note-line">{{ airportTestedAt ? `上次稳定性测速：${timeValue(airportTestedAt)}` : '尚未执行稳定性测速；每次只在人工操作时测试节点。' }}</div></section><div class="pool-grid"><article v-for="pool in airportPoolNames" :key="pool" class="surface-card pool-card"><div class="card-heading"><div><h2>{{ pool }}</h2><span class="muted-caption">{{ (airportPools[pool] || []).length }}/5 个候选</span></div><button class="icon-button small" title="编辑候选池模式" aria-label="编辑候选池模式" @click="openAirportPoolEditor(pool)"><Pencil :size="15" /></button></div><div class="pool-mode"><span class="soft-badge mini">{{ airportSettings[pool]?.type === 'url-test' ? '自动测速' : airportSettings[pool]?.type === 'select' ? '手动选择' : '故障切换' }}</span><span class="muted-caption">按业务专项探针排序</span></div><label class="pool-source-scope"><span>测速机场范围</span><select :value="airportSourceSelections[pool] || ''" :disabled="busy === `airport-source-${pool}` || airportTestRunning" @change="setAirportSourceSelection(pool, $event)"><option value="">保持当前生效范围</option><option value="all">全部已导入机场</option><option v-for="source in airportSources.filter((item) => item.imported)" :key="source.slot" :value="source.slot">{{ source.label }}</option></select><small>{{ airportSourceLabel(pool) }}；锁定后先全量测速，再复测并生效</small></label><div v-for="(node, index) in airportPools[pool] || []" :key="node" class="pool-node"><div><strong>{{ node }}</strong><small v-if="airportMetric(node).delay !== undefined">{{ airportMetric(node).delay }} ms · 抖动 {{ airportMetric(node).jitter }} · {{ airportMetric(node).success }}/3</small></div><div class="pool-node-actions"><button class="icon-button small" title="上移" aria-label="上移" @click="moveAirportNode(pool, index, -1)">↑</button><button class="icon-button small" title="下移" aria-label="下移" @click="moveAirportNode(pool, index, 1)">↓</button><button class="icon-button small" title="移除节点" aria-label="移除节点" @click="removeAirportNode(pool, index)"><X :size="14" /></button></div></div><div class="pool-add"><select @change="selectAirportNode(pool, $event)"><option value="">添加候选节点</option><option v-for="node in airportFilteredNodes(pool)" :key="node.name" :value="node.name">{{ node.name }}</option></select></div></article></div>
           </template>
 
           <template v-else>

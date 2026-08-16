@@ -340,6 +340,10 @@ h1 em { color: var(--blue); font-style: normal; }
 .pool-node strong { color: var(--text); font-size: 11px; }
 .pool-node small { margin-top: 4px; color: var(--text-muted); font-size: 10px; }
 .pool-node-actions { display: flex; flex: 0 0 auto; gap: 2px; }
+.pool-source-scope { display: grid; gap: 6px; margin: 10px 0 4px; padding: 10px 11px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface-strong); }
+.pool-source-scope > span { color: var(--text-soft); font-size: 11px; font-weight: 650; }
+.pool-source-scope select { width: 100%; min-width: 0; height: 32px; padding: 0 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); font-size: 11px; }
+.pool-source-scope small { color: var(--text-muted); font-size: 10px; line-height: 1.45; }
 .pool-add select { margin-top: 14px; }
 .runtime-card { min-width: 0; }
 .failsafe-card { padding-bottom: 17px; }

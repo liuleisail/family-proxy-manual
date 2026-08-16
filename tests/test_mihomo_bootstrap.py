@@ -138,6 +138,14 @@ class MihomoBootstrapTests(unittest.TestCase):
         self.assertIn("锁定机场范围", MODULE.PAGE)
         self.assertIn("sourceOptions", MODULE.PAGE)
 
+    def test_new_vue_airport_page_exposes_source_scope_and_pending_apply_flow(self):
+        app = (ROOT / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
+        self.assertIn("/api/pool-source-scope", app)
+        self.assertIn("airportSourceSelections", app)
+        self.assertIn("测速机场范围", app)
+        self.assertIn("先全量测速，再复测并生效", app)
+        self.assertIn("!suggestion.applied_at", app)
+
     def test_container_installer_has_non_overwrite_guard_for_runtime_config(self):
         script = (ROOT / "scripts" / "install-mihomo-container.sh").read_text()
         self.assertIn('if [[ ! -s "$dir/config.yaml" ]]; then', script)

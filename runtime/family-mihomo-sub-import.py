@@ -1081,6 +1081,7 @@ def save_pools(value, settings=None):
         PREVIOUS_POOL_SETTINGS.write_bytes(previous_settings)
         atomic_json(CANDIDATES, cleaned)
         atomic_json(POOL_SETTINGS, cleaned_settings)
+        SUGGESTIONS.unlink(missing_ok=True)
     except OSError:
         MIHOMO_CONFIG.write_bytes(previous_config)
         os.chmod(MIHOMO_CONFIG, 0o640)
@@ -1124,6 +1125,7 @@ def rollback_pools():
     PREVIOUS.write_bytes(current)
     atomic_json(POOL_SETTINGS, restored_settings)
     PREVIOUS_POOL_SETTINGS.write_bytes(current_settings)
+    SUGGESTIONS.unlink(missing_ok=True)
     return restored
 
 
