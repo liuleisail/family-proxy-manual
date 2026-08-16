@@ -55,6 +55,7 @@ DEFAULT_CONFIG = {
 CORE_API = os.environ.get("FAMILY_MOSDNS_CORE_API", "http://172.31.53.2:9099").rstrip("/")
 DNS_SERVER = os.environ.get("FAMILY_MOSDNS_DNS_SERVER", "127.0.0.1")
 DEFAULT_SOCKS5 = os.environ.get("FAMILY_MOSDNS_SOCKS5", "172.31.53.1:7890")
+LAN_CIDR = os.environ.get("FAMILY_MOSDNS_LAN_CIDR", "192.168.2.0/24")
 IMAGE_PULL_TIMEOUT = max(300, int(os.environ.get("FAMILY_MOSDNS_IMAGE_PULL_TIMEOUT", "1800")))
 DOCKER_PULL_TIMEOUT = max(120, int(os.environ.get("FAMILY_MOSDNS_DOCKER_PULL_TIMEOUT", "600")))
 IMAGE_PULL_ATTEMPTS = max(1, int(os.environ.get("FAMILY_MOSDNS_IMAGE_PULL_ATTEMPTS", "2")))
@@ -303,7 +304,7 @@ def crane_command(args, timeout=180):
     environment.update({
         "HTTP_PROXY": REGISTRY_PROXY,
         "HTTPS_PROXY": REGISTRY_PROXY,
-        "NO_PROXY": "127.0.0.1,localhost,192.168.2.0/24,172.31.53.0/24",
+        "NO_PROXY": f"127.0.0.1,localhost,{LAN_CIDR},172.31.53.0/24",
     })
     return command([CRANE, *args], timeout=timeout, env=environment)
 
