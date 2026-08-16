@@ -706,3 +706,23 @@ RouterOS 变更要求：
 - 修复（PR #88 追加 commit `2c5079c`）：旧版维护页与新版控制台的升级按钮在弹确认框前先禁用（新版同时设 `busy`），取消则恢复；防止重复触发升级与弹窗叠加。
 - 已部署 build `9d66a91c327d`（备份 `/var/backups/family-proxy/20260816-134938`），verify 通过。
 - 截至本记录：一次受控 MosDNS 升级验证正在进行（拉取阶段，1800s 超时生效中），结果待观察。
+
+## 20. 2026-08-16 MosDNS 升级完成（代码在 PR #88，已部署）
+
+### 线上最终状态
+
+- `mosdns-t` 已升级到 v0.7.3（digest `26d792`，schema 4），容器 running、restart=0，健康 API `ready=true`；DNS 国内/国外正常。
+- updater 状态 `up_to_date`，`update_available=false`；部署版 updater 哈希与 PR #88 提交一致。
+- 完整修复在分支 `agent/fix-mosdns-upgrade` 的 **PR #88（OPEN 未合并）**：docker daemon 镜像源优先拉取、`MOSDNS_AUTO_INIT=false`（禁用镜像启动时从 `raw.githubusercontent.com` 拉配置包的自动初始化）、按钮防双击、`last_failure` 透传与展示、60 项测试通过。
+
+### 根因链（本网络特有，已对症修复）
+
+- Docker Hub CloudFront CDN 经机场节点 CONNECT 隧道不可达（直连被 ISP 阻断）→ 改走 Docker daemon 镜像源（`registry.zenithspace.net` 等），同一镜像约 22s 拉完。
+- `raw.githubusercontent.com` 同样经机场 CONNECT 隧道不可达 → 镜像的 schema 3→4 自动迁移下载 `config_up.zip` 超时失败 → 用 `MOSDNS_AUTO_INIT=false` 关闭该远程改写，配置由本项目管理。
+- 升级期间 MosDNS 容器重建会短暂中断 DNS（断网），这是 DNS 服务重启的固有短窗口；本机可用 Surge 等兜底。
+
+### 交接注意
+
+- 后续 MosDNS 升级应走页面「升级并应用」（旧版页「升级并验证」），按钮会显示进度与失败原因；`last_failure` 保留在 status。
+- 若未来镜像需要更高配置 schema 且自动迁移被禁用，需人工按 config_up 包处理配置迁移（当前 v0.7.3 的 schema-4 配置已就位）。
+- PR #88 合并到 main 前，以该分支为准；合并时注意 AGENTS.md 与 main 第 19 节/PR 内第 20-22 节的关系。
