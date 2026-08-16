@@ -1,4 +1,5 @@
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -42,6 +43,41 @@ class MosdnsTagTests(unittest.TestCase):
         self.assertEqual(result["latest_version"], "sha256:third-party")
         self.assertEqual(result["release_version"], "")
         self.assertNotIn("IrineSistiana", result["release_url"])
+
+    def test_image_pull_prefers_daemon_mirror_after_a_transient_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(family_mosdns_updater, "COMPOSE_DIR", Path(directory)), \
+                    patch.object(family_mosdns_updater, "command", side_effect=[RuntimeError("mirror timeout"), "", "sha256:new"]), \
+                    patch.object(family_mosdns_updater, "crane_command") as crane, \
+                    patch.object(family_mosdns_updater.time, "sleep"):
+                self.assertEqual(family_mosdns_updater.download_latest_image(), "sha256:new")
+                crane.assert_not_called()
+
+    def test_image_pull_reports_crane_fallback_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(family_mosdns_updater, "COMPOSE_DIR", Path(directory)), \
+                    patch.object(family_mosdns_updater, "command", side_effect=RuntimeError("daemon unavailable")), \
+                    patch.object(family_mosdns_updater, "crane_command", side_effect=RuntimeError("proxy timeout")), \
+                    patch.object(family_mosdns_updater.time, "sleep"):
+                with self.assertRaisesRegex(RuntimeError, "Docker daemon 2 次，crane 2 次"):
+                    family_mosdns_updater.download_latest_image()
+
+    def test_set_status_preserves_failure_until_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status_path = Path(directory) / "status.json"
+            with patch.object(family_mosdns_updater, "STATUS_PATH", status_path):
+                family_mosdns_updater.set_status("rolled_back", "镜像拉取失败", backup="/tmp/backup.tar.gz")
+                result = family_mosdns_updater.set_status("available", "发现可用更新", update_available=True)
+                self.assertEqual(result["last_failure"]["message"], "镜像拉取失败")
+                result = family_mosdns_updater.set_status("updated", "升级完成")
+                self.assertNotIn("last_failure", result)
+
+    def test_scheduled_check_does_not_apply_update(self):
+        with patch.object(family_mosdns_updater, "do_check"), \
+                patch.object(family_mosdns_updater, "status", return_value={"phase": "available", "update_available": True}), \
+                patch.object(family_mosdns_updater, "do_update") as apply:
+            family_mosdns_updater.auto_check_task()
+            apply.assert_not_called()
 
 
 if __name__ == "__main__":
