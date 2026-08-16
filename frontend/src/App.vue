@@ -1934,7 +1934,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); if (airportTestPol
       <div class="sidebar-bottom">
         <div class="mini-availability"><HeartPulse :size="16" /><span>系统可用性</span><strong>{{ ready ? '99.9%' : '检查中' }}</strong></div>
         <a class="secondary-button sidebar-console-switch" href="/legacy" title="回到原版管理界面" aria-label="回到原版管理界面"><ArrowUpRight :size="15" /><span>回到原版</span></a>
-        <div class="sidebar-version">Family Proxy <span :title="String(summary.build_id || '')">{{ summary.version || '0.11.13' }}</span></div>
+        <div class="sidebar-version">Family Proxy <span :title="String(summary.build_id || '')">{{ summary.version || '0.11.14' }}</span></div>
       </div>
     </aside>
 

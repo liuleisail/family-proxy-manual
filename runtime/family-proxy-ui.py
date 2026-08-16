@@ -57,7 +57,7 @@ FIXED_MANAGED_IPS = set()
 RESERVED_IPS = {"__FAMILY_ROUTER_IP__", "__FAMILY_RESERVED_GATEWAY_IP__", PROXY_IP}
 AUDIT_PATH = Path("/var/log/family-proxy-ui-audit.jsonl")
 CSRF_TOKEN_PATH = Path("/etc/family-proxy-ui/csrf-token")
-BUILD_VERSION = "0.11.13"
+BUILD_VERSION = "0.11.14"
 BUILD_INFO_PATH = Path("/opt/family-proxy-ui/build-info.json")
 COMPONENT_RELEASE_SOURCES = {
     "mihomo": {
