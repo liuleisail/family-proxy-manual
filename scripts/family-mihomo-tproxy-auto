@@ -20,11 +20,13 @@ source_config() {
       FAMILY_LAN_PREFIX) FAMILY_LAN_PREFIX=$value;;
       FAMILY_PROXY_IP) FAMILY_PROXY_IP=$value;;
       FAMILY_ROUTER_IP) FAMILY_ROUTER_IP=$value;;
+      FAMILY_CAPTURE_INTERFACE) FAMILY_CAPTURE_INTERFACE=$value;;
     esac
   done < "$CONFIG"
   [[ ${FAMILY_LAN_PREFIX:-} == *\. ]] || { echo "FAMILY_LAN_PREFIX invalid" >&2; exit 1; }
   [[ ${FAMILY_PROXY_IP:-} =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { echo "FAMILY_PROXY_IP invalid" >&2; exit 1; }
   [[ ${FAMILY_ROUTER_IP:-} =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { echo "FAMILY_ROUTER_IP invalid" >&2; exit 1; }
+  [[ -n ${FAMILY_CAPTURE_INTERFACE:-} ]] || { echo "FAMILY_CAPTURE_INTERFACE missing" >&2; exit 1; }
 }
 
 valid_ip() {
@@ -109,7 +111,7 @@ write_nft_rules() {
     echo "  }"
     echo "  chain postrouting {"
     echo "    type nat hook postrouting priority srcnat; policy accept;"
-    echo "    ip saddr @managed4 ip daddr @cn4 oifname \"kvmbr0\" counter snat to $FAMILY_PROXY_IP"
+    echo "    ip saddr @managed4 ip daddr @cn4 oifname \"$FAMILY_CAPTURE_INTERFACE\" counter snat to $FAMILY_PROXY_IP"
     echo "  }"
     echo "}"
   } > "$output"

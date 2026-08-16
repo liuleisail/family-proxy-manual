@@ -1342,8 +1342,8 @@ def start_replace_and_clear_slot(slot):
                 os.chmod(MIHOMO_CONFIG, 0o640)
                 try:
                     restart_mihomo()
-                except Exception:
-                    pass
+                except Exception as restart_exc:
+                    print(f"rollback restart_mihomo failed: {restart_exc}", file=sys.stderr)
             with TEST_STATE_LOCK:
                 TEST_STATE.update({"running": False, "error": str(exc),
                                    "finished_at": datetime.now().astimezone().isoformat()})
@@ -1760,8 +1760,8 @@ def monitor_loop():
     while True:
         try:
             monitor_once()
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"monitor_once failed: {exc}", file=sys.stderr)
         time.sleep(30)
 
 

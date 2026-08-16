@@ -819,3 +819,14 @@ RouterOS 变更要求：
 - 页面同源更新接口返回 `updated`；随后只读检查返回 `up_to_date`，容器启动时间未改变，证明自动检测不再触发自动升级。
 - `www.baidu.com`、`www.google.com` 的 UDP 与 TCP DNS 探针均通过；RouterOS、Mihomo、DHCP DNS、旁路规则和当前上游配置未修改。
 - 本地回归为 `60 tests OK`，Python/Bash 语法检查和 `git diff --check` 通过。
+
+## 25. 2026-08-16 审计优化有效项合并（PR #87 处理）
+
+- 原 PR #87（`agent/audit-and-optimization`）基于旧基线，整体合并会回退 v0.11.13 与 MosDNS 修复，故**不整体合并**。
+- APNs 冲突解决：PR #87 曾提出恢复 RouterOS `17.0.0.0/8` Apple 推送直连；v0.11.13 已明确该方案错误（Apple 推送必须经 Mihomo 走 `Proxy-Auto`，旧直连导致 Telegram 后台推送失效），线上 RB5009 已清理。**采纳 v0.11.13 方案，丢弃 PR #87 的 APNs 改动。**
+- 合并仍有效的 4 项（本次提交）：
+  1. `frontend/package-lock.json`：nanoid `3.3.17`→`3.3.18`（修复高危 GHSA-2v37-7h3g-55p8，构建期传递依赖，dist 不变）。
+  2. `runtime/family-mihomo-sub-import.py`：回滚 `restart_mihomo()` 失败与 `monitor_loop` 静默异常改为记录 stderr。
+  3. `scripts/family-mihomo-tproxy-auto`：postrouting SNAT `oifname kvmbr0` 改读 `FAMILY_CAPTURE_INTERFACE`（Z4Pro 值仍为 `kvmbr0`，行为不变）。
+  4. `runtime/mosdns/updater.py`：`crane_command` NO_PROXY 硬编码改读 `FAMILY_MOSDNS_LAN_CIDR`（默认不变）。
+- 验证：60 项测试、`py_compile`、`bash -n` 通过。合并后 PR #87 关闭。
