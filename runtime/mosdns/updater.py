@@ -7,6 +7,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import subprocess
 import tarfile
 import threading
@@ -59,6 +60,8 @@ LAN_CIDR = os.environ.get("FAMILY_MOSDNS_LAN_CIDR", "192.168.2.0/24")
 IMAGE_PULL_TIMEOUT = max(300, int(os.environ.get("FAMILY_MOSDNS_IMAGE_PULL_TIMEOUT", "1800")))
 DOCKER_PULL_TIMEOUT = max(120, int(os.environ.get("FAMILY_MOSDNS_DOCKER_PULL_TIMEOUT", "600")))
 IMAGE_PULL_ATTEMPTS = max(1, int(os.environ.get("FAMILY_MOSDNS_IMAGE_PULL_ATTEMPTS", "2")))
+IMAGE_MIRROR = os.environ.get("FAMILY_MOSDNS_IMAGE_MIRROR", "docker.1ms.run").strip().rstrip("/")
+MIRROR_IMAGE = f"{IMAGE_MIRROR}/{IMAGE}"
 ADBLOCK_RULES_HOST = os.environ.get("FAMILY_MOSDNS_RULES_HOST", DEFAULT_SOCKS5.rsplit(":", 1)[0])
 ADBLOCK_RULES_PORT = int(os.environ.get("FAMILY_MOSDNS_RULES_PORT", "18103"))
 RULE_SOURCES = {
@@ -363,9 +366,8 @@ def download_latest_image():
     archive = backup_dir / ".mosdns-image-download.tar"
     failures = []
 
-    # Docker daemon mirrors are more reliable here than streaming a legacy tar
-    # through the local proxy. Keep crane as a fallback for installations
-    # without a working daemon mirror.
+    # 1. Prefer the Docker daemon pull: it uses the daemon registry mirrors,
+    # which are reachable on networks where Docker Hub's CloudFront CDN is not.
     for attempt in range(1, IMAGE_PULL_ATTEMPTS + 1):
         try:
             command(["docker", "pull", "--platform=linux/amd64", IMAGE], timeout=DOCKER_PULL_TIMEOUT)
@@ -375,6 +377,20 @@ def download_latest_image():
             if attempt < IMAGE_PULL_ATTEMPTS:
                 time.sleep(8)
 
+    # 2. Explicit mirror fallback: pull from the configured domestic mirror
+    # directly (reachable without the airport proxy) and retag to the compose
+    # name, so the daemon mirror config failing does not strand the update.
+    for attempt in range(1, IMAGE_PULL_ATTEMPTS + 1):
+        try:
+            command(["docker", "pull", "--platform=linux/amd64", MIRROR_IMAGE], timeout=DOCKER_PULL_TIMEOUT)
+            command(["docker", "tag", MIRROR_IMAGE, IMAGE], timeout=15)
+            return command(["docker", "image", "inspect", IMAGE, "--format", "{{.Id}}"], timeout=10)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            failures.append(f"镜像站 {IMAGE_MIRROR} 第 {attempt} 次：{exc}")
+            if attempt < IMAGE_PULL_ATTEMPTS:
+                time.sleep(8)
+
+    # 3. crane via the local proxy as the last fallback.
     for attempt in range(1, IMAGE_PULL_ATTEMPTS + 1):
         try:
             archive.unlink(missing_ok=True)
@@ -391,8 +407,71 @@ def download_latest_image():
         finally:
             archive.unlink(missing_ok=True)
     raise RuntimeError(
-        f"MosDNS-T 镜像拉取失败（Docker daemon {IMAGE_PULL_ATTEMPTS} 次，crane {IMAGE_PULL_ATTEMPTS} 次）：{failures[-1]}"
+        f"MosDNS-T 镜像拉取失败（daemon、镜像站 {IMAGE_MIRROR}、crane 各 {IMAGE_PULL_ATTEMPTS} 次）：{failures[-1]}"
     )
+
+
+class ImagePreflightError(RuntimeError):
+    """New image failed an isolated pre-check; the live container was not touched."""
+
+
+PREVIEW_CONTAINER = "family-mosdns-upgrade-preview"
+PREVIEW_NETWORK = "family-mosdns-net"
+PREVIEW_IP_CANDIDATES = ("172.31.53.250", "172.31.53.251", "172.31.53.252")
+PREVIEW_API_PORT = 9099
+
+
+def verify_new_image(new_image):
+    """Start the new image against a copy of the live config in an isolated
+    container and require a healthy API before the real recreate. This catches
+    config-schema or startup incompatibilities without touching the live
+    container (no DNS interruption on failure)."""
+    test_dir = COMPOSE_DIR / "preview-config"
+    preview_ip = None
+    started = False
+    try:
+        if test_dir.exists():
+            shutil.rmtree(test_dir, ignore_errors=True)
+        shutil.copytree(COMPOSE_DIR / "data", test_dir)
+        command(["docker", "rm", "-f", PREVIEW_CONTAINER], timeout=15, check=False)
+        for candidate in PREVIEW_IP_CANDIDATES:
+            try:
+                command(
+                    [
+                        "docker", "run", "-d", "--name", PREVIEW_CONTAINER,
+                        "--network", PREVIEW_NETWORK, "--ip", candidate,
+                        "-e", "MOSDNS_AUTO_INIT=false",
+                        "-v", f"{test_dir}:/cus/mosdns",
+                        new_image,
+                    ],
+                    timeout=60,
+                )
+                preview_ip = candidate
+                started = True
+                break
+            except (OSError, RuntimeError, subprocess.TimeoutExpired):
+                command(["docker", "rm", "-f", PREVIEW_CONTAINER], timeout=15, check=False)
+        if not started:
+            raise ImagePreflightError("无法在隔离网络中启动预检容器")
+        deadline = time.time() + 90
+        last_error = "尚未就绪"
+        while time.time() < deadline:
+            time.sleep(3)
+            try:
+                with urllib.request.urlopen(
+                    f"http://{preview_ip}:{PREVIEW_API_PORT}/api/v1/system/health", timeout=3
+                ) as response:
+                    data = json.load(response)
+                    if data.get("ready"):
+                        return
+                    last_error = f"API 未就绪：{data.get('version') or '未知'}"
+            except (OSError, ValueError, RuntimeError, urllib.error.URLError) as exc:
+                last_error = str(exc)
+        raise ImagePreflightError(f"新镜像在隔离容器中未通过健康检查（{last_error}）")
+    finally:
+        if started:
+            command(["docker", "rm", "-f", PREVIEW_CONTAINER], timeout=15, check=False)
+        shutil.rmtree(test_dir, ignore_errors=True)
 
 
 def backup_config():
@@ -1292,12 +1371,17 @@ def do_update():
             if new_image == old_image:
                 set_status("up_to_date", "当前已经是最新版本", update_available=False, current_image=old_image, latest_image=new_image, current_version=core_version(), checked_at=now_iso())
                 return
+            set_status("updating", "正在隔离预检新镜像", current_image=old_image, latest_image=new_image, backup=backup)
+            verify_new_image(new_image)
             rollback_tag = "family-mosdns-t:rollback-" + datetime.now().strftime("%Y%m%d-%H%M%S")
             command(["docker", "image", "tag", old_image, rollback_tag], timeout=15)
             set_status("updating", "正在重建 MosDNS 容器", current_image=old_image, latest_image=new_image, backup=backup, rollback_image=rollback_tag)
             command(["docker", "compose", "up", "-d", "--no-deps", "--force-recreate", "mosdns-t"], timeout=180)
             wait_healthy()
             set_status("updated", "MosDNS 已更新并通过健康检查", update_available=False, previous_image=old_image, current_image=new_image, current_version=core_version(), backup=backup, rollback_image=rollback_tag, completed_at=now_iso())
+        except ImagePreflightError as exc:
+            # The live container was not touched; do not recreate or roll back.
+            set_status("error", f"新镜像预检失败，未改动当前容器：{exc}", update_available=True, backup=backup, completed_at=now_iso())
         except Exception as exc:
             failure = str(exc)
             if old_image:
