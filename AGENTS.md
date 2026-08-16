@@ -915,3 +915,11 @@ up-script 同样替换 enable。字段规律：`to-ports`、`connection-mark`、
   - 恢复（解除屏蔽，45s 后 Netwatch up）：31/32/13/16/17 全部重新启用 ✓
 - 旁路设备在 Z4Pro 挂掉时：流量回直连 + DNS 回公共 DNS，不再全断。
 - 修复用脚本留痕：`/tmp/fix-netwatch.py`（API 方式，因账号受限弃用）、`/tmp/fpm-bin/ros-fix.rsc`（SSH 变量方式，成功）——均在本地 Mac，未入仓库。
+
+### ✅ 附加验证：docker 容器挂掉（Z4Pro 活着）场景（2026-08-16 18:25）
+
+- **场景**：仅 `family-mihomo-fallback`（host 网络、TPROXY 7893）停止，gateway（独立 systemd 服务）进程仍监听 18088。
+- **发现**：gateway 实际返回 **503**（依赖 mosdns 容器转发受损）→ Netwatch 仍判定 down → **降级完整触发**（mangle 16/17、DNS 劫持 31/32、filter 13 全部禁用）。
+- **结论**：docker 容器挂掉场景**与** Z4Pro 整体挂掉场景都受 Netwatch 降级保护；普通设备（公共 DNS+直连）始终不受影响。
+- **恢复**：mihomo 容器启动后 7893 恢复、18088 恢复 200、Netwatch up、规则全部重新启用（disabled count=0）。
+- **已知观察**：gateway 进程活着但 docker 依赖挂掉时会返回 503（功能降级但可被 Netwatch 识别），属设计内降级信号，无需额外处理。
