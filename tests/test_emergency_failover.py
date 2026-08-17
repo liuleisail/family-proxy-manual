@@ -43,7 +43,10 @@ class EmergencyFailoverTests(unittest.TestCase):
         with patch.object(MODULE, "nodes", return_value=records), \
              patch.object(MODULE, "source_slots", return_value=["primary", "backup2"]):
             catalog = MODULE.emergency_catalog(selected)
-        self.assertEqual(catalog["HK-视频-应急"], ["[主力] 香港 B", "[备用2] 香港 C"])
+        self.assertEqual(
+            catalog["HK-视频-应急"],
+            ["[主力] 香港 B", "[备用2] 香港 C", "[主力] 日本 A"],
+        )
         self.assertNotIn("[主力] 香港 A", catalog["Proxy-应急"])
         self.assertTrue(all("香港" not in name for name in catalog["AI-应急"]))
 

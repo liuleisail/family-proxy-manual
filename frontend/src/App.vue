@@ -110,7 +110,8 @@ type UpdatePayload = { state?: string; status?: string; current?: string; latest
 type PlatformPayload = { mode?: string; checked_at?: number; host?: UpdatePayload; routeros?: UpdatePayload; z4pro?: UpdatePayload; mihomo?: UpdatePayload; mosdns?: UpdatePayload }
 type DnsLog = JsonRecord & { query_name?: string; client_ip?: string; query_type?: string; duration_ms?: number; response_code?: string; query_time?: string }
 type AirportSource = { slot: string; label: string; imported?: boolean; nodes?: number; updated_at?: string }
-type AirportState = { slots?: AirportSource[]; nodes?: Array<{ name?: string; source?: string; label?: string }>; pools?: Record<string, string[]>; source_selections?: Record<string, string | null>; settings?: Record<string, JsonRecord>; tests?: JsonRecord; suggestions?: JsonRecord; derived_exits?: JsonRecord }
+type AirportScopeSelection = string | { source?: string | null; location?: string }
+type AirportState = { slots?: AirportSource[]; nodes?: Array<{ name?: string; source?: string; label?: string }>; pools?: Record<string, string[]>; pool_labels?: Record<string, string>; video_locations?: Record<string, string>; source_selections?: Record<string, AirportScopeSelection | null>; settings?: Record<string, JsonRecord>; tests?: JsonRecord; suggestions?: JsonRecord; derived_exits?: JsonRecord }
 type RulePayload = { rules?: string[]; version?: string; policies?: string[]; protected?: string[]; rule_sets?: JsonRecord[]; rule_sets_version?: string; rule_card_labels?: Record<string, string>; rule_card_labels_version?: string }
 
 const views = [
@@ -198,7 +199,17 @@ const airportFilter = ref('')
 const airportPoolEditor = ref('')
 const airportPoolMode = ref('fallback')
 const airportCsrf = ref('')
-const airportSourceSelections = ref<Record<string, string | null>>({})
+const airportSourceSelections = ref<Record<string, AirportScopeSelection | null>>({})
+const airportVideoLocations = [
+  { value: 'all', label: '全部地点' },
+  { value: 'hk', label: '香港 HK' },
+  { value: 'jp', label: '日本 JP' },
+  { value: 'sg', label: '新加坡 SG' },
+  { value: 'tw', label: '台湾 TW' },
+  { value: 'kr', label: '韩国 KR' },
+  { value: 'us', label: '美国 US' },
+  { value: 'other', label: '其它地点' },
+]
 
 const rulesPayload = ref<RulePayload>({ rules: [] })
 const ruleDraft = ref<string[]>([])
@@ -955,37 +966,92 @@ function airportSourceLabelForSlot(slot: string) {
   return airportSources.value.find((source) => source.slot === slot)?.label || slot
 }
 
-function airportSourceLabel(pool: string) {
+function airportPoolLabel(pool: string) {
+  return pool === 'HK-视频' ? '视频' : pool
+}
+
+function airportVideoScope() {
+  const selection = airportSourceSelections.value['HK-视频']
+  if (selection && typeof selection === 'object') {
+    return { source: selection.source || null, location: selection.location || 'all' }
+  }
+  return { source: typeof selection === 'string' ? selection : null, location: 'all' }
+}
+
+function airportSourceValue(pool: string) {
+  if (pool === 'HK-视频') return airportVideoScope().source || ''
   const selection = airportSourceSelections.value[pool]
+  return typeof selection === 'string' ? selection : ''
+}
+
+function airportSourceLabel(pool: string) {
+  const raw = pool === 'HK-视频' ? airportVideoScope().source : airportSourceSelections.value[pool]
+  const selection = typeof raw === 'string' ? raw : null
   if (!selection) return '保持当前生效范围'
   if (selection === 'all') return '全部已导入机场'
   return airportSourceLabelForSlot(selection)
 }
 
+function airportVideoLocation() {
+  const value = airportVideoScope().location
+  return airportVideoLocations.find((item) => item.value === value)?.label || '全部地点'
+}
+
 async function setAirportSourceSelection(pool: string, event: Event) {
   const select = event.target as HTMLSelectElement
   const next = select.value || null
-  const previous = airportSourceSelections.value[pool] || ''
-  if (next === (previous || null)) return
+  const previous = pool === 'HK-视频'
+    ? airportVideoScope().source || ''
+    : (typeof airportSourceSelections.value[pool] === 'string' ? airportSourceSelections.value[pool] as string : '')
+  if (next === previous) return
   if (!window.confirm(next
-    ? `将把 ${pool} 的全量测速范围锁定为${next === 'all' ? '全部已导入机场' : airportSourceLabelForSlot(next)}；当前出口不会改变。继续吗？`
-    : `将清除 ${pool} 的机场范围限制；当前出口不会改变。继续吗？`)) {
+    ? `将把 ${airportPoolLabel(pool)} 的全量测速范围锁定为${next === 'all' ? '全部已导入机场' : airportSourceLabelForSlot(next)}；当前出口不会改变。继续吗？`
+    : `将清除 ${airportPoolLabel(pool)} 的机场范围限制；当前出口不会改变。继续吗？`)) {
     select.value = previous
     return
   }
   busy.value = `airport-source-${pool}`
   try {
+    const location = pool === 'HK-视频' ? airportVideoScope().location : undefined
     const result = await airportApi<JsonRecord>('/api/pool-source-scope', {
       method: 'POST',
-      body: JSON.stringify({ pool, source: next }),
+      body: JSON.stringify({ pool, source: next, ...(location ? { location } : {}) }),
     })
-    airportSourceSelections.value = { ...((result.source_selections || {}) as Record<string, string | null>) }
+    airportSourceSelections.value = { ...((result.source_selections || {}) as Record<string, AirportScopeSelection | null>) }
     airportPools.value = Object.fromEntries(Object.entries((result.pools || {}) as Record<string, string[]>).map(([key, values]) => [key, [...values]]))
     await loadAirportState()
-    notify(next ? `${pool} 已锁定${next === 'all' ? '全部已导入机场' : airportSourceLabelForSlot(next)}，请执行全量稳定性测速` : `${pool} 已恢复当前生效机场范围`)
+    notify(next ? `${airportPoolLabel(pool)} 已锁定${next === 'all' ? '全部已导入机场' : airportSourceLabelForSlot(next)}，请执行全量稳定性测速` : `${airportPoolLabel(pool)} 已恢复当前生效机场范围`)
   } catch (error) {
     select.value = previous
     notify(error instanceof Error ? error.message : '机场范围保存失败')
+  } finally {
+    busy.value = ''
+  }
+}
+
+async function setAirportVideoLocation(event: Event) {
+  const select = event.target as HTMLSelectElement
+  const next = select.value || 'all'
+  const previous = airportVideoScope().location
+  if (next === previous) return
+  const source = airportVideoScope().source || 'all'
+  if (!window.confirm(`将把视频的地点测速范围锁定为${airportVideoLocations.find((item) => item.value === next)?.label || next}；当前出口不会改变。继续吗？`)) {
+    select.value = previous
+    return
+  }
+  busy.value = 'airport-location-video'
+  try {
+    const result = await airportApi<JsonRecord>('/api/pool-source-scope', {
+      method: 'POST',
+      body: JSON.stringify({ pool: 'HK-视频', source, location: next }),
+    })
+    airportSourceSelections.value = { ...((result.source_selections || {}) as Record<string, AirportScopeSelection | null>) }
+    airportPools.value = Object.fromEntries(Object.entries((result.pools || {}) as Record<string, string[]>).map(([key, values]) => [key, [...values]]))
+    await loadAirportState()
+    notify(`视频已锁定${airportVideoLocation()}，请执行全量稳定性测速`)
+  } catch (error) {
+    select.value = previous
+    notify(error instanceof Error ? error.message : '视频地点范围保存失败')
   } finally {
     busy.value = ''
   }
@@ -2081,7 +2147,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); if (airportTestPol
           </template>
 
           <template v-else-if="airportTab === 'pools'">
-            <section class="surface-card"><div class="toolbar feature-toolbar"><div class="search-field"><Search :size="17" /><input v-model="airportFilter" placeholder="筛选节点名称" /></div><button class="primary-button" :disabled="busy === 'airport-test'" @click="testAirportAll"><Activity :size="15" />三次稳定性测速</button><button class="secondary-button" :disabled="busy === 'airport-retest'" @click="retestAirportPools">复测并生效</button><button class="secondary-button" @click="saveAirportPools">校验并应用</button><button class="compact-button danger" @click="rollbackAirportPools">回退上一版</button></div><div v-if="airportProgressVisible" class="airport-progress"><div class="airport-progress-bar"><span :style="{ width: `${airportTestProgress}%` }" /></div><span>{{ airportTestStatusText }}</span></div><div class="data-note-line">{{ airportTestedAt ? `上次稳定性测速：${timeValue(airportTestedAt)}` : '尚未执行稳定性测速；每次只在人工操作时测试节点。' }}</div></section><div class="pool-grid"><article v-for="pool in airportPoolNames" :key="pool" class="surface-card pool-card"><div class="card-heading"><div><h2>{{ pool }}</h2><span class="muted-caption">{{ (airportPools[pool] || []).length }}/5 个候选</span></div><button class="icon-button small" title="编辑候选池模式" aria-label="编辑候选池模式" @click="openAirportPoolEditor(pool)"><Pencil :size="15" /></button></div><div class="pool-mode"><span class="soft-badge mini">{{ airportSettings[pool]?.type === 'url-test' ? '自动测速' : airportSettings[pool]?.type === 'select' ? '手动选择' : '故障切换' }}</span><span class="muted-caption">按业务专项探针排序</span></div><label class="pool-source-scope"><span>测速机场范围</span><select :value="airportSourceSelections[pool] || ''" :disabled="busy === `airport-source-${pool}` || airportTestRunning" @change="setAirportSourceSelection(pool, $event)"><option value="">保持当前生效范围</option><option value="all">全部已导入机场</option><option v-for="source in airportSources.filter((item) => item.imported)" :key="source.slot" :value="source.slot">{{ source.label }}</option></select><small>{{ airportSourceLabel(pool) }}；锁定后先全量测速，再复测并生效</small></label><div v-for="(node, index) in airportPools[pool] || []" :key="node" class="pool-node"><div><strong>{{ node }}</strong><small v-if="airportMetric(node).delay !== undefined">{{ airportMetric(node).delay }} ms · 抖动 {{ airportMetric(node).jitter }} · {{ airportMetric(node).success }}/3</small></div><div class="pool-node-actions"><button class="icon-button small" title="上移" aria-label="上移" @click="moveAirportNode(pool, index, -1)">↑</button><button class="icon-button small" title="下移" aria-label="下移" @click="moveAirportNode(pool, index, 1)">↓</button><button class="icon-button small" title="移除节点" aria-label="移除节点" @click="removeAirportNode(pool, index)"><X :size="14" /></button></div></div><div class="pool-add"><select @change="selectAirportNode(pool, $event)"><option value="">添加候选节点</option><option v-for="node in airportFilteredNodes(pool)" :key="node.name" :value="node.name">{{ node.name }}</option></select></div></article></div>
+            <section class="surface-card"><div class="toolbar feature-toolbar"><div class="search-field"><Search :size="17" /><input v-model="airportFilter" placeholder="筛选节点名称" /></div><button class="primary-button" :disabled="busy === 'airport-test'" @click="testAirportAll"><Activity :size="15" />三次稳定性测速</button><button class="secondary-button" :disabled="busy === 'airport-retest'" @click="retestAirportPools">复测并生效</button><button class="secondary-button" @click="saveAirportPools">校验并应用</button><button class="compact-button danger" @click="rollbackAirportPools">回退上一版</button></div><div v-if="airportProgressVisible" class="airport-progress"><div class="airport-progress-bar"><span :style="{ width: `${airportTestProgress}%` }" /></div><span>{{ airportTestStatusText }}</span></div><div class="data-note-line">{{ airportTestedAt ? `上次稳定性测速：${timeValue(airportTestedAt)}` : '尚未执行稳定性测速；每次只在人工操作时测试节点。' }}</div></section><div class="pool-grid"><article v-for="pool in airportPoolNames" :key="pool" class="surface-card pool-card"><div class="card-heading"><div><h2>{{ airportPoolLabel(pool) }}</h2><span class="muted-caption">{{ (airportPools[pool] || []).length }}/5 个候选</span></div><button class="icon-button small" title="编辑候选池模式" aria-label="编辑候选池模式" @click="openAirportPoolEditor(pool)"><Pencil :size="15" /></button></div><div class="pool-mode"><span class="soft-badge mini">{{ airportSettings[pool]?.type === 'url-test' ? '自动测速' : airportSettings[pool]?.type === 'select' ? '手动选择' : '故障切换' }}</span><span class="muted-caption">{{ pool === 'HK-视频' ? '跨地域混合，按延迟与抖动排序' : '按业务专项探针排序' }}</span></div><label class="pool-source-scope"><span>测速机场范围</span><select :value="airportSourceValue(pool)" :disabled="busy === `airport-source-${pool}` || airportTestRunning" @change="setAirportSourceSelection(pool, $event)"><option value="">保持当前生效范围</option><option value="all">全部已导入机场</option><option v-for="source in airportSources.filter((item) => item.imported)" :key="source.slot" :value="source.slot">{{ source.label }}</option></select><small>{{ airportSourceLabel(pool) }}；{{ pool === 'HK-视频' ? '视频池跨地域混合，按三次探测的中位延迟和抖动筛选；' : '' }}锁定后先全量测速，再复测并生效</small></label><label v-if="pool === 'HK-视频'" class="pool-source-scope"><span>地点范围</span><select :value="airportVideoScope().location" :disabled="busy === 'airport-location-video' || airportTestRunning" @change="setAirportVideoLocation"><option v-for="location in airportVideoLocations" :key="location.value" :value="location.value">{{ location.label }}</option></select><small>{{ airportVideoLocation() }}；地点条件只影响视频池下一轮测速</small></label><div v-for="(node, index) in airportPools[pool] || []" :key="node" class="pool-node"><div><strong>{{ node }}</strong><small v-if="airportMetric(node).delay !== undefined">{{ airportMetric(node).delay }} ms · 抖动 {{ airportMetric(node).jitter }} · {{ airportMetric(node).success }}/3</small></div><div class="pool-node-actions"><button class="icon-button small" title="上移" aria-label="上移" @click="moveAirportNode(pool, index, -1)">↑</button><button class="icon-button small" title="下移" aria-label="下移" @click="moveAirportNode(pool, index, 1)">↓</button><button class="icon-button small" title="移除节点" aria-label="移除节点" @click="removeAirportNode(pool, index)"><X :size="14" /></button></div></div><div class="pool-add"><select @change="selectAirportNode(pool, $event)"><option value="">添加候选节点</option><option v-for="node in airportFilteredNodes(pool)" :key="node.name" :value="node.name">{{ node.name }}</option></select></div></article></div>
           </template>
 
           <template v-else>
@@ -2125,7 +2191,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); if (airportTestPol
     <div v-if="wireguardRenameTarget" class="modal-backdrop" @click.self="wireguardRenameTarget = null"><form class="modal-card" @submit.prevent="saveWireguardRename"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="wireguardRenameTarget = null"><X :size="17" /></button><span class="eyebrow">WIREGUARD NAME</span><h2>编辑远程互联名称</h2><p>当前显示：{{ wireguardRenameTarget.label }}；留空即可恢复原始名称。</p><label>显示名称<input v-model="wireguardRenameDraft" autofocus maxlength="40" :placeholder="wireguardRenameTarget.defaultLabel" /></label><div class="modal-actions"><button type="button" class="secondary-button" @click="wireguardRenameTarget = null">取消</button><button class="primary-button" type="submit" :disabled="busy === 'wireguard-rename'">保存</button></div></form></div>
     <div v-if="remoteWireguardConfig" class="modal-backdrop" @click.self="remoteWireguardConfig = null"><div class="modal-card remote-wg-qr-modal"><button type="button" class="modal-close icon-button" title="关闭二维码" aria-label="关闭二维码" @click="remoteWireguardConfig = null"><X :size="17" /></button><span class="eyebrow">WIREGUARD CLIENT</span><h2>{{ remoteWireguardConfig.name }}</h2><p>使用官方 WireGuard 客户端扫描二维码；客户端地址 {{ remoteWireguardConfig.address }}。二维码包含私钥，请勿转发。</p><div class="remote-wg-qr"><img :src="remoteWireguardConfig.qr" alt="WireGuard 客户端二维码" /></div><div class="modal-actions"><button type="button" class="secondary-button" @click="downloadRemoteWireguard"><ArrowDown :size="15" />下载 .conf</button><button type="button" class="primary-button" @click="remoteWireguardConfig = null">完成</button></div></div></div>
     <div v-if="dnsUpstreamsOpen" class="modal-backdrop" @click.self="dnsUpstreamsOpen = false"><form class="modal-card wide-editor" @submit.prevent="saveDnsUpstreams"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="dnsUpstreamsOpen = false"><X :size="17" /></button><span class="eyebrow">DNS UPSTREAMS</span><h2>{{ dnsUpstreamEditSide === 'foreign' ? '编辑国外解析地址' : '编辑国内解析地址' }}</h2><p>一行一个地址；带有 `|` 的内容会作为拨号地址保留。保存时会先做健康检查，失败不会替换当前配置。</p><label v-if="dnsUpstreamEditSide !== 'foreign'">国内上游<textarea v-model="dnsDomesticDraft" spellcheck="false" placeholder="223.5.5.5&#10;https://dns.alidns.com/dns-query" /></label><label v-if="dnsUpstreamEditSide === 'foreign'">国外上游<textarea v-model="dnsForeignDraft" spellcheck="false" placeholder="https://1.1.1.1/dns-query" /></label><div class="modal-actions"><button type="button" class="secondary-button" @click="dnsUpstreamsOpen = false">取消</button><button class="primary-button" type="submit" :disabled="busy === 'dns-upstreams'">校验并应用</button></div></form></div>
-    <div v-if="airportPoolEditor" class="modal-backdrop" @click.self="airportPoolEditor = ''"><form class="modal-card" @submit.prevent="saveAirportPoolMode"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="airportPoolEditor = ''"><X :size="17" /></button><span class="eyebrow">POOL MODE</span><h2>编辑 {{ airportPoolEditor }}</h2><p>模式只改变当前候选池的选择方式，不会修改订阅内容。</p><label>候选池模式<select v-model="airportPoolMode"><option value="fallback">故障切换：按顺序使用候选</option><option value="url-test">自动测速：按延迟和健康度选择</option><option value="select">手动选择：保持当前节点</option></select></label><div class="modal-actions"><button type="button" class="secondary-button" @click="airportPoolEditor = ''">取消</button><button class="primary-button" type="submit" :disabled="busy === 'airport-mode'">保存模式</button></div></form></div>
+    <div v-if="airportPoolEditor" class="modal-backdrop" @click.self="airportPoolEditor = ''"><form class="modal-card" @submit.prevent="saveAirportPoolMode"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="airportPoolEditor = ''"><X :size="17" /></button><span class="eyebrow">POOL MODE</span><h2>编辑 {{ airportPoolLabel(airportPoolEditor) }}</h2><p>模式只改变当前候选池的选择方式，不会修改订阅内容。</p><label>候选池模式<select v-model="airportPoolMode"><option value="fallback">故障切换：按顺序使用候选</option><option value="url-test">自动测速：按延迟和健康度选择</option><option value="select">手动选择：保持当前节点</option></select></label><div class="modal-actions"><button type="button" class="secondary-button" @click="airportPoolEditor = ''">取消</button><button class="primary-button" type="submit" :disabled="busy === 'airport-mode'">保存模式</button></div></form></div>
     <div v-if="ruleCardEditorOpen" class="modal-backdrop" @click.self="closeRuleCardEditor"><form class="modal-card wide-editor rule-card-editor" @submit.prevent="closeRuleCardEditor"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="closeRuleCardEditor"><X :size="17" /></button><span class="eyebrow">RULE CARD</span><h2>{{ ruleCardTitle(ruleCardEditorKey, ruleCardEntries(ruleCardEditorKey)) }}</h2><p>修改会直接写入当前草稿；跨卡片的优先级请回到卡片网格拖动调整。</p><label v-if="ruleCardEditorKey.startsWith('__custom__')">卡片名称<input :value="ruleCardLabel(ruleCardEditorKey)" maxlength="40" placeholder="留空则显示匹配内容" @input="setRuleCardLabel(ruleCardEditorKey, $event)" /></label><div v-if="ruleCardEntries(ruleCardEditorKey).length" class="rule-card-editor-list"><div v-for="entry in ruleCardEntries(ruleCardEditorKey)" :key="`${entry.index}-${entry.raw}`" class="rule-card-editor-row"><div class="editor-rule-top"><span>第 {{ entry.index + 1 }} 条</span><span v-if="ruleIsProtected(entry.raw)" class="system-badge">系统保护</span></div><template v-if="ruleAdvanced"><input class="control raw-control" :value="entry.raw" :readonly="ruleIsProtected(entry.raw)" @input="setRawRule(entry.index, $event)" /></template><template v-else><div class="editor-two-column"><label>匹配方式<select class="control" :value="entry.model.type" :disabled="ruleIsProtected(entry.raw)" @change="setRuleFromEvent(entry.index, 'type', $event)"><option value="DOMAIN">域名</option><option value="DOMAIN-SUFFIX">域名及子域名</option><option value="DOMAIN-KEYWORD">域名关键词</option><option value="GEOSITE">网站分类</option><option value="GEOIP">地区 IP</option><option value="IP-CIDR">IPv4 网段</option><option value="IP-CIDR6">IPv6 网段</option><option value="MATCH">兜底</option></select></label><label>匹配内容<input class="control" :value="entry.model.value" :readonly="ruleIsProtected(entry.raw) || entry.model.type === 'MATCH'" placeholder="例如 example.com" @input="setRuleFromEvent(entry.index, 'value', $event)" /></label><label>出口<select class="control" :value="entry.model.policy" :disabled="ruleIsProtected(entry.raw)" @change="setRuleFromEvent(entry.index, 'policy', $event)"><option v-for="policy in rulePolicies" :key="policy" :value="policy">{{ policy }}</option></select></label></div></template><div class="modal-actions editor-row-actions"><span v-if="ruleIsProtected(entry.raw)" class="muted-caption">系统规则不可改写</span><button v-else type="button" class="compact-button danger" @click="removeRule(entry.index)"><Trash2 :size="14" />删除此规则</button></div></div></div><div v-else class="empty-inline">此卡片暂时没有可编辑规则</div><div class="modal-actions"><button v-if="ruleCardEditorKey !== '__default__' && !ruleCardEditorKey.startsWith('set:')" type="button" class="secondary-button" @click="addRuleToCard(ruleCardEditorKey)"><Plus :size="15" />新增到此卡片</button><button type="submit" class="primary-button">完成</button></div></form></div>
     <div v-if="ruleSetEditorOpen" class="modal-backdrop" @click.self="ruleSetEditorOpen = false"><form class="modal-card rule-set-editor" @submit.prevent="addRuleSet"><button type="button" class="modal-close icon-button" title="关闭" aria-label="关闭" @click="ruleSetEditorOpen = false"><X :size="17" /></button><span class="eyebrow">RULE SET</span><h2>{{ ruleSetEditorIndex >= 0 ? '编辑规则集合' : '新增规则集合' }}</h2><p>支持多条 HTTPS 来源；由现有 Proxy 候选池下载，失败时保留上一份本地缓存。</p><label>常用集合<select @change="applyRuleSetPreset"><option value="">选择后追加旧版预置来源</option><option v-for="preset in ruleSetPresetItems" :key="preset.id" :value="preset.id">{{ preset.name }} · {{ preset.group }}</option></select></label><label>集合名称<input v-model="ruleSetName" maxlength="40" placeholder="例如 我的 AI 规则" /></label><label>出口<select v-model="ruleSetPolicy"><option v-if="!rulePolicies.includes(ruleSetPolicy)" :value="ruleSetPolicy">{{ ruleSetPolicy }}</option><option v-for="policy in rulePolicies" :key="policy" :value="policy">{{ policy }}</option></select></label><label>规则集 HTTPS 地址<textarea v-model="ruleSetUrls" spellcheck="false" @input="syncRuleSetSourceMetadata" placeholder="https://raw.githubusercontent.com/.../rules.mrs&#10;一行一条" /></label><div class="editor-two-column"><label>手动来源的匹配类型<select v-model="ruleSetBehavior" @change="syncRuleSetManualSources"><option value="domain">域名</option><option value="ipcidr">IP 网段</option><option value="classical">复合规则</option></select></label><label>手动来源的文件格式<select v-model="ruleSetFormat" @change="syncRuleSetManualSources"><option value="mrs">MRS（二进制）</option><option value="yaml">YAML</option><option value="text">文本</option></select></label><label>匹配优先级<select v-model="ruleSetPriority"><option value="normal">普通优先级</option><option value="high">高优先级</option></select></label><label>更新周期<select v-model="ruleSetInterval"><option value="21600">每 6 小时</option><option value="86400">每天</option><option value="604800">每周</option></select></label></div><div class="data-note-line">预设来源保留各自的匹配类型；手动来源会跟随下方选择更新。</div><div class="modal-actions"><button type="button" class="secondary-button" @click="ruleSetEditorOpen = false">取消</button><button class="primary-button" type="submit">保存到草稿</button></div></form></div>
   </div>

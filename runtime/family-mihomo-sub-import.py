@@ -34,7 +34,9 @@ DEFAULT_SOURCES = [
     {"slot": "backup2", "label": "备用机场 2", "prefix": "[备用2] "},
 ]
 POOLS = {
-    "HK-视频": ("hk", "香港", "hkg"),
+    # Keep the historical group name for rule compatibility. Video exits are
+    # intentionally mixed across regions and selected by business probes.
+    "HK-视频": (),
     "JP-AI": ("jp", "日本", "jpn"),
     "SG-AI": ("sg", "新加坡", "sgp"),
     "US-AI": ("us", "美国", "usa"),
@@ -46,9 +48,30 @@ POOLS = {
            "my", "马来", "mys", "vn", "越南", "vnm", "id", "印尼", "idn"),
     "Proxy": ("hk", "香港", "hkg"),
 }
+VIDEO_POOL = "HK-视频"
+POOL_LABELS = {VIDEO_POOL: "视频"}
+VIDEO_LOCATION_LABELS = {
+    "all": "全部地点",
+    "hk": "香港 HK",
+    "jp": "日本 JP",
+    "sg": "新加坡 SG",
+    "tw": "台湾 TW",
+    "kr": "韩国 KR",
+    "us": "美国 US",
+    "other": "其它地点",
+}
+VIDEO_LOCATION_WORDS = {
+    "hk": ("hk", "香港", "hkg", "hong kong"),
+    "jp": ("jp", "日本", "jpn", "japan"),
+    "sg": ("sg", "新加坡", "sgp", "singapore"),
+    "tw": ("tw", "台湾", "twn", "taiwan", "台北"),
+    "kr": ("kr", "韩国", "kor", "korea"),
+    "us": ("us", "美国", "usa", "united states"),
+}
+MIXED_POOLS = frozenset({VIDEO_POOL})
 AI_REGIONAL_POOLS = ("JP-AI", "SG-AI", "US-AI")
 HK_NODE = re.compile(r"(?:香港|hong[ -]?kong|(?<![a-z])hkg?(?![a-z]))", re.I)
-SUGGESTION_SCHEMA = 4
+SUGGESTION_SCHEMA = 5
 CANDIDATES = PROVIDERS / "candidates.json"
 PREVIOUS = PROVIDERS / "candidates.previous.json"
 POOL_SETTINGS = PROVIDERS / "pool-settings.json"
@@ -410,14 +433,72 @@ def validate_pool_settings(value):
     return cleaned
 
 
+def normalize_video_location(value, strict=False):
+    location = str(value or "all").casefold()
+    if location in VIDEO_LOCATION_LABELS:
+        return location
+    if strict:
+        raise ValueError("无效视频地点")
+    return "all"
+
+
+def scope_parts(pool, scope):
+    if pool != VIDEO_POOL:
+        return scope, "all"
+    if isinstance(scope, dict):
+        return scope.get("source"), normalize_video_location(scope.get("location"))
+    return scope, "all"
+
+
+def video_location_matches(node, location):
+    location = normalize_video_location(location)
+    if location == "all":
+        return True
+    raw = str(node.get("raw") or "").casefold()
+
+    def has_word(word):
+        word = word.casefold()
+        if word.isascii():
+            return re.search(rf"(?<![a-z]){re.escape(word)}(?![a-z])", raw) is not None
+        return word in raw
+
+    if location == "other":
+        return not any(video_location_matches(node, key) for key in VIDEO_LOCATION_WORDS)
+    return any(has_word(word) for word in VIDEO_LOCATION_WORDS[location])
+
+
+def scope_matches(pool, node, scope):
+    source, location = scope_parts(pool, scope)
+    if source is None:
+        return False
+    if source != "all" and node["source"] != source:
+        return False
+    return pool_matches(pool, node) and (
+        pool != VIDEO_POOL or video_location_matches(node, location)
+    )
+
+
 def source_selections():
-    """Return pending per-pool airport scopes; None means keep current scope."""
+    """Return pending per-pool scopes; video includes airport and location."""
     data = read_json(POOL_SOURCE_SELECTION, {})
     raw = data.get("pools", {}) if isinstance(data, dict) else {}
     valid_slots = set(source_slots())
     selected = {}
     for pool in POOLS:
         value = raw.get(pool) if isinstance(raw, dict) else None
+        if pool == VIDEO_POOL:
+            if isinstance(value, dict):
+                source = value.get("source")
+                location = normalize_video_location(value.get("location"))
+            else:
+                source = value
+                location = "all"
+            if source in ("", "current"):
+                source = None
+            if source != "all" and source not in valid_slots:
+                source = None
+            selected[pool] = {"source": source, "location": location} if source is not None else None
+            continue
         if value in ("", "current"):
             value = None
         if value != "all" and value not in valid_slots:
@@ -426,8 +507,8 @@ def source_selections():
     return selected
 
 
-def set_source_selection(pool, slot):
-    """Save a pending airport scope without changing the active candidate pool."""
+def set_source_selection(pool, slot, location=None):
+    """Save pending airport/location scope without changing active candidates."""
     if pool not in POOLS:
         raise ValueError("无效业务候选池")
     with TEST_STATE_LOCK:
@@ -438,33 +519,45 @@ def set_source_selection(pool, slot):
     elif slot != "all" and slot not in source_slots():
         raise ValueError("无效机场来源")
     selected = source_selections()
-    selected[pool] = slot
+    if pool == VIDEO_POOL:
+        if slot is None:
+            selected[pool] = None
+        else:
+            previous = selected.get(pool) if isinstance(selected.get(pool), dict) else {}
+            selected[pool] = {
+                "source": slot,
+                "location": normalize_video_location(
+                    location if location is not None else previous.get("location"),
+                    strict=True,
+                ),
+            }
+    else:
+        selected[pool] = slot
     atomic_json(POOL_SOURCE_SELECTION, {"pools": selected})
     # A pending source change invalidates a suggestion generated from an older scope.
     SUGGESTIONS.unlink(missing_ok=True)
     with TEST_STATE_LOCK:
         TEST_STATE.update({"finished_at": None, "error": None, "action": None,
                            "phase": None, "proposal_ready": False, "applied": False})
-    return {"pool": pool, "source": slot, "source_selections": selected, "pools": pools()}
+    return {"pool": pool, "source": selected[pool], "source_selections": selected, "pools": pools()}
 
 
-def scoped_pool_nodes(pool, slot):
+def scoped_pool_nodes(pool, scope):
     """Return every imported node eligible for one explicitly selected scope."""
-    if slot is None:
+    if scope is None:
         return []
-    return [node["name"] for node in nodes()
-            if (slot == "all" or node["source"] == slot) and pool_matches(pool, node)]
+    return [node["name"] for node in nodes() if scope_matches(pool, node, scope)]
 
 
 def validate_source_scoped_pools(value, selections):
-    """Reject a draft that escapes its airport scope before confirmation."""
+    """Reject a draft that escapes its airport/location scope before confirmation."""
     indexed = node_index()
-    for pool, slot in (selections or {}).items():
-        if slot is None:
+    for pool, scope in (selections or {}).items():
+        if scope is None:
             continue
         for name in value.get(pool, []):
-            if slot != "all" and indexed[name]["source"] != slot:
-                raise ValueError(f"{pool} 含有不属于所选机场的节点")
+            if not scope_matches(pool, indexed[name], scope):
+                raise ValueError(f"{pool} 含有不属于所选机场或地点的节点")
     return value
 
 
@@ -497,6 +590,8 @@ def node_index():
 
 
 def pool_matches(pool, node):
+    if pool in MIXED_POOLS:
+        return True
     if pool == "其他-AI":
         return not HK_NODE.search(node["raw"]) and not any(
             pool_matches(regional_pool, node) for regional_pool in AI_REGIONAL_POOLS
@@ -504,12 +599,14 @@ def pool_matches(pool, node):
     return any(word.casefold() in node["raw"].casefold() for word in POOLS[pool])
 
 
-def source_pool_candidates(pool, slot="all"):
+def source_pool_candidates(pool, slot="all", location="all"):
     """Return up to five source-scoped candidates, preferring recent tests."""
     if pool not in POOLS:
         raise ValueError("无效业务候选池")
     if slot != "all" and slot not in source_slots():
         raise ValueError("无效机场来源")
+    scope = ({"source": slot, "location": normalize_video_location(location, strict=True)}
+             if pool == VIDEO_POOL else slot)
     test_data = read_json(LAST_TESTS, {})
     recent = {
         item.get("name"): item
@@ -518,7 +615,7 @@ def source_pool_candidates(pool, slot="all"):
     }
     eligible = [
         node for node in nodes()
-        if (slot == "all" or node["source"] == slot) and pool_matches(pool, node)
+        if scope_matches(pool, node, scope)
     ]
 
     def rank(node):
@@ -526,7 +623,9 @@ def source_pool_candidates(pool, slot="all"):
         success = int(result.get("success") or 0)
         delay = result.get("delay") if result.get("delay") is not None else 999999
         jitter = result.get("jitter") if result.get("jitter") is not None else 999999
-        return (success != 3, int(delay), float(jitter), node["name"])
+        score = (int(delay) + round(float(jitter) * 0.35)
+                 if result.get("delay") is not None else 999999)
+        return (success != 3, score, int(delay), float(jitter), node["name"])
 
     return [node["name"] for node in sorted(eligible, key=rank)[:5]]
 
@@ -597,7 +696,7 @@ def build_suggestions(results, source_scopes=None, current=None):
                 result = result_by_pool_name[(pool, name)]
             if not result or result.get("success") != 3 or result.get("delay") is None:
                 continue
-            if (scope == "all" or node["source"] == scope) and pool_matches(pool, node):
+            if scope_matches(pool, node, scope):
                 eligible.append({"name": name, "source": node["source"], "score": test_score(result)})
         proposed[pool] = rank_pool_candidates(eligible)
         if not proposed[pool]:
@@ -621,11 +720,12 @@ def seed_pools():
 def default_pools_for_import():
     """Build a conservative first-run pool without requiring a speed test.
 
-    Region-aware pools only receive nodes whose names identify that region. If
-    a subscription has no Hong Kong node, Proxy still needs a usable bootstrap
-    path, so it receives the first few imported nodes as a generic reserve.
-    Later full testing and confirmation can replace these entries with the
-    normal stability-ranked candidates.
+    The mixed video pool receives all imported nodes so it can be ranked across
+    regions after the YouTube stability test. Other regional pools only receive
+    nodes whose names identify that region. If a subscription has no Hong Kong
+    node, Proxy still needs a usable bootstrap path, so it receives the first
+    few imported nodes as a generic reserve. Later full testing and confirmation
+    can replace these entries with the normal stability-ranked candidates.
     """
     available = nodes()
     seeded = {}
@@ -1064,7 +1164,7 @@ def validate_pools(value, allow_empty=False, allow_generic_proxy=False):
             raise ValueError(f"{pool} 含有不存在的节点")
         if any(not pool_matches(pool, indexed[item]) and not (
                 allow_generic_proxy and pool == "Proxy") for item in entries):
-            raise ValueError(f"{pool} 含有不符合地域规则的节点")
+            raise ValueError(f"{pool} 含有不符合候选范围规则的节点")
         cleaned[pool] = list(entries)
     return cleaned
 
@@ -1388,7 +1488,7 @@ def start_test_all():
     empty = [pool for pool, entries in selected.items() if not entries]
     if empty:
         TEST_JOB_LOCK.release()
-        raise ValueError("所选机场在以下业务池没有符合地域规则的节点：" + "、".join(empty))
+        raise ValueError("所选机场在以下业务池没有符合候选范围规则的节点：" + "、".join(empty))
     total = sum(len(entries) for entries in selected.values())
     now = datetime.now().astimezone().isoformat()
     with TEST_STATE_LOCK:
@@ -2092,6 +2192,12 @@ if _status_marker not in PAGE:
     raise RuntimeError("runtime status load marker missing")
 PAGE = PAGE.replace(_status_marker, _status_replacement, 1)
 
+_video_scope_js = r'''const familyVideoPool='HK-视频',familyVideoLocations={all:'全部地点',hk:'香港 HK',jp:'日本 JP',sg:'新加坡 SG',tw:'台湾 TW',kr:'韩国 KR',us:'美国 US',other:'其它地点'};function familyVideoScope(){let value=sourceSelections[familyVideoPool];if(value&&typeof value==='object')return {source:value.source||'all',location:value.location||'all'};return {source:value||'all',location:'all'}}function familyVideoLocationOptions(){return Object.keys(familyVideoLocations).map(function(key){return '<option value="'+key+'">'+familyVideoLocations[key]+'</option>'}).join('')}function familyVideoControls(){let card=Array.from(document.querySelectorAll('.pool-card')).find(function(item){let title=item.querySelector('h2');return title&&title.textContent==='HK-视频'});if(!card)return;let title=card.querySelector('h2');if(title)title.textContent='视频';let row=card.querySelector('.pool-source');if(!row)return;let location=document.querySelector('#location-'+familyVideoPool);if(!location){location=document.createElement('select');location.id='location-'+familyVideoPool;location.title='视频节点地点';location.setAttribute('aria-label','视频节点地点');location.innerHTML=familyVideoLocationOptions();row.insertBefore(location,row.firstChild)}let scope=familyVideoScope(),source=document.querySelector('#source-'+familyVideoPool);if(source)source.value=scope.source;location.value=scope.location;let button=row.querySelector('button');if(button)button.textContent='锁定测速范围'}const familyRenderPoolsWithVideo=renderPools;renderPools=function(){familyRenderPoolsWithVideo();familyVideoControls()};const familyOpenPoolEditorWithVideo=openPoolEditor;openPoolEditor=function(pool){familyOpenPoolEditorWithVideo(pool);if(pool===familyVideoPool){let title=document.querySelector('#poolEditorTitle');if(title)title.textContent='编辑 视频'}}applySource=async function(pool){let source=(document.querySelector('#source-'+pool)||{}).value||'all',location=pool===familyVideoPool?((document.querySelector('#location-'+pool)||{}).value||'all'):'all';if(!confirm('将锁定 '+(pool===familyVideoPool?'视频':pool)+' 的机场和地点测速范围；当前出口不会改变。确定继续？'))return;let status=document.querySelector('#testStatus');status.textContent='正在保存 '+(pool===familyVideoPool?'视频':pool)+' 的机场和地点筛选范围…';status.className='status';try{let result=await api('/api/pool-source-scope',{method:'POST',body:JSON.stringify({pool:pool,source:source,location:location})});sourceSelections=result.source_selections||sourceSelections;activePools=result.pools;pools=activePools;suggestion=null;catalogLoaded=true;renderPools();status.textContent=(pool===familyVideoPool?'视频':pool)+' 已锁定机场 '+(source==='all'?'全部':source)+'、地点 '+(familyVideoLocations[location]||location)+'；当前出口未改变，请执行“全量稳定性测速”'}catch(error){status.textContent=error.message;status.className='status bad'}}'''
+PAGE = PAGE.replace('</script></body></html>', _video_scope_js + '</script></body></html>', 1)
+
+_video_probe_label_js = r'''const familyRenderProbeReportWithVideo=renderProbeReport;renderProbeReport=function(data){familyRenderProbeReportWithVideo(data);document.querySelectorAll('.probe-card h3').forEach(function(title){if(title.textContent==='HK-视频')title.textContent='视频'})}'''
+PAGE = PAGE.replace('</script></body></html>', _video_probe_label_js + '</script></body></html>', 1)
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
@@ -2126,11 +2232,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             tests = read_json(LAST_TESTS, {})
             self.reply(200, {"slots": [slot_state(s) for s in source_slots()], "pools": pools(),
+                             "pool_labels": POOL_LABELS,
+                             "video_locations": VIDEO_LOCATION_LABELS,
                              "source_selections": source_selections(),
                              "settings": pool_settings(), "derived_exits": derived_exits(), "tests": {"tested_at": tests.get("tested_at")},
                              "suggestions": suggestions()})
         elif path == "/api/nodes":
             self.reply(200, {"slots": [slot_state(s) for s in source_slots()], "nodes": nodes(), "pools": pools(),
+                             "pool_labels": POOL_LABELS,
+                             "video_locations": VIDEO_LOCATION_LABELS,
                              "source_selections": source_selections(),
                              "settings": pool_settings(), "derived_exits": derived_exits(), "tests": read_json(LAST_TESTS, {}),
                              "suggestions": suggestions()})
@@ -2163,7 +2273,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/sources": result = add_source()
             elif path == "/api/source-remove": result = delete_source(body["slot"])
             elif path == "/api/pools": result = save_pools(body.get("pools", {}))
-            elif path == "/api/pool-source-scope": result = set_source_selection(body["pool"], body.get("source"))
+            elif path == "/api/pool-source-scope": result = set_source_selection(
+                body["pool"], body.get("source"), body.get("location")
+            )
             elif path == "/api/pool-settings": result = save_pool_settings(body.get("settings", {}))
             elif path == "/api/retest-apply": result = start_retest_apply(body.get("pools", {}))
             elif path == "/api/rollback": result = rollback_pools()
