@@ -54,9 +54,9 @@ class MihomoBootstrapTests(unittest.TestCase):
         self.apply_import("Edge Node")
 
         selected = json.loads(self.paths["CANDIDATES"].read_text())
+        self.assertEqual(selected["HK-视频"], ["[主力] Edge Node"])
         self.assertEqual(selected["Proxy"], ["[主力] Edge Node"])
         self.assertEqual(selected["其他-AI"], ["[主力] Edge Node"])
-        self.assertEqual(selected["HK-视频"], [])
         self.assertEqual(
             MODULE.validate_pools(selected, allow_empty=True, allow_generic_proxy=True),
             selected,
@@ -113,6 +113,75 @@ class MihomoBootstrapTests(unittest.TestCase):
 
         self.assertEqual(result, ["[备用1] 美国快", "[备用1] 美国慢"])
 
+    def test_video_pool_accepts_mixed_regions_and_preserves_proxy_region_filter(self):
+        nodes = [
+            {"name": "[主力] 香港视频", "raw": "香港视频", "source": "primary"},
+            {"name": "[主力] 日本视频", "raw": "日本视频", "source": "primary"},
+            {"name": "[备用1] 美国视频", "raw": "美国视频", "source": "backup1"},
+        ]
+        with patch.object(MODULE, "nodes", return_value=nodes), \
+             patch.object(MODULE, "source_slots", return_value=["primary", "backup1"]), \
+             patch.object(MODULE, "read_json", return_value={"results": [
+                 {"name": "[主力] 香港视频", "success": 3, "delay": 120, "jitter": 10},
+                 {"name": "[主力] 日本视频", "success": 3, "delay": 90, "jitter": 30},
+                 {"name": "[备用1] 美国视频", "success": 3, "delay": 80, "jitter": 5},
+             ]}):
+            result = MODULE.source_pool_candidates("HK-视频", "all")
+
+        self.assertEqual(
+            result,
+            ["[备用1] 美国视频", "[主力] 日本视频", "[主力] 香港视频"],
+        )
+        self.assertTrue(MODULE.pool_matches("HK-视频", nodes[1]))
+        self.assertFalse(MODULE.pool_matches("Proxy", nodes[1]))
+
+    def test_video_suggestions_rank_mixed_candidates_by_latency_and_jitter(self):
+        current = {name: [] for name in MODULE.POOLS}
+        records = [
+            {"name": "[主力] 日本视频", "raw": "日本视频", "source": "primary"},
+            {"name": "[备用1] 美国视频", "raw": "美国视频", "source": "backup1"},
+            {"name": "[备用1] 新加坡视频", "raw": "新加坡视频", "source": "backup1"},
+        ]
+        results = [
+            {"name": "[主力] 日本视频", "pool": "HK-视频", "success": 3, "delay": 105, "jitter": 4},
+            {"name": "[备用1] 美国视频", "pool": "HK-视频", "success": 3, "delay": 105, "jitter": 10},
+            {"name": "[备用1] 新加坡视频", "pool": "HK-视频", "success": 3, "delay": 100, "jitter": 5},
+        ]
+        scopes = {pool: None for pool in MODULE.POOLS}
+        scopes["HK-视频"] = "all"
+        with patch.object(MODULE, "nodes", return_value=records):
+            proposal = MODULE.build_suggestions(results, scopes, current)
+
+        self.assertEqual(
+            proposal["pools"]["HK-视频"],
+            ["[备用1] 新加坡视频", "[主力] 日本视频", "[备用1] 美国视频"],
+        )
+
+    def test_video_scope_supports_location_filter_and_legacy_airport_string(self):
+        self.paths["POOL_SOURCE_SELECTION"].write_text(json.dumps({
+            "pools": {"HK-视频": "primary"},
+        }))
+        self.assertEqual(
+            MODULE.source_selections()["HK-视频"],
+            {"source": "primary", "location": "all"},
+        )
+        records = [
+            {"name": "[主力] 香港视频", "raw": "香港视频", "source": "primary"},
+            {"name": "[主力] 日本视频", "raw": "日本视频", "source": "primary"},
+            {"name": "[备用1] 日本视频", "raw": "日本视频", "source": "backup1"},
+        ]
+        with patch.object(MODULE, "nodes", return_value=records), \
+             patch.object(MODULE, "source_slots", return_value=["primary", "backup1"]):
+            selected = MODULE.scoped_pool_nodes(
+                "HK-视频", {"source": "all", "location": "jp"}
+            )
+            self.assertEqual(selected, ["[主力] 日本视频", "[备用1] 日本视频"])
+            with self.assertRaisesRegex(ValueError, "机场或地点"):
+                MODULE.validate_source_scoped_pools(
+                    {"HK-视频": ["[主力] 香港视频"]},
+                    {"HK-视频": {"source": "all", "location": "jp"}},
+                )
+
     def test_source_scoped_suggestions_keep_unselected_pool_unchanged(self):
         current = {name: [] for name in MODULE.POOLS}
         current["HK-视频"] = ["[主力] 香港旧节点"]
@@ -137,12 +206,16 @@ class MihomoBootstrapTests(unittest.TestCase):
         self.assertIn("/api/pool-source-scope", MODULE.PAGE)
         self.assertIn("锁定机场范围", MODULE.PAGE)
         self.assertIn("sourceOptions", MODULE.PAGE)
+        self.assertIn("familyVideoLocations", MODULE.PAGE)
+        self.assertIn("编辑 视频", MODULE.PAGE)
 
     def test_new_vue_airport_page_exposes_source_scope_and_pending_apply_flow(self):
         app = (ROOT / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
         self.assertIn("/api/pool-source-scope", app)
         self.assertIn("airportSourceSelections", app)
         self.assertIn("测速机场范围", app)
+        self.assertIn("地点范围", app)
+        self.assertIn("airportVideoLocations", app)
         self.assertIn("先全量测速，再复测并生效", app)
         self.assertIn("!suggestion.applied_at", app)
 
