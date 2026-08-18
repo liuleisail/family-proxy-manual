@@ -159,6 +159,9 @@ POOL_TEST_URLS = {
 }
 GEMINI_ROUTING_RULES = (
     "DOMAIN-SUFFIX,gemini.google.com,Gemini",
+    "DOMAIN-SUFFIX,google.com,Gemini",
+    "DOMAIN-SUFFIX,gstatic.com,Gemini",
+    "DOMAIN-SUFFIX,googleapis.com,Gemini",
     "DOMAIN-SUFFIX,generativelanguage.googleapis.com,Gemini",
     "DOMAIN-SUFFIX,aistudio.google.com,Gemini",
     "DOMAIN-SUFFIX,ai.google.dev,Gemini",
