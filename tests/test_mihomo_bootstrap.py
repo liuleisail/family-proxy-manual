@@ -236,6 +236,8 @@ class MihomoBootstrapTests(unittest.TestCase):
         self.assertIn("sourceOptions", MODULE.PAGE)
         self.assertIn("familyVideoLocations", MODULE.PAGE)
         self.assertIn("编辑 视频", MODULE.PAGE)
+        self.assertIn("}};applySource=async function(pool)", MODULE.PAGE)
+        self.assertNotIn("}}applySource=async function(pool)", MODULE.PAGE)
 
     def test_new_vue_airport_page_exposes_source_scope_and_pending_apply_flow(self):
         app = (ROOT / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
