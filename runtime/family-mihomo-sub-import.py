@@ -98,8 +98,8 @@ NOISE = re.compile(
     re.I,
 )
 OPENER = build_opener(ProxyHandler({}))
-MONITORED_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto", "GitHub-Auto", "V2EX-Auto")
-ALERT_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto", "GitHub-Auto")
+MONITORED_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto", "GitHub-Auto", "V2EX-Auto", "Gemini-Auto")
+ALERT_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto", "GitHub-Auto", "Gemini-Auto")
 ALERT_FAILURE_THRESHOLD = 2
 FAILSAFE_FAILURE_THRESHOLD = 2
 FAILSAFE_RECOVERY_THRESHOLD = 3
@@ -120,6 +120,10 @@ FAILSAFE_EXITS = {
                 "watched": ("JP-AI", "SG-AI", "US-AI", "其他-AI"),
                 "pools": ("JP-AI", "SG-AI", "US-AI", "其他-AI"),
                 "url": "https://chatgpt.com/cdn-cgi/trace"},
+    "Gemini-出口": {"primary": "Gemini-Auto", "emergency": "Gemini-应急",
+                    "watched": ("Gemini-Auto",),
+                    "pools": ("JP-AI", "SG-AI", "US-AI", "其他-AI"),
+                    "url": "https://gemini.google.com/"},
     "TG-出口": {"primary": "TG-Auto", "emergency": "TG-应急",
                 "watched": ("TG-Auto",), "pools": ("TG",),
                 "url": "https://api.telegram.org"},
@@ -133,7 +137,9 @@ FAILSAFE_EXITS = {
 }
 BUSINESS_WRAPPERS = {
     "HK-视频-出口": (("Youtube", "HK-视频"),),
-    "AI-出口": (("AI", "AI-Auto"), ("Gemini", "AI-Auto")),
+    "AI-出口": (("AI", "AI-Auto"),),
+    "Gemini-出口": (("Gemini", "Gemini-Auto"), ("Gemini", "AI-Auto"),
+                    ("Gemini", "AI-出口")),
     "TG-出口": (("Telegram", "TG-Auto"),),
     "Proxy-出口": (("TikTok", "Proxy-Auto"), ("Google", "Proxy-Auto"),
                    ("Others", "Proxy-Auto")),
@@ -151,6 +157,14 @@ POOL_TEST_URLS = {
     "Proxy": "https://www.gstatic.com/generate_204",
     "GitHub-Auto": "https://github.com/",
 }
+GEMINI_ROUTING_RULES = (
+    "DOMAIN-SUFFIX,gemini.google.com,Gemini",
+    "DOMAIN-SUFFIX,generativelanguage.googleapis.com,Gemini",
+    "DOMAIN-SUFFIX,aistudio.google.com,Gemini",
+    "DOMAIN-SUFFIX,ai.google.dev,Gemini",
+    "DOMAIN-SUFFIX,accounts.google.com,Gemini",
+    "DOMAIN-SUFFIX,oauth2.googleapis.com,Gemini",
+)
 DERIVED_EXITS = ("GitHub-Auto",)
 POOL_MODES = {
     "select": "手动选择",
@@ -929,6 +943,11 @@ def generate_config(selected=None, settings=None):
     insert_at = next((index for index, rule in enumerate(rules)
                       if str(rule).startswith(("GEOSITE,CN,", "GEOIP,CN,"))), before_match_index(rules))
     rules.insert(insert_at, v2ex_rule)
+    rules = [rule for rule in rules if rule not in GEMINI_ROUTING_RULES]
+    insert_at = next((index for index, rule in enumerate(rules)
+                      if str(rule).startswith(("RULE-SET,family-", "GEOSITE,"))),
+                     before_match_index(rules))
+    rules[insert_at:insert_at] = GEMINI_ROUTING_RULES
     config["rules"] = rules
     hk, jp, sg, us, other_ai, tg, proxy = (selected[name] for name in POOLS)
     ai_groups = [group for pool, group in (("JP-AI", "JP-AI"), ("SG-AI", "SG-AI"),
@@ -941,6 +960,9 @@ def generate_config(selected=None, settings=None):
     hk_runtime = hk or generic_fallback
     tg_runtime = tg or generic_fallback
     ai_groups = ai_groups or generic_fallback
+    # Gemini keeps one region and uses ordered fallback. This avoids routine
+    # URL-test rotation between different egress IPs during an account session.
+    gemini_runtime = next((entries[:3] for entries in (jp, sg, us, other_ai) if entries), generic_fallback)
     ai_nodes = jp + sg + us + other_ai
     github = github_candidates(selected)
     v2ex = list(dict.fromkeys(proxy))
@@ -968,12 +990,15 @@ def generate_config(selected=None, settings=None):
         fallback("V2EX-Auto", v2ex, "https://www.v2ex.com/", 300, "200"),
         fallback("DNS-Resolve", proxy, "https://dns.google/dns-query", 300),
         fallback("AI-Auto", ai_groups, "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
+        fallback("Gemini-Auto", gemini_runtime, "https://gemini.google.com/", 300),
         *({"name": name, "type": "select", "proxies": entries,
            "empty-fallback": "DIRECT"} for name, entries in emergency.items()),
         {"name": "HK-视频-出口", "type": "select", "proxies": ["HK-视频", "HK-视频-应急", "DIRECT"],
          "default-selected": "HK-视频"},
         {"name": "AI-出口", "type": "select", "proxies": ["AI-Auto", "AI-应急", "DIRECT"],
          "default-selected": "AI-Auto"},
+        {"name": "Gemini-出口", "type": "select", "proxies": ["Gemini-Auto", "Gemini-应急", "DIRECT"],
+         "default-selected": "Gemini-Auto"},
         {"name": "TG-出口", "type": "select", "proxies": ["TG-Auto", "TG-应急", "DIRECT"],
          "default-selected": "TG-Auto"},
         {"name": "Proxy-出口", "type": "select", "proxies": ["Proxy-Auto", "Proxy-应急", "DIRECT"],
@@ -981,7 +1006,7 @@ def generate_config(selected=None, settings=None):
         {"name": "GitHub-出口", "type": "select", "proxies": ["GitHub-Auto", "GitHub-应急", "DIRECT"],
          "default-selected": "GitHub-Auto"},
         {"name": "AI", "type": "select", "proxies": ["AI-出口", "AI-Auto"] + ai_groups + ai_nodes},
-        {"name": "Gemini", "type": "select", "proxies": ["AI-出口", "AI-Auto", "SG-AI", "JP-AI", "US-AI"] + (["其他-AI"] if other_ai else []) + sg + jp + us + other_ai},
+        {"name": "Gemini", "type": "select", "proxies": ["Gemini-出口", "Gemini-Auto", "AI-出口", "AI-Auto", "SG-AI", "JP-AI", "US-AI"] + (["其他-AI"] if other_ai else []) + sg + jp + us + other_ai},
         {"name": "Telegram", "type": "select", "proxies": ["TG-出口", "TG-Auto"] + tg},
         {"name": "TikTok", "type": "select", "proxies": ["Proxy-出口", "Proxy-Auto"] + proxy},
         {"name": "Youtube", "type": "select", "proxies": ["HK-视频-出口", "HK-视频"] + hk},
@@ -2019,7 +2044,7 @@ def status():
     result = {}
     events = read_json(RUNTIME_EVENTS, [])
     runtime = read_json(RUNTIME_STATE, {})
-    for group in ("AI", "AI-Auto", "AI-出口", "JP-AI", "SG-AI", "US-AI", "其他-AI", "Youtube", "HK-视频", "HK-视频-出口", "Telegram", "TG-Auto", "TG-出口", "Google", "GitHub", "GitHub-Auto", "GitHub-出口", "V2EX", "V2EX-Auto", "Others", "Proxy-Auto", "Proxy-出口"):
+    for group in ("AI", "AI-Auto", "AI-出口", "Gemini", "Gemini-Auto", "Gemini-出口", "JP-AI", "SG-AI", "US-AI", "其他-AI", "Youtube", "HK-视频", "HK-视频-出口", "Telegram", "TG-Auto", "TG-出口", "Google", "GitHub", "GitHub-Auto", "GitHub-出口", "V2EX", "V2EX-Auto", "Others", "Proxy-Auto", "Proxy-出口"):
         try:
             data = proxy_api("/proxies/" + quote(group, safe=""))
             leaf = resolve_leaf(group)

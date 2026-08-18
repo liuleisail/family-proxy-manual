@@ -96,6 +96,34 @@ class MihomoBootstrapTests(unittest.TestCase):
         self.assertIn("Proxy-Auto", groups["TG-Auto"]["proxies"])
         self.assertEqual(groups["AI-Auto"]["proxies"], ["Proxy-Auto"])
 
+    def test_generated_config_gives_gemini_a_stable_same_region_exit(self):
+        selected = {name: [] for name in MODULE.POOLS}
+        selected["JP-AI"] = ["[备用1] 日本 01", "[备用1] 日本 02", "[备用1] 日本 03", "[备用1] 日本 04"]
+        selected["SG-AI"] = ["[备用1] 新加坡 01"]
+        base = {
+            "proxies": [],
+            "proxy-groups": [],
+            "rules": ["GEOSITE,category-ai,AI-Auto", "MATCH,DIRECT"],
+        }
+        self.paths["MIHOMO_CONFIG"].write_text(MODULE.yaml.safe_dump(base, allow_unicode=True))
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch.object(MODULE.subprocess, "run", return_value=completed), \
+             patch.object(MODULE, "restart_mihomo"):
+            MODULE.generate_config(selected)
+
+        config = MODULE.yaml.safe_load(self.paths["MIHOMO_CONFIG"].read_text())
+        groups = {item["name"]: item for item in config["proxy-groups"]}
+        self.assertEqual(groups["Gemini-Auto"]["type"], "fallback")
+        self.assertEqual(
+            groups["Gemini-Auto"]["proxies"],
+            ["[备用1] 日本 01", "[备用1] 日本 02", "[备用1] 日本 03"],
+        )
+        self.assertEqual(groups["Gemini-出口"]["proxies"], ["Gemini-Auto", "Gemini-应急", "DIRECT"])
+        self.assertEqual(groups["Gemini"]["proxies"][0], "Gemini-出口")
+        rules = config["rules"]
+        self.assertTrue(all(rule in rules for rule in MODULE.GEMINI_ROUTING_RULES))
+        self.assertLess(rules.index(MODULE.GEMINI_ROUTING_RULES[0]), rules.index("GEOSITE,category-ai,AI-Auto"))
+
     def test_source_pool_candidates_prefer_recently_tested_source_nodes(self):
         records = [
             {"name": "[备用1] 美国慢", "raw": "美国慢", "source": "backup1"},

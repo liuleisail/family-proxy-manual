@@ -52,11 +52,11 @@
     const simpleTypes=new Set(Object.keys(typeLabels));
     const routeOptions=[
       ['DIRECT','直连（不经机场）'],['REJECT','拦截'],['REJECT-DROP','静默拦截'],
-      ['AI-Auto','自动选择（全部 AI 候选池）'],['GitHub-Auto','自动选择（GitHub 专用候选集合）'],
+      ['AI-Auto','自动选择（全部 AI 候选池）'],['Gemini-出口','Gemini 专用稳定出口'],['Gemini-Auto','自动选择（Gemini 同区域候选集合）'],['GitHub-Auto','自动选择（GitHub 专用候选集合）'],
       ['TG-Auto','自动选择（Telegram 候选池）'],['Proxy-Auto','自动选择（Proxy 候选池）'],
       ['HK-视频','HK-视频'],['JP-AI','JP-AI'],['SG-AI','SG-AI'],['US-AI','US-AI'],['其他-AI','其他-AI']
     ];
-    const legacyRouteTargets={Others:'Proxy-Auto',Google:'Proxy-Auto',TikTok:'Proxy-Auto',Youtube:'HK-视频',Telegram:'TG-Auto',AI:'AI-Auto',Gemini:'AI-Auto',GitHub:'GitHub-Auto',Apple:'DIRECT',MicroSoft:'DIRECT'};
+    const legacyRouteTargets={Others:'Proxy-Auto',Google:'Proxy-Auto',TikTok:'Proxy-Auto',Youtube:'HK-视频',Telegram:'TG-Auto',AI:'AI-Auto',Gemini:'Gemini-出口',GitHub:'GitHub-Auto',Apple:'DIRECT',MicroSoft:'DIRECT'};
     const legacyRouteLabels={'AI-Auto':'自动选择（全部 AI 候选池）','GitHub-Auto':'自动选择（GitHub 专用候选集合）','DNS-Resolve':'自动选择（Proxy 候选池）','TG-Notify':'自动选择（通知专用候选集合）'};
     const geoSite='https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/';
     const geoIp='https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/';
