@@ -943,3 +943,23 @@ up-script 同样替换 enable。字段规律：`to-ports`、`connection-mark`、
 - 变更前候选池、池设置、测速记录、来源元数据和 Mihomo 配置备份在 Z4Pro `/var/backups/family-proxy/20260816-194940-ai-tg-backup1/`。管理后端通过配置校验、Mihomo 重载、控制接口、AI 探针和 Telegram 探针。
 - `runtime/family-mihomo-sub-import.py` 新增按池保存机场筛选范围的 `/api/pool-source-scope`；选择并锁定来源只生成待测范围，不立即改线上候选。全量稳定性测速只测试已锁定范围，未锁定池（包括 YouTube 的 `HK-视频`）保持原值，最终仍须“复测并生效”。
 - 控制面部署备份为 Z4Pro `/var/backups/family-proxy/20260816-195852/`；`/airport/` 页面已在桌面和 390px 移动视口验证来源选择入口，浏览器控制台无错误，四个服务 active，Mihomo 控制接口和 AI/TG 探针可用。回滚优先使用上述候选池备份或页面“回退上一版”恢复候选池。
+
+## 32. 2026-08-18 Gemini 专用出口与旧机场页面修复（已部署）
+
+### Gemini 出口与异常流量边界
+
+- 原因：Gemini 域名命中通用海外 AI 规则 `AI-Auto`，实际连接没有经过 `Gemini` selector；`AI-Auto`/地区 URLTest 可能在账户会话期间更换出口 IP，增加 Google 风控触发概率。
+- 运行时改为 `Gemini -> Gemini-出口 -> Gemini-Auto`。`Gemini-Auto` 使用同一区域最多 3 个候选的 `fallback`，故障时在同区域切换；当前现场选择为 JP。新增 Gemini、Google API、AI Studio、登录和 OAuth 的窄域名规则，并置于通用 AI 规则之前。
+- `AI-Auto`、JP/SG/US AI、YouTube、Telegram、Proxy 和 RouterOS 规则未改。3 个 Gemini 同区域候选逐个探针均能建立 HTTPS 代理连接；实际 Mihomo 日志确认 `gemini.google.com` 命中 `Gemini` 规则。该验证不能保证 Google 对任何单一出口 IP 永久不触发风控，仍需以真实浏览器会话复测。
+
+### 旧版机场与候选池页面故障
+
+- 生产症状是订阅来源、候选池和“切换状态”页面无反应。后端数据没有丢失：当时 3 个来源仍为已导入状态，节点数为 88、170、106，各业务池保持 5 个候选；18090 的 `/api/state`、`/api/nodes`、`/api/test-status`、`/api/status`、`/api/probes` 均返回 200。
+- 根因是旧机场页的动态 JavaScript 拼接缺少两个脚本边界分号，浏览器解析先报 `Unexpected identifier 'applySource'`，修复第一处后继续报 `Unexpected token 'const'`，导致整个页面脚本未执行。
+- `runtime/family-mihomo-sub-import.py` 已在两个动态脚本拼接边界补分号；`tests/test_mihomo_bootstrap.py` 增加页面边界回归断言。修复后完整页面脚本可由 Node.js 解析，生产旧页面脚本解析通过，相关服务 active，Mihomo 容器 running。
+
+### 版本、备份与回滚
+
+- Gemini 修订提交：`e93a329`；旧机场页面修复提交：`d665bff`。生产控制面部署备份：`/var/backups/family-proxy/20260818-192105`；页面修复前运行备份：`/var/backups/family-proxy/20260818-194121-airport-js-fix`；页面修复部署备份：`/var/backups/family-proxy/20260818-194220`。
+- 本地验证为 `70 tests OK`、Python 编译、`git diff --check` 和 Node.js 页面脚本解析通过。回滚优先恢复页面修复前的 `family-mihomo-sub-import.py`，再重启 `family-mihomo-sub-import`；候选配置与 Mihomo `config.yaml` 已在对应备份中，禁止删除或重建订阅来源目录来排障。
+- 仓库使用 `AGENTS.md` 作为交接文件；不要另建同名小写 `agent.md`。线上故障处理仍须重新读取 18090/API、服务状态和真实浏览器路径，不能只凭页面缓存或历史备份判断恢复。

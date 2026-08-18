@@ -98,8 +98,8 @@ NOISE = re.compile(
     re.I,
 )
 OPENER = build_opener(ProxyHandler({}))
-MONITORED_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto", "GitHub-Auto", "V2EX-Auto")
-ALERT_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto", "GitHub-Auto")
+MONITORED_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto", "GitHub-Auto", "V2EX-Auto", "Gemini-Auto")
+ALERT_GROUPS = ("HK-视频", "JP-AI", "SG-AI", "US-AI", "其他-AI", "TG-Auto", "Proxy-Auto", "GitHub-Auto", "Gemini-Auto")
 ALERT_FAILURE_THRESHOLD = 2
 FAILSAFE_FAILURE_THRESHOLD = 2
 FAILSAFE_RECOVERY_THRESHOLD = 3
@@ -120,6 +120,10 @@ FAILSAFE_EXITS = {
                 "watched": ("JP-AI", "SG-AI", "US-AI", "其他-AI"),
                 "pools": ("JP-AI", "SG-AI", "US-AI", "其他-AI"),
                 "url": "https://chatgpt.com/cdn-cgi/trace"},
+    "Gemini-出口": {"primary": "Gemini-Auto", "emergency": "Gemini-应急",
+                    "watched": ("Gemini-Auto",),
+                    "pools": ("JP-AI", "SG-AI", "US-AI", "其他-AI"),
+                    "url": "https://gemini.google.com/"},
     "TG-出口": {"primary": "TG-Auto", "emergency": "TG-应急",
                 "watched": ("TG-Auto",), "pools": ("TG",),
                 "url": "https://api.telegram.org"},
@@ -133,7 +137,9 @@ FAILSAFE_EXITS = {
 }
 BUSINESS_WRAPPERS = {
     "HK-视频-出口": (("Youtube", "HK-视频"),),
-    "AI-出口": (("AI", "AI-Auto"), ("Gemini", "AI-Auto")),
+    "AI-出口": (("AI", "AI-Auto"),),
+    "Gemini-出口": (("Gemini", "Gemini-Auto"), ("Gemini", "AI-Auto"),
+                    ("Gemini", "AI-出口")),
     "TG-出口": (("Telegram", "TG-Auto"),),
     "Proxy-出口": (("TikTok", "Proxy-Auto"), ("Google", "Proxy-Auto"),
                    ("Others", "Proxy-Auto")),
@@ -151,6 +157,14 @@ POOL_TEST_URLS = {
     "Proxy": "https://www.gstatic.com/generate_204",
     "GitHub-Auto": "https://github.com/",
 }
+GEMINI_ROUTING_RULES = (
+    "DOMAIN-SUFFIX,gemini.google.com,Gemini",
+    "DOMAIN-SUFFIX,generativelanguage.googleapis.com,Gemini",
+    "DOMAIN-SUFFIX,aistudio.google.com,Gemini",
+    "DOMAIN-SUFFIX,ai.google.dev,Gemini",
+    "DOMAIN-SUFFIX,accounts.google.com,Gemini",
+    "DOMAIN-SUFFIX,oauth2.googleapis.com,Gemini",
+)
 DERIVED_EXITS = ("GitHub-Auto",)
 POOL_MODES = {
     "select": "手动选择",
@@ -929,6 +943,11 @@ def generate_config(selected=None, settings=None):
     insert_at = next((index for index, rule in enumerate(rules)
                       if str(rule).startswith(("GEOSITE,CN,", "GEOIP,CN,"))), before_match_index(rules))
     rules.insert(insert_at, v2ex_rule)
+    rules = [rule for rule in rules if rule not in GEMINI_ROUTING_RULES]
+    insert_at = next((index for index, rule in enumerate(rules)
+                      if str(rule).startswith(("RULE-SET,family-", "GEOSITE,"))),
+                     before_match_index(rules))
+    rules[insert_at:insert_at] = GEMINI_ROUTING_RULES
     config["rules"] = rules
     hk, jp, sg, us, other_ai, tg, proxy = (selected[name] for name in POOLS)
     ai_groups = [group for pool, group in (("JP-AI", "JP-AI"), ("SG-AI", "SG-AI"),
@@ -941,6 +960,9 @@ def generate_config(selected=None, settings=None):
     hk_runtime = hk or generic_fallback
     tg_runtime = tg or generic_fallback
     ai_groups = ai_groups or generic_fallback
+    # Gemini keeps one region and uses ordered fallback. This avoids routine
+    # URL-test rotation between different egress IPs during an account session.
+    gemini_runtime = next((entries[:3] for entries in (jp, sg, us, other_ai) if entries), generic_fallback)
     ai_nodes = jp + sg + us + other_ai
     github = github_candidates(selected)
     v2ex = list(dict.fromkeys(proxy))
@@ -968,12 +990,15 @@ def generate_config(selected=None, settings=None):
         fallback("V2EX-Auto", v2ex, "https://www.v2ex.com/", 300, "200"),
         fallback("DNS-Resolve", proxy, "https://dns.google/dns-query", 300),
         fallback("AI-Auto", ai_groups, "https://chatgpt.com/cdn-cgi/trace", 180, "200"),
+        fallback("Gemini-Auto", gemini_runtime, "https://gemini.google.com/", 300),
         *({"name": name, "type": "select", "proxies": entries,
            "empty-fallback": "DIRECT"} for name, entries in emergency.items()),
         {"name": "HK-视频-出口", "type": "select", "proxies": ["HK-视频", "HK-视频-应急", "DIRECT"],
          "default-selected": "HK-视频"},
         {"name": "AI-出口", "type": "select", "proxies": ["AI-Auto", "AI-应急", "DIRECT"],
          "default-selected": "AI-Auto"},
+        {"name": "Gemini-出口", "type": "select", "proxies": ["Gemini-Auto", "Gemini-应急", "DIRECT"],
+         "default-selected": "Gemini-Auto"},
         {"name": "TG-出口", "type": "select", "proxies": ["TG-Auto", "TG-应急", "DIRECT"],
          "default-selected": "TG-Auto"},
         {"name": "Proxy-出口", "type": "select", "proxies": ["Proxy-Auto", "Proxy-应急", "DIRECT"],
@@ -981,7 +1006,7 @@ def generate_config(selected=None, settings=None):
         {"name": "GitHub-出口", "type": "select", "proxies": ["GitHub-Auto", "GitHub-应急", "DIRECT"],
          "default-selected": "GitHub-Auto"},
         {"name": "AI", "type": "select", "proxies": ["AI-出口", "AI-Auto"] + ai_groups + ai_nodes},
-        {"name": "Gemini", "type": "select", "proxies": ["AI-出口", "AI-Auto", "SG-AI", "JP-AI", "US-AI"] + (["其他-AI"] if other_ai else []) + sg + jp + us + other_ai},
+        {"name": "Gemini", "type": "select", "proxies": ["Gemini-出口", "Gemini-Auto", "AI-出口", "AI-Auto", "SG-AI", "JP-AI", "US-AI"] + (["其他-AI"] if other_ai else []) + sg + jp + us + other_ai},
         {"name": "Telegram", "type": "select", "proxies": ["TG-出口", "TG-Auto"] + tg},
         {"name": "TikTok", "type": "select", "proxies": ["Proxy-出口", "Proxy-Auto"] + proxy},
         {"name": "Youtube", "type": "select", "proxies": ["HK-视频-出口", "HK-视频"] + hk},
@@ -2019,7 +2044,7 @@ def status():
     result = {}
     events = read_json(RUNTIME_EVENTS, [])
     runtime = read_json(RUNTIME_STATE, {})
-    for group in ("AI", "AI-Auto", "AI-出口", "JP-AI", "SG-AI", "US-AI", "其他-AI", "Youtube", "HK-视频", "HK-视频-出口", "Telegram", "TG-Auto", "TG-出口", "Google", "GitHub", "GitHub-Auto", "GitHub-出口", "V2EX", "V2EX-Auto", "Others", "Proxy-Auto", "Proxy-出口"):
+    for group in ("AI", "AI-Auto", "AI-出口", "Gemini", "Gemini-Auto", "Gemini-出口", "JP-AI", "SG-AI", "US-AI", "其他-AI", "Youtube", "HK-视频", "HK-视频-出口", "Telegram", "TG-Auto", "TG-出口", "Google", "GitHub", "GitHub-Auto", "GitHub-出口", "V2EX", "V2EX-Auto", "Others", "Proxy-Auto", "Proxy-出口"):
         try:
             data = proxy_api("/proxies/" + quote(group, safe=""))
             leaf = resolve_leaf(group)
@@ -2194,9 +2219,14 @@ PAGE = PAGE.replace(_status_marker, _status_replacement, 1)
 
 _video_scope_js = r'''const familyVideoPool='HK-视频',familyVideoLocations={all:'全部地点',hk:'香港 HK',jp:'日本 JP',sg:'新加坡 SG',tw:'台湾 TW',kr:'韩国 KR',us:'美国 US',other:'其它地点'};function familyVideoScope(){let value=sourceSelections[familyVideoPool];if(value&&typeof value==='object')return {source:value.source||'all',location:value.location||'all'};return {source:value||'all',location:'all'}}function familyVideoLocationOptions(){return Object.keys(familyVideoLocations).map(function(key){return '<option value="'+key+'">'+familyVideoLocations[key]+'</option>'}).join('')}function familyVideoControls(){let card=Array.from(document.querySelectorAll('.pool-card')).find(function(item){let title=item.querySelector('h2');return title&&title.textContent==='HK-视频'});if(!card)return;let title=card.querySelector('h2');if(title)title.textContent='视频';let row=card.querySelector('.pool-source');if(!row)return;let location=document.querySelector('#location-'+familyVideoPool);if(!location){location=document.createElement('select');location.id='location-'+familyVideoPool;location.title='视频节点地点';location.setAttribute('aria-label','视频节点地点');location.innerHTML=familyVideoLocationOptions();row.insertBefore(location,row.firstChild)}let scope=familyVideoScope(),source=document.querySelector('#source-'+familyVideoPool);if(source)source.value=scope.source;location.value=scope.location;let button=row.querySelector('button');if(button)button.textContent='锁定测速范围'}const familyRenderPoolsWithVideo=renderPools;renderPools=function(){familyRenderPoolsWithVideo();familyVideoControls()};const familyOpenPoolEditorWithVideo=openPoolEditor;openPoolEditor=function(pool){familyOpenPoolEditorWithVideo(pool);if(pool===familyVideoPool){let title=document.querySelector('#poolEditorTitle');if(title)title.textContent='编辑 视频'}}applySource=async function(pool){let source=(document.querySelector('#source-'+pool)||{}).value||'all',location=pool===familyVideoPool?((document.querySelector('#location-'+pool)||{}).value||'all'):'all';if(!confirm('将锁定 '+(pool===familyVideoPool?'视频':pool)+' 的机场和地点测速范围；当前出口不会改变。确定继续？'))return;let status=document.querySelector('#testStatus');status.textContent='正在保存 '+(pool===familyVideoPool?'视频':pool)+' 的机场和地点筛选范围…';status.className='status';try{let result=await api('/api/pool-source-scope',{method:'POST',body:JSON.stringify({pool:pool,source:source,location:location})});sourceSelections=result.source_selections||sourceSelections;activePools=result.pools;pools=activePools;suggestion=null;catalogLoaded=true;renderPools();status.textContent=(pool===familyVideoPool?'视频':pool)+' 已锁定机场 '+(source==='all'?'全部':source)+'、地点 '+(familyVideoLocations[location]||location)+'；当前出口未改变，请执行“全量稳定性测速”'}catch(error){status.textContent=error.message;status.className='status bad'}}'''
 PAGE = PAGE.replace('</script></body></html>', _video_scope_js + '</script></body></html>', 1)
+PAGE = PAGE.replace(
+    "if(title)title.textContent='编辑 视频'}}applySource=async function(pool)",
+    "if(title)title.textContent='编辑 视频'}};applySource=async function(pool)",
+    1,
+)
 
 _video_probe_label_js = r'''const familyRenderProbeReportWithVideo=renderProbeReport;renderProbeReport=function(data){familyRenderProbeReportWithVideo(data);document.querySelectorAll('.probe-card h3').forEach(function(title){if(title.textContent==='HK-视频')title.textContent='视频'})}'''
-PAGE = PAGE.replace('</script></body></html>', _video_probe_label_js + '</script></body></html>', 1)
+PAGE = PAGE.replace('</script></body></html>', ';' + _video_probe_label_js + '</script></body></html>', 1)
 
 
 class Handler(BaseHTTPRequestHandler):
