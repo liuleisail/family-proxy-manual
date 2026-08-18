@@ -963,3 +963,11 @@ up-script 同样替换 enable。字段规律：`to-ports`、`connection-mark`、
 - Gemini 修订提交：`e93a329`；旧机场页面修复提交：`d665bff`。生产控制面部署备份：`/var/backups/family-proxy/20260818-192105`；页面修复前运行备份：`/var/backups/family-proxy/20260818-194121-airport-js-fix`；页面修复部署备份：`/var/backups/family-proxy/20260818-194220`。
 - 本地验证为 `70 tests OK`、Python 编译、`git diff --check` 和 Node.js 页面脚本解析通过。回滚优先恢复页面修复前的 `family-mihomo-sub-import.py`，再重启 `family-mihomo-sub-import`；候选配置与 Mihomo `config.yaml` 已在对应备份中，禁止删除或重建订阅来源目录来排障。
 - 仓库使用 `AGENTS.md` 作为交接文件；不要另建同名小写 `agent.md`。线上故障处理仍须重新读取 18090/API、服务状态和真实浏览器路径，不能只凭页面缓存或历史备份判断恢复。
+
+## 33. 2026-08-18 Gemini Google 伴随域名出口一致性修复（已部署）
+
+- 现场证据：受管设备 `192.168.2.150` 的 `gemini.google.com` 命中 `Gemini`/JP，而同一时间的 `www.google.com`、`clients1.google.com`、`update.googleapis.com`、`*.gstatic.com` 命中通用 `Google`/HK；Google 因同一会话公网出口变化返回异常流量页面。该结论来自 Mihomo 连接日志，不是根据节点名或单次探针推测。
+- `runtime/family-mihomo-sub-import.py` 将 `google.com`、`gstatic.com`、`googleapis.com` 的窄域名规则加入 `GEMINI_ROUTING_RULES`，并置于 `GEOSITE,google,Google` 之前，使 Gemini 主站、sorry 页面、静态资源和 API 使用同一 `Gemini` 出口链路。
+- RouterOS、IPv6 防漏规则、设备纳管集合、候选池和订阅来源未修改。当前受管设备 IPv6 防漏规则有计数，旁路路径仍按 IPv4 TPROXY/策略路由核对。
+- 本地验证：70 tests、Python 编译和 `git diff --check` 通过；应用后必须核对 `gemini.google.com`、`www.google.com`、`gstatic.com`、`googleapis.com` 日志均使用 `Gemini`，再让真实浏览器重新加载。由于规则按域名生效，Google 通用域名会随 Gemini 出口变化，这是保持会话 IP 一致所需的范围扩大。
+- 变更前备份：`/var/backups/family-proxy/20260818-195219-gemini-google-consistency`。回滚优先恢复该备份中的 Mihomo `config.yaml` 和生产 `family-mihomo-sub-import.py`，或恢复代码后执行 `--apply-current`；不要通过修改 RouterOS IPv6 规则回避该问题。

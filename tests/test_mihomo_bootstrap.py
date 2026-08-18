@@ -103,7 +103,7 @@ class MihomoBootstrapTests(unittest.TestCase):
         base = {
             "proxies": [],
             "proxy-groups": [],
-            "rules": ["GEOSITE,category-ai,AI-Auto", "MATCH,DIRECT"],
+            "rules": ["GEOSITE,category-ai,AI-Auto", "GEOSITE,google,Google", "MATCH,DIRECT"],
         }
         self.paths["MIHOMO_CONFIG"].write_text(MODULE.yaml.safe_dump(base, allow_unicode=True))
         completed = SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -123,6 +123,9 @@ class MihomoBootstrapTests(unittest.TestCase):
         rules = config["rules"]
         self.assertTrue(all(rule in rules for rule in MODULE.GEMINI_ROUTING_RULES))
         self.assertLess(rules.index(MODULE.GEMINI_ROUTING_RULES[0]), rules.index("GEOSITE,category-ai,AI-Auto"))
+        self.assertLess(rules.index("DOMAIN-SUFFIX,google.com,Gemini"), rules.index("GEOSITE,google,Google"))
+        self.assertLess(rules.index("DOMAIN-SUFFIX,gstatic.com,Gemini"), rules.index("GEOSITE,google,Google"))
+        self.assertLess(rules.index("DOMAIN-SUFFIX,googleapis.com,Gemini"), rules.index("GEOSITE,google,Google"))
 
     def test_source_pool_candidates_prefer_recently_tested_source_nodes(self):
         records = [
