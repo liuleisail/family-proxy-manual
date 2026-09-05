@@ -1362,6 +1362,7 @@ def do_update():
             return
         old_image = ""
         backup = ""
+        switch_started = False
         try:
             old_image = running_image_id()
             set_status("updating", "正在备份 MosDNS 配置", current_image=old_image)
@@ -1376,6 +1377,7 @@ def do_update():
             rollback_tag = "family-mosdns-t:rollback-" + datetime.now().strftime("%Y%m%d-%H%M%S")
             command(["docker", "image", "tag", old_image, rollback_tag], timeout=15)
             set_status("updating", "正在重建 MosDNS 容器", current_image=old_image, latest_image=new_image, backup=backup, rollback_image=rollback_tag)
+            switch_started = True
             command(["docker", "compose", "up", "-d", "--no-deps", "--force-recreate", "mosdns-t"], timeout=180)
             wait_healthy()
             set_status("updated", "MosDNS 已更新并通过健康检查", update_available=False, previous_image=old_image, current_image=new_image, current_version=core_version(), backup=backup, rollback_image=rollback_tag, completed_at=now_iso())
@@ -1384,7 +1386,7 @@ def do_update():
             set_status("error", f"新镜像预检失败，未改动当前容器：{exc}", update_available=True, backup=backup, completed_at=now_iso())
         except Exception as exc:
             failure = str(exc)
-            if old_image:
+            if old_image and switch_started:
                 try:
                     set_status("rolling_back", f"更新验证失败，正在恢复旧镜像：{failure}", backup=backup)
                     command(["docker", "image", "tag", old_image, IMAGE], timeout=15)

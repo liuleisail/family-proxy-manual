@@ -57,8 +57,11 @@ version=$(< "$REPO_DIR/VERSION")
 source_id=$(printf '%s\n' \
   "$(sha256sum /opt/family-proxy-ui/rendered/family-proxy-ui.py | awk '{print $1}')" \
   "$(sha256sum /opt/family-proxy-ui/rendered/family-proxy-gateway.py | awk '{print $1}')" \
+  "$(sha256sum /opt/family-proxy-ui/rendered/family-mihomo-sub-import.py | awk '{print $1}')" \
   "$(sha256sum "$REPO_DIR/VERSION" | awk '{print $1}')" \
-  "$(sha256sum "$REPO_DIR/frontend/dist/index.html" | awk '{print $1}')" | sha256sum | awk '{print substr($1,1,12)}')
+  "$(sha256sum "$REPO_DIR/runtime/rules.html" | awk '{print $1}')" \
+  "$(sha256sum "$REPO_DIR/frontend/dist/index.html" | awk '{print $1}')" \
+  "$(sha256sum "$REPO_DIR/frontend/dist/qrcode-browser.js" | awk '{print $1}')" | sha256sum | awk '{print substr($1,1,12)}')
 printf '{"version":"%s","id":"%s","deployed_at":"%s"}\n' "$version" "$source_id" "$stamp" > /opt/family-proxy-ui/build-info.json
 install -m 644 "$REPO_DIR/VERSION" /opt/family-proxy-ui/VERSION
 install -m 755 /opt/family-proxy-ui/rendered/family-proxy-ui.py /opt/family-proxy-ui/family-proxy-ui.py
@@ -80,6 +83,9 @@ install -m 755 "$REPO_DIR/scripts/apply-runtime-mode" /usr/local/sbin/apply-fami
 install -d -m 700 /etc/family-proxy-ui /var/lib/family-proxy/docker/family-mihomo-sub-import/providers
 if [[ ! -f /etc/family-proxy-ui/docker-recover-exclude.conf ]]; then
   install -m 600 "$REPO_DIR/config/docker-recover-exclude.conf.example" /etc/family-proxy-ui/docker-recover-exclude.conf
+fi
+if [[ ! -f /etc/family-proxy-ui/docker-recover-allow.conf ]]; then
+  install -m 600 "$REPO_DIR/config/docker-recover-allow.conf.example" /etc/family-proxy-ui/docker-recover-allow.conf
 fi
 family_docker_root=$(awk -F= '$1 == "FAMILY_DOCKER_ROOT" { print $2; exit }' "$CONFIG")
 [[ -n $family_docker_root && $family_docker_root == /* ]] || { echo "FAMILY_DOCKER_ROOT is required" >&2; exit 1; }

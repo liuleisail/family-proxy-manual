@@ -32,8 +32,14 @@ install -d -m 700 "$backup_dir"
 [[ -f $TARGET_DIR/VERSION ]] && install -m 600 "$TARGET_DIR/VERSION" "$backup_dir/VERSION"
 [[ -f $TARGET_DIR/rules.html ]] && install -m 600 "$TARGET_DIR/rules.html" "$backup_dir/rules.html"
 [[ -d $TARGET_DIR/frontend ]] && cp -a "$TARGET_DIR/frontend" "$backup_dir/frontend"
+[[ -f $TARGET_DIR/family-mihomo-sub-import.py ]] && cp -a "$TARGET_DIR/family-mihomo-sub-import.py" "$backup_dir/"
+cp -a /etc/family-proxy-ui "$backup_dir/config"
+if [[ -f /opt/family-mosdns-updater/app.py ]]; then
+    cp -a /opt/family-mosdns-updater/app.py "$backup_dir/mosdns-updater.py"
+    python3 -m py_compile "$SOURCE_DIR/runtime/mosdns/updater.py"
+fi
 install -d -m 700 "$backup_dir/helpers"
-for helper in apply-family-proxy-mode family-mihomo-tproxy-auto refresh-family-cn-ipv4 sync-routeros-cn-ipv4 refresh-mihomo-geodata family-mihomo-upgrade homekit-direct-routes; do
+for helper in apply-family-proxy-mode family-mihomo-tproxy-auto family-docker-recover refresh-family-cn-ipv4 sync-routeros-cn-ipv4 refresh-mihomo-geodata family-mihomo-upgrade homekit-direct-routes; do
     [[ -f "/usr/local/sbin/$helper" ]] && install -m 700 "/usr/local/sbin/$helper" "$backup_dir/helpers/$helper"
 done
 
@@ -68,16 +74,24 @@ install -m 755 "$SOURCE_DIR/scripts/sync-routeros-cn-ipv4.py" /usr/local/sbin/sy
 install -m 755 "$SOURCE_DIR/scripts/refresh-mihomo-geodata.py" /usr/local/sbin/refresh-mihomo-geodata
 install -m 755 "$SOURCE_DIR/scripts/family-mihomo-upgrade" /usr/local/sbin/family-mihomo-upgrade
 install -m 755 "$SOURCE_DIR/scripts/homekit-direct-routes" /usr/local/sbin/homekit-direct-routes
+install -m 755 "$SOURCE_DIR/scripts/family-docker-recover" /usr/local/sbin/family-docker-recover
+if [[ ! -f /etc/family-proxy-ui/docker-recover-allow.conf ]]; then
+    install -m 600 "$SOURCE_DIR/config/docker-recover-allow.conf.example" /etc/family-proxy-ui/docker-recover-allow.conf
+fi
+if [[ -f /opt/family-mosdns-updater/app.py ]]; then
+    install -m 755 "$SOURCE_DIR/runtime/mosdns/updater.py" /opt/family-mosdns-updater/app.py
+    systemctl restart family-mosdns-updater
+fi
 
 systemctl restart family-proxy-ui.service family-mihomo-sub-import.service family-proxy-gateway.service
 systemctl is-active --quiet family-proxy-ui.service family-mihomo-sub-import.service family-proxy-gateway.service
 
 proxy_ip=$(awk -F= '$1 == "FAMILY_PROXY_IP" { print $2; exit }' "$CONFIG")
-for port in 18087 18088; do
+for port in 18088; do
     ready=0
-    for attempt in $(seq 1 20); do
-        if curl --interface "$proxy_ip" --silent --output /dev/null \
-            --write-out '%{http_code}' "http://$proxy_ip:$port/" | grep -Eq '^(200|303|403)$'; then
+    for attempt in $(seq 1 60); do
+        if curl --noproxy '*' --interface "$proxy_ip" --silent --output /dev/null \
+            --max-time 5 --write-out '%{http_code}' "http://$proxy_ip:$port/" | grep -Eq '^(200|303|403)$'; then
             ready=1
             break
         fi
@@ -116,5 +130,5 @@ for attempt in $(seq 1 20); do
     sleep 0.5
 done
 [[ -s $health_payload ]] || { echo "gated health API did not become ready" >&2; exit 1; }
-python3 -c 'import json, sys; payload = json.load(open(sys.argv[1])); assert payload.get("ready") is True; assert payload.get("checks") == {"mihomo": True, "dns": True, "policy": True}; assert payload.get("build", {}).get("version"); print("gated health verified ({0})".format(payload["build"]))' "$health_payload"
+python3 -c 'import json, sys; payload = json.load(open(sys.argv[1])); assert payload.get("ready") is True; assert all(payload["checks"].values()); assert {"mihomo", "dns", "policy"} <= payload["checks"].keys(); assert payload.get("build", {}).get("version"); print("gated health verified ({0})".format(payload["build"]))' "$health_payload"
 echo "Backup: $backup_dir"

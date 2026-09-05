@@ -49,15 +49,25 @@ PY
 image() { docker inspect "$container" --format '{{.Config.Image}}'; }
 image_id() { docker image inspect "$1" --format '{{.Id}}'; }
 set_compose_image() {
-  python3 - "$compose" "$container" "$1" <<'PY'
+  python3 - "$compose" "$container" "$1" "${2:-}" <<'PY'
 import os, sys, yaml
-path, service, image = sys.argv[1:]
+path, service, image, volume_source = sys.argv[1:]
 with open(path, encoding="utf-8") as handle:
     document = yaml.safe_load(handle)
 services = document.get("services") if isinstance(document, dict) else None
 if not isinstance(services, dict) or service not in services or not isinstance(services[service], dict):
     raise SystemExit("Mihomo Compose 服务结构无效")
 services[service]["image"] = image
+if volume_source:
+    volumes = services[service].setdefault("volumes", [])
+    if not isinstance(volumes, list):
+        raise SystemExit("Mihomo Compose 挂载结构无效")
+    def has_config_volume(item):
+        if isinstance(item, str):
+            return item.rsplit(":", 1)[-1].rstrip("/") == "/root/.config/mihomo"
+        return isinstance(item, dict) and item.get("target") == "/root/.config/mihomo"
+    if not any(has_config_volume(item) for item in volumes):
+        volumes.insert(0, f"{volume_source}:/root/.config/mihomo")
 temporary = path + ".new"
 with open(temporary, "w", encoding="utf-8") as handle:
     yaml.safe_dump(document, handle, allow_unicode=True, sort_keys=False)
@@ -76,8 +86,31 @@ healthy() {
   return 1
 }
 
+running_version() {
+  curl -fsS --max-time 3 http://127.0.0.1:9091/version 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version", "未知"))' 2>/dev/null \
+    || printf '未知\n'
+}
+
+container_mounts() {
+  docker inspect "$container" --format '{{range .Mounts}}{{println .Source "|" .Destination "|" .RW}}{{end}}' \
+    | LC_ALL=C sort
+}
+
+container_data_source() {
+  docker inspect "$container" --format '{{range .Mounts}}{{if eq .Destination "/root/.config/mihomo"}}{{.Source}}{{end}}{{end}}'
+}
+
+mounts_match() {
+  local expected=$1 actual
+  [[ -r $expected ]] || return 1
+  actual=$(container_mounts) || return 1
+  cmp -s "$expected" <(printf '%s\n' "$actual")
+}
+
 require_layout() {
-  [[ -r $config && -n $root && -f $compose ]] || { write_status failed "Mihomo Docker 配置路径不可用"; exit 1; }
+  [[ -r $config && -n $root && -f $compose && -f "$workdir/config.yaml" ]] \
+    || { write_status failed "Mihomo Docker 配置路径不可用"; exit 1; }
   docker inspect "$container" >/dev/null 2>&1 || { write_status failed "Mihomo 容器不存在"; exit 1; }
 }
 
@@ -155,7 +188,7 @@ print("__FAMILY_RELEASE_PUBLISHED__" + published)
     write_status current "当前镜像已是 Mihomo 最新正式版；预发布版本不会进入检测结果。" "$(image_id "$current")" "$remote_digest" "" "$version" "${release_tag}（正式版）" "$release_date" "仅跟踪 Docker Hub latest 与同摘要的语义化正式标签。" "$docker_proxy_ready" "$release_notes" "$release_url"
   else
     local proxy_note=""
-    [[ $docker_proxy_ready == true ]] || proxy_note=" Docker 守护进程尚未配置代理，升级按钮已保护性禁用。"
+    [[ $docker_proxy_ready == true ]] || proxy_note=" Docker 守护进程未配置显式代理；点击升级时将使用 Docker 自身的镜像源/网络并在重建前验证拉取结果。"
     write_status update_available "发现 Mihomo 正式版 $release_tag；当前运行镜像为 $current。点击升级后才会切换正式通道、校验并重建容器。$proxy_note" "$(image_id "$current")" "$remote_digest" "" "$version" "${release_tag}（正式版）" "$release_date" "仅跟踪 Docker Hub latest 与同摘要的语义化正式标签。" "$docker_proxy_ready" "$release_notes" "$release_url"
   fi
 }
@@ -164,21 +197,26 @@ apply() {
   exec 9>"$lock_file"
   flock -n 9 || { write_status busy "已有 Mihomo 维护任务正在执行"; exit 1; }
   require_layout
-  local current old_id stamp backup new_id rollback_tag target
+  local current old_id stamp backup new_id rollback_tag target data_volume
   current=$(image); target=$stable_image; old_id=$(image_id "$current"); stamp=$(date +%Y%m%d-%H%M%S)
   backup="$workdir/upgrade-backups/$stamp"; rollback_tag="family-mihomo-rollback:$stamp"
-  mkdir -p "$backup"
+  mkdir -p -m 700 "$backup"
   cp -a "$workdir/config.yaml" "$compose" "$backup/"
+  [[ -f "$workdir/cache.db" ]] && cp -a "$workdir/cache.db" "$backup/"
+  docker inspect "$container" > "$backup/container.inspect.json"
+  chmod 600 "$backup/container.inspect.json"
+  container_mounts > "$backup/mounts.before"
+  data_volume=$(container_data_source)
   docker image tag "$old_id" "$rollback_tag"
-  write_status applying "正在拉取并校验 Mihomo 正式镜像；现有容器仍在运行。" "$old_id" "" "$backup"
+  write_status applying "正在拉取并校验 Mihomo 正式镜像；现有容器仍在运行，配置与数据挂载已备份。" "$old_id" "" "$backup"
   if ! docker pull "$target"; then
-    write_status failed "镜像拉取失败；现有容器未重建。" "$old_id" "" "$backup"; exit 1
+    write_status failed "镜像拉取失败；现有容器未重建，配置与数据未改动。" "$old_id" "" "$backup"; exit 1
   fi
   new_id=$(image_id "$target")
   if [[ $new_id == "$old_id" && $current == "$target" ]]; then
     write_status current "已是最新镜像；未重建容器。" "$old_id" "$new_id" "$backup"; exit 0
   fi
-  if ! set_compose_image "$target"; then
+  if ! set_compose_image "$target" "$data_volume"; then
     cp -a "$backup/docker-compose.yml" "$compose"
     write_status failed "无法把 Compose 切换到 Mihomo 正式通道；现有容器未重建。" "$old_id" "$new_id" "$backup"; exit 1
   fi
@@ -187,22 +225,61 @@ apply() {
     write_status failed "新镜像未通过配置校验；容器保持原样。" "$old_id" "$new_id" "$backup"; exit 1
   fi
   write_status applying "配置校验通过，正在仅重建 Mihomo 容器。" "$old_id" "$new_id" "$backup"
-  if docker compose -f "$compose" up -d --no-deps --force-recreate "$container" && healthy; then
-    write_status success "升级完成，控制接口与策略组已通过验证；旧镜像标签：$rollback_tag" "$old_id" "$new_id" "$backup"; exit 0
+  if docker compose -f "$compose" up -d --no-deps --force-recreate "$container" \
+      && healthy && mounts_match "$backup/mounts.before"; then
+    write_status success "升级完成，控制接口、策略组和数据挂载均已通过验证；旧镜像标签：$rollback_tag" "$old_id" "$new_id" "$backup" "$(running_version)"; exit 0
   fi
   cp -a "$backup/docker-compose.yml" "$compose"
+  if ! set_compose_image "$rollback_tag" "$data_volume"; then
+    write_status failed "无法切换到旧镜像回退；当前 Compose 已恢复备份文件，请使用备份目录人工检查。" "$old_id" "$new_id" "$backup"
+    exit 1
+  fi
   docker compose -f "$compose" up -d --no-deps --force-recreate "$container" || true
-  if healthy; then
-    write_status rolled_back "新镜像启动或验证失败，已自动恢复旧镜像。" "$old_id" "$new_id" "$backup"
+  if healthy && mounts_match "$backup/mounts.before"; then
+    write_status rolled_back "新镜像启动或验证失败，已自动恢复旧镜像；配置与数据挂载保持不变。" "$old_id" "$new_id" "$backup" "$(running_version)"
   else
     write_status failed "自动回退后控制接口仍未恢复，请使用备份目录人工检查。" "$old_id" "$new_id" "$backup"
   fi
   exit 1
 }
 
+recover() {
+  exec 9>"$lock_file"
+  flock -n 9 || { write_status busy "已有 Mihomo 维护任务正在执行"; exit 1; }
+  local backup=${1:-} rollback_tag old_id data_source
+  [[ -d $backup && -f "$backup/docker-compose.yml" && -f "$backup/container.inspect.json" \
+     && -f "$backup/mounts.before" ]] || { write_status failed "Mihomo 回退备份不完整"; exit 1; }
+  rollback_tag="family-mihomo-rollback:$(basename "$backup")"
+  old_id=$(docker image inspect "$rollback_tag" --format '{{.Id}}') \
+    || { write_status failed "找不到本次 Mihomo 旧镜像回退标签"; exit 1; }
+  data_source=$(python3 - "$backup/container.inspect.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    mounts = json.load(handle)[0].get("Mounts", [])
+for mount in mounts:
+    if mount.get("Destination") == "/root/.config/mihomo":
+        print(mount.get("Source", ""))
+        break
+PY
+)
+  cp -a "$backup/docker-compose.yml" "$compose"
+  if ! set_compose_image "$rollback_tag" "$data_source"; then
+    write_status failed "无法准备 Mihomo 旧镜像回退 Compose" "$old_id" "" "$backup"; exit 1
+  fi
+  write_status applying "正在恢复 Mihomo 旧镜像与原数据挂载。" "$old_id" "" "$backup"
+  docker compose -f "$compose" up -d --no-deps --force-recreate "$container" || true
+  if healthy && mounts_match "$backup/mounts.before"; then
+    write_status rolled_back "已恢复旧版 Mihomo、原数据挂载和控制接口。" "$old_id" "$old_id" "$backup" "$(running_version)"
+  else
+    write_status failed "旧版 Mihomo 回退后验证仍失败，请使用备份目录人工检查。" "$old_id" "$old_id" "$backup"
+    exit 1
+  fi
+}
+
 case "$action" in
   check) check ;;
   apply) apply ;;
+  recover) recover "${2:-}" ;;
   status) [[ -f $status_file ]] && cat "$status_file" || printf '%s\n' '{"state":"unknown","message":"尚未检查 Mihomo 更新"}' ;;
   *) echo "usage: $0 {check|apply|status}" >&2; exit 2 ;;
 esac
