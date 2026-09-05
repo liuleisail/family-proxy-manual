@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Recover Docker containers after a daemon restart or host boot.
-# Containers explicitly stopped by the user must be listed in the exclude file.
+# Only explicitly opted-in containers are managed; exclusions always win.
 set -u
 
 EXCLUDE_FILE="${FAMILY_DOCKER_RECOVER_EXCLUDE:-/etc/family-proxy-ui/docker-recover-exclude.conf}"
+ALLOW_FILE="${FAMILY_DOCKER_RECOVER_ALLOW:-/etc/family-proxy-ui/docker-recover-allow.conf}"
+PAUSE_FILE="${FAMILY_DOCKER_RECOVER_PAUSE:-/etc/family-proxy-ui/docker-recover.paused}"
+[[ ! -e "$PAUSE_FILE" ]] || { echo "family-docker-recover: paused"; exit 0; }
+[[ -r "$ALLOW_FILE" ]] || { echo "family-docker-recover: no opt-in list; nothing to recover"; exit 0; }
 
 for _ in $(seq 1 30); do
   if docker info >/dev/null 2>&1; then
@@ -27,6 +31,7 @@ for id in $(docker ps -aq --filter "status=exited"); do
   name=$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's#^/##')
   policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$id" 2>/dev/null)
   [ -n "$name" ] || continue
+  grep -qxF "$name" "$ALLOW_FILE" || continue
   case "$policy" in
     always|unless-stopped) ;;
     *) continue ;;
@@ -35,6 +40,7 @@ for id in $(docker ps -aq --filter "status=exited"); do
     echo "skip $name (user-stopped, in exclude list)"
     continue
   fi
+  [[ ! -e "$PAUSE_FILE" ]] || { echo "family-docker-recover: paused"; exit 0; }
   echo "start $name (policy=$policy)"
   docker start "$id" >/dev/null 2>&1 && restarted=$((restarted + 1)) \
     || echo "failed to start $name" >&2

@@ -1,0 +1,4 @@
+# Explicitly opt in by exact container name, one per line.
+# Empty by default: Docker's own restart policy remains authoritative.
+# Exclusions in docker-recover-exclude.conf override this list.
+# Create docker-recover.paused beside these files to suspend this helper.

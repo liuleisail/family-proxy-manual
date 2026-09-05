@@ -1,0 +1,6 @@
+# Optional opt-in profile. Install only after confirming these exact names.
+# docker-recover-exclude.conf still overrides every entry below.
+family-mihomo-fallback
+family-mosdns-t
+family-mosdns-ui
+family-mihomo-dashboard

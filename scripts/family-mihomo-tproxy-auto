@@ -3,6 +3,9 @@
 # directly with SNAT; all other TCP/UDP traffic is handed to Mihomo TPROXY.
 set -Eeuo pipefail
 
+exec 9>/etc/family-proxy-ui/tproxy-sync.lock
+flock -w 75 9 || { echo "TPROXY sync is busy" >&2; exit 1; }
+
 CONFIG=/etc/family-proxy-ui/router.env
 STATE=/etc/family-proxy-ui/managed-ips
 CN_LIST=/etc/family-proxy-ui/cn-ipv4.txt

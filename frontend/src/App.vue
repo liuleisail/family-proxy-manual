@@ -29,7 +29,7 @@ type Device = {
   fixed?: boolean
   packets?: number
   connections?: number
-  egress?: string
+  egress?: { mode?: string; headline?: string }
 }
 
 type DevicePayload = {
@@ -2042,7 +2042,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); if (airportTestPol
       <div class="sidebar-bottom">
         <div class="mini-availability"><HeartPulse :size="16" /><span>系统可用性</span><strong>{{ ready ? '99.9%' : '检查中' }}</strong></div>
         <a class="secondary-button sidebar-console-switch" href="/legacy" title="回到原版管理界面" aria-label="回到原版管理界面"><ArrowUpRight :size="15" /><span>回到原版</span></a>
-        <div class="sidebar-version">Family Proxy <span :title="String(summary.build_id || '')">{{ summary.version || '0.11.15' }}</span></div>
+        <div class="sidebar-version">Family Proxy <span :title="String(summary.build_id || '')">{{ summary.version || '0.11.16' }}</span></div>
       </div>
     </aside>
 
@@ -2094,7 +2094,7 @@ onUnmounted(() => { if (poller) window.clearInterval(poller); if (airportTestPol
                 <div class="member-title"><button type="button" class="device-avatar-trigger" title="选择设备图标" :aria-label="`选择${device.name || '设备'}的图标`" @click="openIconPicker(device)"><div class="device-avatar"><component :is="iconFor(device.icon)" :size="17" /></div></button><div><strong>{{ device.name || '未命名设备' }}</strong><small>{{ device.custom_name ? (device.router_name || '自定义名称') : device.status === 'bound' ? '在线设备' : '已发现设备' }}</small></div></div>
                 <div class="address-cell"><strong>{{ device.ip }}</strong><small>{{ device.mac }}</small></div>
                 <div><span class="status-label" :class="device.status === 'bound' ? 'online' : 'offline'"><span />{{ device.status === 'bound' ? '在线' : '离线' }}</span></div>
-                <div><span class="state-label" :class="device.managed ? (device.effective ? 'active' : 'pending') : 'idle'">{{ !device.managed ? '未接管' : device.effective ? '已生效' : '等待新流量' }}</span><small v-if="device.managed">{{ number(device.packets).toLocaleString() }} 个包</small></div>
+                <div><span class="state-label" :class="device.managed ? (device.effective ? 'active' : 'pending') : 'idle'">{{ !device.managed ? '未接管' : (device.egress?.headline || '已配置，待核验') }}</span><small v-if="device.managed">{{ number(device.packets).toLocaleString() }} 个包</small></div>
                 <div class="row-actions">
                   <button class="icon-button small" title="编辑设备名称和图标" aria-label="编辑设备名称和图标" @click="openRename(device)"><Pencil :size="15" /></button>
                   <button v-if="device.managed || device.favorite || device.status === 'bound'" class="compact-button homekit-control" :class="{ enabled: device.homekit_direct }" :disabled="busy === `homekit-${device.mac}`" :title="device.homekit_direct ? '关闭 HomeKit 本地直连' : '启用 HomeKit 本地直连'" @click="setHomeKitDirect(device)"><House :size="14" />{{ device.homekit_direct ? (device.homekit_route_active ? 'HomeKit 已生效' : 'HomeKit 已选择') : 'HomeKit 直连' }}</button>

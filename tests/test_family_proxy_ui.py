@@ -118,6 +118,13 @@ class MaintenanceReleaseInfoTests(unittest.TestCase):
         self.assertIn("MosDNS-T</h2>", page)
         self.assertNotIn("IrineSistiana/mosdns", page)
 
+    def test_mihomo_upgrade_is_not_gated_by_docker_proxy_environment(self):
+        page = family_proxy_ui.MIHOMO_MAINTENANCE_PAGE
+
+        self.assertIn("升级时由 Docker 拉取并校验", page)
+        self.assertIn("$('#mihomo-apply').disabled=busy||!available", page)
+        self.assertNotIn("!available||d.docker_proxy_ready===false", page)
+
     def test_component_release_metadata_has_consistent_contract(self):
         metadata = family_proxy_ui.component_release_metadata(
             "routeros", "当前已是最新", "官方通道没有可用更新", "2026-08-12T10:00:00Z"

@@ -13,8 +13,18 @@ git diff --check
 python3 -m py_compile runtime/*.py scripts/*.py
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 
-if [[ -d frontend/node_modules ]]; then
-  (cd frontend && npm run typecheck && npm run build)
+frontend_dir=${FAMILY_FRONTEND_BUILD_DIR:-$REPO_DIR/frontend}
+if [[ -d "$frontend_dir/node_modules" ]]; then
+  if [[ "$frontend_dir" != "$REPO_DIR/frontend" ]]; then
+    diff -qr frontend/src "$frontend_dir/src"
+    for file in package.json package-lock.json index.html tsconfig.json vite.config.ts; do
+      cmp "frontend/$file" "$frontend_dir/$file"
+    done
+  fi
+  (cd "$frontend_dir" && npm run typecheck && npm run build)
+  if [[ "$frontend_dir" != "$REPO_DIR/frontend" ]]; then
+    rsync -a --delete "$frontend_dir/dist/" frontend/dist/
+  fi
 else
   echo "frontend/node_modules is missing; run npm install before release verification" >&2
   exit 1

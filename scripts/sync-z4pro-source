@@ -10,8 +10,8 @@ remote_stage=$(ssh "$TARGET" "mktemp -d /tmp/family-proxy-source.XXXXXX")
 cleanup() { ssh "$TARGET" "rm -rf '$remote_stage'"; }
 trap cleanup EXIT
 
-rsync -azc \
-    VERSION DEPLOYMENT.md README.md deploy/ routeros/ runtime/ scripts/ tests/ \
+rsync -azcR \
+    VERSION AGENTS.md DEPLOYMENT.md README.md deploy/ routeros/ runtime/ scripts/ tests/ config/ systemd/ \
     "$TARGET:$remote_stage/"
 rsync -azc \
     frontend/package.json frontend/package-lock.json frontend/index.html \
@@ -45,6 +45,9 @@ key_files=(
     scripts/install-mosdns-management.sh
     scripts/apply-runtime-mode
     scripts/family-mihomo-tproxy-auto
+    scripts/family-docker-recover
+    config/docker-recover-allow.conf.example
+    routeros/02-prepare-controller.rsc
     scripts/family-mihomo-upgrade
     scripts/homekit-direct-routes
     scripts/refresh-cn-ipv4

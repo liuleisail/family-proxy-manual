@@ -4,8 +4,8 @@ for unit in family-proxy-ui family-mihomo-sub-import family-proxy-gateway; do
   systemctl is-active --quiet "$unit" || { echo "$unit is not active" >&2; exit 1; }
 done
 proxy_ip=$(awk -F= '$1 == "FAMILY_PROXY_IP" { print $2; exit }' /etc/family-proxy-ui/router.env)
-for port in 18087 18088; do
-  curl --interface "$proxy_ip" --silent --output /dev/null --max-time 5 \
+for port in 18088; do
+  curl --noproxy '*' --interface "$proxy_ip" --silent --output /dev/null --max-time 5 \
     --write-out '%{http_code}' "http://$proxy_ip:$port/" | grep -Eq '^(200|303|403)$' \
     || { echo "gateway port $port is not ready" >&2; exit 1; }
 done
@@ -38,6 +38,7 @@ build_info = json.loads(Path('/opt/family-proxy-ui/build-info.json').read_text()
 fingerprint_inputs = (
     Path('/opt/family-proxy-ui/family-proxy-ui.py'),
     Path('/opt/family-proxy-ui/family-proxy-gateway.py'),
+    Path('/opt/family-proxy-ui/family-mihomo-sub-import.py'),
     Path('/opt/family-proxy-ui/VERSION'),
     Path('/opt/family-proxy-ui/rules.html'),
     Path('/opt/family-proxy-ui/frontend/index.html'),

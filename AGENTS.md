@@ -971,3 +971,21 @@ up-script 同样替换 enable。字段规律：`to-ports`、`connection-mark`、
 - RouterOS、IPv6 防漏规则、设备纳管集合、候选池和订阅来源未修改。当前受管设备 IPv6 防漏规则有计数，旁路路径仍按 IPv4 TPROXY/策略路由核对。
 - 本地验证：70 tests、Python 编译和 `git diff --check` 通过；应用后必须核对 `gemini.google.com`、`www.google.com`、`gstatic.com`、`googleapis.com` 日志均使用 `Gemini`，再让真实浏览器重新加载。由于规则按域名生效，Google 通用域名会随 Gemini 出口变化，这是保持会话 IP 一致所需的范围扩大。
 - 变更前备份：`/var/backups/family-proxy/20260818-195219-gemini-google-consistency`。回滚优先恢复该备份中的 Mihomo `config.yaml` 和生产 `family-mihomo-sub-import.py`，或恢复代码后执行 `--apply-current`；不要通过修改 RouterOS IPv6 规则回避该问题。
+
+## 34. 2026-09-05 v0.11.16 审计修复与发布
+
+- 用户已授权修复审查问题并同步 GitHub、合并发布。生产已部署 0.11.16，build `657b2d0d8311`；现场核验时间为 2026-09-05 21:23 左右。
+- 单设备清理改为完整标签匹配，避免 .11 误删 .112；设备事务增加线程锁和文件锁，先同步 Z4Pro 再写 RouterOS，失败尝试精确撤出；撤出失败时保留接收端，不静默宣称回滚成功。
+- 本地健康检查新增 forwarding：TCP/UDP 7893、mark 0x2000 的 local 路由、nft 两协议规则与 managed4/状态文件一致。候选明确 alive=false 不算健康。Netwatch 自身不参与复合探针，避免降级自锁。
+- 新旧设备页使用近期带标记连接的计数增长，并核对本机转发、RouterOS 规则启用、路由 active、DNS 和 Netwatch；不再用任何连接存在代表已生效。
+- MosDNS 只有实际开始切换容器后失败才重建回滚；下载/备份失败不碰当前核心。Docker helper 改为白名单 opt-in、排除优先、支持暂停；历史“恢复所有容器”的说明被本节取代。
+- 修正 APNs address-list 清理绝对路径。当前现场旧列表为空，不重导模板、不写 RouterOS。修复源码同步目录保持、部署 helper/updater 备份安装、18088 主入口校验和 build 指纹一致性。
+- 保留工作区原有 HomeKit 3200 规则与 Mihomo 镜像挂载保护，不覆盖为旧提交。发布包含这些已经在现场使用的修改及回归。
+- 回滚应恢复本次部署备份的 UI/gateway/sub-import、frontend、VERSION/build-info、helpers、MosDNS updater 和 Docker allow/exclude 文件，再重启相关控制面。不得清空名单、重建核心或全量覆盖 RouterOS。
+- 变更前完整备份：`/var/backups/family-proxy/20260905-211426-v0.11.16-prechange`；最终部署备份：`/var/backups/family-proxy/20260905-212239`。前者可恢复旧版 0.11.15，后者是首次安装 0.11.16 后的再次部署备份，不能混淆。
+- 首轮外部入口等待不足，部署返回失败而内部健康通过；已将入口等待扩展到 60 次并明确本机 curl 直连。第二轮完整部署通过，Netwatch 曾短暂降级，最终 up（21:23:27）；没有手动写 RouterOS。
+- 最终验证：87 项 Python 回归通过，隔离 npm ci（锁文件）后 typecheck/Vite build/verify-release 通过，git diff --check 通过；原 NAS node_modules 类型文件不完整，未通过 any 声明绕过。新旧页面状态文本已核对，新 Vue 三种状态用合成数据完成桌面与 390px 视口检查；生产浏览器停在登录页，登录后视觉路径未直接验证。
+- 生产六台设备的 RouterOS、managed-ips、nft 一致，API drift=[]，checks.forwarding 全通过；实际 .115 的带标记连接计数增长使状态切为 observed。核心容器未重建，Mihomo/MosDNS restart=0 且启动时间保持不变。
+- 现网 Docker 恢复白名单明确为 family-mihomo-fallback、family-mosdns-t、family-mosdns-ui、family-mihomo-dashboard，沿用排除清单；手动执行 helper 启动 0 个容器。配置示例 `config/docker-recover-family.conf.example` 为可选 opt-in，默认空白名单仍保留。
+- 未在真实设备上故障注入或执行加入/撤出回放；这些破坏性分支通过隔离模拟覆盖，不以线上进程健康替代业务验证。
+- 最终打包将 Tailwind 扫描限定到 src/index.html，避免默认扫描旧 dist 导致重复构建资源指纹变化；连续两次构建均输出 index-C_9polLc.css / index-D_6W95u6.js，与已部署资源一致，最终 build ID 仍为 `657b2d0d8311`。

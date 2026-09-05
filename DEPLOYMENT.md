@@ -186,6 +186,15 @@ sudo /usr/local/sbin/family-mihomo-tproxy-auto sync
 
 ## 7. 验收标准
 
+### v0.11.16 维护边界
+
+- Docker 恢复 helper 只读取 `/etc/family-proxy-ui/docker-recover-allow.conf` 中明确列出的容器名，默认文件为空。既有排除清单优先；创建同目录 `docker-recover.paused` 可暂停 helper，不改变 Docker 自身策略。仅为需要额外恢复的本项目容器 opt-in，不自动纳入其它 NAS 服务。
+- 部署会备份并安装已有 MosDNS updater 的 `app.py`，仅重启维护 API，不升级或重建 MosDNS 核心。部署前确认没有正在进行的维护任务。
+- RouterOS 模板的 APNs 修复只改代码；现网旧列表已为空时不需要重新导入整套模板。
+- 复合健康多出 `checks.forwarding`。它检查本机数据面，不将 RouterOS Netwatch 状态作为自身健康输入，避免降级后无法恢复的循环依赖。设备名单/出口展示另行检查 RouterOS 启用状态和 Netwatch。
+- 设备状态的“观察到旁路流量”来自最近 60 秒带旁路标记连接的计数增量，不是业务成功保证；首次读取只建立基线。仍需验证受影响客户端国内、局域网和外网业务。
+- 设备事务使用 `managed-ips.lock`；TPROXY 同步使用独立 `tproxy-sync.lock`。手工修改名单前停止并发页面操作；不要在持有同步锁时再次调用同步脚本。
+
 - 三个控制平面服务均为 `active`，`verify-server.sh` 通过内部网关密钥验证健康、Z4Pro 系统状态和机场状态接口。
 - 设备页能显示 CPU、内存、温度、Docker 数据盘、运行/总容器数和系统运行时间；已停止容器保持原状态。
 - Mihomo 控制接口可访问，候选池配置可校验并加载。

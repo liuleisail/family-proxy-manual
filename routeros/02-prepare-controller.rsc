@@ -53,8 +53,8 @@
 :foreach appleDirectRule in=[find where comment=($sharedTag . " Apple APNs direct")] do={
   remove $appleDirectRule
 }
-:foreach appleDirectEntry in=[find where list="family_apple_direct" and address="17.0.0.0/8"] do={
-  remove $appleDirectEntry
+:foreach appleDirectEntry in=[/ip firewall address-list find where list="family_apple_direct" and address="17.0.0.0/8"] do={
+  /ip firewall address-list remove $appleDirectEntry
 }
 :if ([:len [find where comment=($sharedTag . " route to z4pro")]] = 0) do={
   add chain=prerouting action=mark-routing new-routing-mark=$sharedTable passthrough=no src-address-list=$sharedList connection-mark=$sharedMark comment=($sharedTag . " route to z4pro") place-before=$mangleAnchor

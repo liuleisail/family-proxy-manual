@@ -2,6 +2,8 @@
 """LAN-only controller for selected-device family Mihomo routing."""
 
 import base64
+import fcntl
+import functools
 import hashlib
 import hmac
 import ipaddress
@@ -16,6 +18,7 @@ import socket
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 import yaml
 from collections import deque
@@ -57,7 +60,7 @@ FIXED_MANAGED_IPS = set()
 RESERVED_IPS = {"__FAMILY_ROUTER_IP__", "__FAMILY_RESERVED_GATEWAY_IP__", PROXY_IP}
 AUDIT_PATH = Path("/var/log/family-proxy-ui-audit.jsonl")
 CSRF_TOKEN_PATH = Path("/etc/family-proxy-ui/csrf-token")
-BUILD_VERSION = "0.11.15"
+BUILD_VERSION = "0.11.16"
 BUILD_INFO_PATH = Path("/opt/family-proxy-ui/build-info.json")
 COMPONENT_RELEASE_SOURCES = {
     "mihomo": {
@@ -103,6 +106,9 @@ def load_csrf_token():
 
 CSRF_TOKEN = load_csrf_token()
 HEALTH_LOCK = threading.Lock()
+DEVICE_TRANSACTION_LOCK = threading.RLock()
+DEVICE_TRAFFIC_LOCK = threading.Lock()
+DEVICE_TRAFFIC = {}
 HEALTH_GATE = {"ready": False, "failures": 0, "successes": 0}
 RULES_LOCK = threading.Lock()
 DEVICE_PREFS_LOCK = threading.Lock()
@@ -124,6 +130,7 @@ CAPTURE_INTERFACE = os.environ.get("FAMILY_CAPTURE_INTERFACE", "kvmbr0")
 HOMEKIT_ROUTE_INTERFACE = os.environ.get("FAMILY_HOMEKIT_ROUTE_INTERFACE", "kvmbr0")
 HOMEKIT_ROUTE_TABLE = "3001"
 HOMEKIT_ROUTE_RULE_PREF = "2900"
+HOMEKIT_ROUTE_DEST_RULE_PREF = "3200"
 TPROXY_RETURN_PROTO = "186"
 CAPTURE_MAX_BYTES = 50_000_000
 CAPTURE_TOTAL_BYTES = 200_000_000
@@ -388,14 +395,37 @@ def address_list_managed(api):
 
 def save_managed_ips(addresses):
     content = "".join(f"{address}\n" for address in sorted(addresses, key=lambda value: tuple(map(int, value.split(".")))))
-    temporary = MANAGED_IPS_PATH.with_suffix(".new")
-    temporary.write_text(content)
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, MANAGED_IPS_PATH)
+    with tempfile.NamedTemporaryFile(mode="w", dir=MANAGED_IPS_PATH.parent,
+                                     prefix=".managed-", delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+            os.replace(temporary, MANAGED_IPS_PATH)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def device_transaction(function):
+    @functools.wraps(function)
+    def locked(*args, **kwargs):
+        with DEVICE_TRANSACTION_LOCK:
+            with MANAGED_IPS_PATH.with_suffix(".lock").open("a") as handle:
+                os.chmod(handle.name, 0o600)
+                fcntl.flock(handle, fcntl.LOCK_EX)
+                try:
+                    return function(*args, **kwargs)
+                finally:
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+    return locked
 
 
 def sync_tproxy():
-    result = subprocess.run([TPROXY_SYNC, "sync"], text=True, capture_output=True)
+    try:
+        result = subprocess.run([TPROXY_SYNC, "sync"], text=True, capture_output=True, timeout=90)
+    except subprocess.TimeoutExpired as exc:
+        raise RouterError("Z4Pro 透明代理同步超时") from exc
     if result.returncode:
         raise RouterError("Z4Pro 透明代理同步失败")
 
@@ -424,6 +454,50 @@ def dns_probe(name="www.baidu.com"):
             response[3] & 0x0F == 0 and int.from_bytes(response[6:8], "big") > 0)
 
 
+def forwarding_status():
+    """Inspect the local data plane without changing routes, counters or rules."""
+    checks = {"listener": False, "route": False, "nft": False, "membership": False}
+    result = {"ready": False, "checks": checks, "managed": []}
+    def read_command(*args):
+        return subprocess.run(args, text=True, capture_output=True, check=True, timeout=2).stdout
+    try:
+        listeners = read_command("ss", "-H", "-lntu")
+        checks["listener"] = all(any(line.startswith(proto) and re.search(r":7893\s", line)
+                                      for line in listeners.splitlines()) for proto in ("tcp", "udp"))
+        rules = json.loads(read_command("ip", "-j", "-4", "rule", "show"))
+        routes = json.loads(read_command("ip", "-j", "-4", "route", "show", "table", "3000"))
+        checks["route"] = (any(str(item.get("table")) in {"3000", SHARED_TABLE}
+                                   and str(item.get("fwmark")) in {"0x2000", "8192"}
+                                   and str(item.get("fwmask", "0xffffffff")) in {"0xffffffff", "4294967295"}
+                                   for item in rules)
+                           and any(item.get("type") == "local" and item.get("dev") == "lo"
+                                   and item.get("dst") in {"default", "0.0.0.0/0"} for item in routes))
+        members = json.loads(read_command("nft", "-j", "list", "set", "inet", "family_mihomo_direct", "managed4"))
+        addresses = {elem for item in members["nftables"] for elem in item.get("set", {}).get("elem", [])
+                     if isinstance(elem, str)}
+        result["managed"] = sorted(addresses)
+        checks["membership"] = addresses == managed_ips()
+        chain = json.loads(read_command("nft", "-j", "list", "chain", "inet", "family_mihomo_direct", "prerouting"))
+        hooked = any(item.get("chain", {}).get("hook") == "prerouting"
+                     and item["chain"].get("type") == "filter" for item in chain["nftables"])
+        protocols = set()
+        for item in chain["nftables"]:
+            expr = item.get("rule", {}).get("expr", [])
+            if not (any(part.get("tproxy", {}).get("port") == 7893 for part in expr)
+                    and any(part.get("mangle") == {"key": {"meta": {"key": "mark"}}, "value": 8192} for part in expr)
+                    and any(part.get("match", {}).get("right") == "@managed4" for part in expr)):
+                continue
+            for part in expr:
+                match = part.get("match", {})
+                if match.get("left") == {"meta": {"key": "l4proto"}}:
+                    protocols.add(match.get("right"))
+        checks["nft"] = hooked and {"tcp", "udp"} <= protocols
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        pass
+    result["ready"] = all(checks.values())
+    return result
+
+
 def local_health():
     started = time.monotonic()
     checks = {"mihomo": False, "dns": False, "policy": False}
@@ -433,7 +507,7 @@ def local_health():
         checks["mihomo"] = bool(version)
         detail["version"] = version.get("version", "")
         policy = mihomo_request("/proxies/Proxy-Auto")
-        checks["policy"] = bool(policy.get("now") and policy.get("all"))
+        checks["policy"] = bool(policy.get("now") and policy.get("all") and policy.get("alive") is not False)
         detail["proxy"] = policy.get("now")
     except RouterError:
         pass
@@ -451,6 +525,10 @@ def local_health():
                 detail["dns_samples"] = len(ordered)
     except (OSError, TimeoutError):
         pass
+    if not standalone_mode():
+        forwarding = forwarding_status()
+        checks["forwarding"] = forwarding["ready"]
+        detail["forwarding"] = forwarding
     return {
         "ready": all(checks.values()),
         "checks": checks,
@@ -1947,11 +2025,12 @@ def legacy_homekit_direct_ips(route_interface):
 
 
 def homekit_direct_route_sync():
-    """Maintain source-specific Z4Pro-to-LAN HomeKit routes.
+    """Maintain Z4Pro-to-LAN HomeKit routes for bound and unbound sockets.
 
     Selected devices are stored by MAC, then resolved from live DHCP leases.
-    TPROXY replies keep their RouterOS return route; only traffic whose source
-    is the Z4Pro itself uses the direct LAN table.
+    TPROXY replies keep their RouterOS return route. Bound Z4Pro sockets use
+    source-specific rules, while unbound local sockets use destination rules
+    after the proxy-mark rules.
     """
     if standalone_mode():
         return {"selected": 0, "active": 0, "missing": [], "addresses": {}, "updated_at": 0}
@@ -2004,7 +2083,23 @@ def homekit_direct_route_sync():
             fields = line.split()
             destination = fields[fields.index("to") + 1] if "to" in fields else str(LAN)
             subprocess.run(
-                ["ip", "-4", "rule", "del", "from", PROXY_IP, "to", destination,
+                ["ip", "-4", "rule", "del", "pref", HOMEKIT_ROUTE_RULE_PREF,
+                 "from", PROXY_IP, "to", destination,
+                 "lookup", HOMEKIT_ROUTE_TABLE], text=True, capture_output=True, timeout=3,
+            )
+        for line in current_rules.stdout.splitlines():
+            if (f"lookup {HOMEKIT_ROUTE_TABLE}" not in line
+                    or not line.lstrip().startswith(f"{HOMEKIT_ROUTE_DEST_RULE_PREF}:")):
+                continue
+            fields = line.split()
+            if "from" in fields and fields[fields.index("from") + 1] != "all":
+                continue
+            if "to" not in fields:
+                continue
+            destination = fields[fields.index("to") + 1]
+            subprocess.run(
+                ["ip", "-4", "rule", "del", "pref", HOMEKIT_ROUTE_DEST_RULE_PREF,
+                 "to", destination,
                  "lookup", HOMEKIT_ROUTE_TABLE], text=True, capture_output=True, timeout=3,
             )
         table_route = subprocess.run(
@@ -2022,6 +2117,13 @@ def homekit_direct_route_sync():
             )
             if result.returncode:
                 raise RouterError(f"HomeKit 本地直连策略写入失败：{address}")
+            result = subprocess.run(
+                ["ip", "-4", "rule", "add", "pref", HOMEKIT_ROUTE_DEST_RULE_PREF,
+                 "to", f"{address}/32", "lookup", HOMEKIT_ROUTE_TABLE],
+                text=True, capture_output=True, timeout=3,
+            )
+            if result.returncode:
+                raise RouterError(f"HomeKit 未绑定套接字直连策略写入失败：{address}")
         managed = managed_ips()
         router_ip = load_config()["FAMILY_ROUTER_IP"]
         for address in sorted(set(previous["ips"]) | desired_ips,
@@ -2942,13 +3044,41 @@ def egress_policy_contract(api, mangle, nat, ipv6_filters):
     """Read the shared policy contract once; this function never mutates RouterOS."""
     routes = api.print("/ip/route")
     return {
-        "mark_rule": any(item.get("comment") == SHARED_TAG + " mark connection" for item in mangle),
-        "route_rule": any(item.get("comment") == SHARED_TAG + " route to z4pro" for item in mangle),
-        "shared_route": any(item.get("comment") == SHARED_TAG + " route" for item in routes),
-        "dns_redirect": all(any(item.get("comment") == SHARED_TAG + f" DNS {protocol}" for item in nat)
+        "mark_rule": any(rule_enabled(item) and item.get("comment") == SHARED_TAG + " mark connection"
+                         and item.get("new-connection-mark") == SHARED_CONN_MARK for item in mangle),
+        "route_rule": any(rule_enabled(item) and item.get("comment") == SHARED_TAG + " route to z4pro"
+                          and item.get("new-routing-mark") == SHARED_TABLE for item in mangle),
+        "shared_route": any(rule_enabled(item) and item.get("active") == "true"
+                            and item.get("comment") == SHARED_TAG + " route"
+                            and item.get("gateway") == PROXY_IP for item in routes),
+        "dns_redirect": all(any(rule_enabled(item) and item.get("comment") == SHARED_TAG + f" DNS {protocol}"
+                                and item.get("to-addresses") == PROXY_IP and str(item.get("to-ports")) == "53" for item in nat)
                             for protocol in ("TCP", "UDP")),
         "ipv6_filters": ipv6_filters,
     }
+
+
+def rule_enabled(item):
+    return item.get("disabled") not in (True, "true", "yes") and item.get("invalid") not in (True, "true", "yes")
+
+
+def recent_marked_traffic(ip, connections, now=None):
+    now = time.monotonic() if now is None else now
+    counters = {item.get(".id", item.get("src-address")): int(item.get("orig-packets", "0") or 0)
+                + int(item.get("repl-packets", "0") or 0) for item in connections
+                if item.get("connection-mark") == SHARED_CONN_MARK
+                and item.get("src-address", "").rsplit(":", 1)[0] == ip}
+    with DEVICE_TRAFFIC_LOCK:
+        previous = DEVICE_TRAFFIC.get(ip)
+        observed = previous["observed"] if previous else None
+        if previous and now - previous["sampled"] <= 60:
+            if any(value > previous["counters"].get(key, 0) for key, value in counters.items()):
+                observed = now
+        DEVICE_TRAFFIC[ip] = {"sampled": now, "observed": observed, "counters": counters}
+        for address in list(DEVICE_TRAFFIC):
+            if now - DEVICE_TRAFFIC[address]["sampled"] > 120:
+                del DEVICE_TRAFFIC[address]
+    return observed is not None and now - observed <= 60
 
 
 def device_egress(ip, mac, is_managed, connections, contract):
@@ -2969,7 +3099,7 @@ def device_egress(ip, mac, is_managed, connections, contract):
             "checks": {},
         }
     ipv6_guard = any(
-        item.get("comment") == managed_tag(ip) + " IPv6 bypass guard"
+        rule_enabled(item) and item.get("comment") == managed_tag(ip) + " IPv6 bypass guard"
         and item.get("src-mac-address", "").upper() == mac.upper()
         for item in contract["ipv6_filters"]
     )
@@ -2979,10 +3109,16 @@ def device_egress(ip, mac, is_managed, connections, contract):
         "route_rule": contract["route_rule"] and contract["shared_route"],
         "dns_redirect": contract["dns_redirect"],
         "ipv6_guard": ipv6_guard,
+        "forwarding": contract.get("forwarding", {}).get("ready", False),
+        "nft_membership": ip in contract.get("forwarding", {}).get("managed", []),
+        "file_membership": ip in contract.get("file_managed", set()),
+        "netwatch": contract.get("netwatch") == "up",
     }
+    ready = all(checks.values())
+    observed = recent_marked_traffic(ip, connections) if ready else False
     return {
-        "mode": "managed" if all(checks.values()) else "degraded",
-        "headline": "经 Z4Pro 分流" if all(checks.values()) else "旁路规则需核对",
+        "mode": ("observed" if observed else "ready") if ready else "degraded",
+        "headline": ("观察到旁路流量" if observed else "转发就绪") if ready else "旁路降级，需核验",
         "active_connections": active,
         "marked_connections": marked,
         "packets": packets,
@@ -3004,7 +3140,7 @@ def configuration_drift(api, leases, router_managed, file_managed):
             issues.append(f"{ip} 仍使用设备专属网关或 DNS")
         mac = lease.get("mac-address", "")
         guard = any(
-            item.get("comment") == managed_tag(ip) + " IPv6 bypass guard"
+            rule_enabled(item) and item.get("comment") == managed_tag(ip) + " IPv6 bypass guard"
             and item.get("src-mac-address", "").upper() == mac.upper()
             for item in api.print("/ipv6/firewall/filter")
         )
@@ -3044,6 +3180,9 @@ def list_devices():
                 legacy_managed.add(address)
         managed |= legacy_managed
         file_managed = managed_ips()
+        summary = router_summary(api)
+        forwarding = summary.get("detail", {}).get("forwarding", {})
+        egress_contract.update(forwarding=forwarding, file_managed=file_managed, netwatch=summary.get("netwatch"))
         devices = []
         for lease in leases:
             ip = lease.get("address")
@@ -3056,6 +3195,7 @@ def list_devices():
             is_managed = ip in managed
             if is_managed:
                 managed_macs.add(mac)
+            egress = device_egress(ip, mac, is_managed, connections, egress_contract)
             router_name = lease.get("host-name") or lease.get("comment") or "未命名设备"
             devices.append({
                 "ip": ip,
@@ -3073,11 +3213,14 @@ def list_devices():
                 "fixed": False,
                 "packets": packets,
                 "connections": active_connections,
-                "effective": is_managed and active_connections > 0,
-                "egress": device_egress(ip, mac, is_managed, connections, egress_contract),
+                "effective": egress["mode"] == "observed",
+                "egress": egress,
             })
-        summary = router_summary(api)
         drift = configuration_drift(api, leases, address_list_managed(api), file_managed)
+        if set(forwarding.get("managed", [])) != file_managed:
+            drift.append("nft 纳管集合与 Z4Pro 状态文件不一致")
+        if not forwarding.get("ready"):
+            drift.append("Z4Pro 转发平面未就绪")
         upnp = [item for item in nat_rules
                 if item.get("dynamic") == "true" and item.get("comment", "").startswith("upnp ")]
         upnp_settings = api.print("/ip/upnp")
@@ -3271,7 +3414,7 @@ def cleanup_device_rules(api, ip):
     for path in ("/ip/firewall/mangle", "/ip/firewall/nat", "/ip/firewall/filter",
                  "/ipv6/firewall/filter", "/ip/route"):
         for item in api.print(path):
-            if item.get("comment", "").startswith(tags):
+            if item.get("comment", "").split(" ", 1)[0] in tags:
                 api.remove(path, item[".id"])
                 removed += 1
     for item in api.print("/routing/table"):
@@ -3330,13 +3473,16 @@ def verify_device_rules(api, ip):
         ("/ip/route", 1),
     )
     for path, count in expected:
-        actual = sum(item.get("comment", "").startswith(SHARED_TAG) for item in api.print(path))
+        actual = sum(rule_enabled(item) and item.get("comment", "").startswith(SHARED_TAG) for item in api.print(path))
         if actual < count:
             missing.append(f"{path}:{actual}/{count}")
-    guard = sum(item.get("comment") == managed_tag(ip) + " IPv6 bypass guard"
+    guard = sum(rule_enabled(item) and item.get("comment") == managed_tag(ip) + " IPv6 bypass guard"
                 for item in api.print("/ipv6/firewall/filter"))
     if guard != 1:
         missing.append(f"IPv6 防漏:{guard}/1")
+    contract = egress_policy_contract(api, api.print("/ip/firewall/mangle"),
+                                      api.print("/ip/firewall/nat"), api.print("/ipv6/firewall/filter"))
+    missing.extend(key for key in ("mark_rule", "route_rule", "shared_route", "dns_redirect") if not contract[key])
     if missing:
         raise RouterError("规则创建不完整：" + ", ".join(missing))
 
@@ -3356,6 +3502,7 @@ def ensure_static_dhcp_lease(api, lease, ip):
     return refreshed
 
 
+@device_transaction
 def enable_device(ip):
     if standalone_mode():
         raise RouterError("独立旁路模式不会自动接管设备；请在客户端设置 7890 代理或在家庭网关配置策略路由")
@@ -3379,8 +3526,15 @@ def enable_device(ip):
             raise RouterError(f"设备仍命中其它策略：{conflict}；请先解除冲突")
 
         ensure_static_dhcp_lease(api, lease, ip)
+        previous = managed_ips()
         try:
             ensure_shared_policy(api)
+            # Prepare the receiving data plane before RouterOS sends new traffic.
+            save_managed_ips(previous | {ip})
+            sync_tproxy()
+            forwarding = forwarding_status()
+            if not forwarding["ready"] or ip not in forwarding["managed"]:
+                raise RouterError("Z4Pro 转发状态校验失败；未接通 RouterOS 流量")
             api.add("/ip/firewall/address-list", list=SHARED_LIST, address=ip,
                     comment="family-mihomo-managed " + ip)
             api.add("/ipv6/firewall/filter", chain="forward", action="jump", **{
@@ -3388,26 +3542,24 @@ def enable_device(ip):
                 "comment": tag + " IPv6 bypass guard",
             })
             verify_device_rules(api, ip)
-            addresses = managed_ips()
-            addresses.add(ip)
-            save_managed_ips(addresses)
-            sync_tproxy()
             cleared = clear_device_connections(api, ip)
             audit("enable", ip, "success", f"cleared_connections={cleared}")
         except (RouterError, OSError) as exc:
-            remove_shared_membership(api, ip)
-            addresses = managed_ips()
-            addresses.discard(ip)
-            save_managed_ips(addresses)
+            # Never remove the receiver if detaching the router failed.
             try:
+                remove_shared_membership(api, ip)
+                clear_device_connections(api, ip)
+                save_managed_ips(previous)
                 sync_tproxy()
-            except RouterError:
-                pass
+            except (RouterError, OSError) as rollback_exc:
+                audit("enable", ip, "rollback_failed", str(rollback_exc))
+                raise RouterError(f"加入失败：{exc}；回滚未完成：{rollback_exc}") from exc
             audit("enable", ip, "rolled_back", str(exc))
             raise
         return {"ip": ip, "message": "已固定 DHCP IP，加入旁路并通过规则校验；旧连接已清理，请重新打开应用验证"}
 
 
+@device_transaction
 def remove_device(ip):
     if standalone_mode():
         raise RouterError("独立旁路模式没有 RouterOS 接管规则")
@@ -4334,7 +4486,18 @@ MIHOMO_MAINTENANCE_PAGE = MIHOMO_MAINTENANCE_PAGE.replace(
     "'正式版本：'+version",
     "(component==='mosdns'?'项目版本：':'正式版本：')+version",
     1,
+).replace(
+    "d.docker_proxy_ready===false?'Docker 代理未就绪':available?'正式版可升级':'等待正式版'",
+    "available?(d.docker_proxy_ready===false?'升级时由 Docker 拉取并校验':'正式版可升级'):'等待正式版'",
+    1,
+).replace(
+    "$('#mihomo-apply').disabled=busy||!available||d.docker_proxy_ready===false",
+    "$('#mihomo-apply').disabled=busy||!available",
+    1,
 )
+
+
+PAGE = PAGE.replace("d.effective?'已生效':'等待新流量'", "(d.egress?.headline||'已配置，待核验')")
 
 
 class Handler(BaseHTTPRequestHandler):
