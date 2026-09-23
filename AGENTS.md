@@ -989,3 +989,35 @@ up-script 同样替换 enable。字段规律：`to-ports`、`connection-mark`、
 - 现网 Docker 恢复白名单明确为 family-mihomo-fallback、family-mosdns-t、family-mosdns-ui、family-mihomo-dashboard，沿用排除清单；手动执行 helper 启动 0 个容器。配置示例 `config/docker-recover-family.conf.example` 为可选 opt-in，默认空白名单仍保留。
 - 未在真实设备上故障注入或执行加入/撤出回放；这些破坏性分支通过隔离模拟覆盖，不以线上进程健康替代业务验证。
 - 最终打包将 Tailwind 扫描限定到 src/index.html，避免默认扫描旧 dist 导致重复构建资源指纹变化；连续两次构建均输出 index-C_9polLc.css / index-D_6W95u6.js，与已部署资源一致，最终 build ID 仍为 `657b2d0d8311`。
+
+
+## 2026-09-23 DNS 管理挂载恢复与规则更新
+
+- 现场证据：宿主机可读取 `web/family-adblock-allow.txt`，但 `nsenter` 进入 family-mosdns-updater 的 mount namespace 后相同读取报 Errno 107；过滤状态 API 返回 502，规则备份也失败。仅 stat 能成功，不能替代实际读取。
+- 先备份到 `/var/backups/family-proxy/20260923-223649-mosdns-mount-recovery/management-config.tar.gz`（含管理程序、服务单元、管理状态、Compose、web、DNS 配置和规则），再重启 family-mosdns-updater，过滤状态 API 恢复。z4pro-change 入口不可用，使用 z4pro 现有 sudo 权限，未改账号权限。
+- 重试发现独立下载故障：三组官方规则直连 GitHub 超时，现有代理的 Go 下载探针通过。仅在生产 `data/sub_config/rule_set.yaml` 的 geosite_cn/geosite_no_cn/geoip_cn 设置 socks5 为 `172.31.53.1:7890`，保持原官方 URL。原文件另存于上述备份目录的 `rule_set-before-download-proxy.yaml`。
+- 停止更新管理服务以避免并发任务，修改三个下载配置后重启 family-mosdns-t，再启动管理服务。版本仍为 v0.7.3；没有升级镜像、修改 RouterOS、全局 DNS 或查询上游。回滚下载配置：恢复该独立 YAML 备份后重启核心并验证解析。
+- 22:44:57 官方更新完成，三组数量为 111030 / 27054 / 9741；22:46:05 内容过滤更新完成，国内广告 13652、成人内容 75199，数量、白名单和分流回归通过。对应规则备份由更新器保留。
+- Safari 实际页面显示“更新完成”“正在拦截”及完整规则数量，不再停留在读取中。Mac 对 NAS 的国内 UDP、国外 TCP 查询为 NOERROR，doubleclick.net 为 NXDOMAIN；RouterOS Netwatch 最终 up。未验证所有客户端 App。
+- 页面验证后，22:46:29 观察到另一操作将内容过滤切到 off（本次修复未提交模式切换），保持该最新选择，未强制恢复 block。
+- 残留边界：未改 NAS FUSE 生命周期；若再次重挂载后仅管理服务实际文件读取报 Errno 107，先对照宿主机与服务 namespace，再备份并只重启受影响管理服务，不全局重启 NAS。宿主机首选 DNS 198.18.0.2 的来源另需独立诊断，本次未修改。
+
+
+## 2026-09-23 规则页面读取失败恢复
+
+- 用户反馈 Mihomo 更新后规则页面提示“Mihomo 配置无法读取”。现场核心版本 v1.19.31；宿主机和订阅服务可读取并解析配置（39 条规则），仅 family-proxy-ui mount namespace 实际读取报 Errno 107，确认管理服务旧挂载失效；不能据此断言新版配置不兼容或升级就是挂载失效起因。
+- 备份：`/var/backups/family-proxy/20260923-224824-rules-mount-recovery/before.tar.gz`，含后端程序、systemd 单元和 overrides、管理状态及 Mihomo 配置。仅重启 family-proxy-ui，未重启/降级 Mihomo，未修改分流规则。部署版本未变。
+- 验证：后端 `/api/rules` 返回 39 条规则、4 个规则集合，`/api/health` ready=true；Safari 实际规则页面显示“39 条”“规则已载入”，卡片恢复。Mihomo 配置与备份哈希一致、容器启动时间未变，RouterOS Netwatch up。
+- 恢复边界：刷新失效挂载无需回滚规则文件；如需回退后端文件，可从本次备份定点恢复后重启后端。NAS 重挂载生命周期的长期防复发尚未改动；再次发生时用实际读取对照确认，不仅检查 stat 或服务 active。
+
+
+## v0.11.17 升级后管理存储恢复
+
+- 新增主机级 `family-storage-guard` 和一分钟 timer；只允许对 family-proxy-ui/family-mosdns-updater 的 ENOTCONN/ESTALE 进行宿主机对照、备份、定点重启与实际文件/API 复验。保持 systemd guard 单元在宿主机 mount namespace，不添加 PrivateTmp/ProtectSystem 等会复制挂载的隔离设置。
+- 页面 POST 和 DNS 后台任务共享维护锁，guard 排他获取失败时推迟；每服务至少 300 秒恢复间隔。缺文件、权限错误、宿主机不可读均只报告；不重启核心、不启动未运行管理服务。
+- Mihomo 升级增加前后检查，管理故障与核心回滚分离；MosDNS 后台任务完成后异步调度主机检查。部署脚本拒绝打断维护任务，并通过专用安装器同步 DNS 页面与单文件挂载。
+- 规则页/DNS 页增加读取失败状态和请求超时。版本元数据统一 0.11.17。发布流程为本地回归/构建 -> 同步 NAS -> 备份部署和页面验证 -> 提交/PR/合并/标签/Release；本次未要求升级核心镜像。
+- 相关回归覆盖 stale mount、权限/缺失/主机故障不重启、PID 变化、维护锁、冷却、恢复后 API、核心成功时不误回滚。真实 FUSE 断连不在生产故障注入范围内。
+
+- 2026-09-23 23:03 已部署 0.11.17，build `bd5c92d8c912`。主备份 `/var/backups/family-proxy/20260923-230332`，DNS 管理备份 `/var/backups/family-proxy/20260923-230334/mosdns-management`；guard 安装备份分别带 `-storage-guard` 后缀。回滚需恢复这些目录中对应程序/页面/服务单元并 daemon-reload，首次安装的 guard timer 可 disable --now。
+- 发布验证：106 项回归、前端 typecheck/build、发布脚本和 diff 检查通过。NAS verify-server 通过；guard 主机单元运行成功、timer active，两个目标 healthy；规则页面实际显示“39 条/规则已载入”，过滤 mode=off 保持；Mac 国内 UDP/国外 TCP DNS 为 NOERROR，Netwatch up。与本次 baseline 比对，两个核心容器 ID/镜像/启动时间以及 Mihomo 配置、MosDNS 主配置、下载代理配置、上游配置哈希均未改变。

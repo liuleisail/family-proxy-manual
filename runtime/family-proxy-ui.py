@@ -2,6 +2,7 @@
 """LAN-only controller for selected-device family Mihomo routing."""
 
 import base64
+import errno
 import fcntl
 import functools
 import hashlib
@@ -60,7 +61,7 @@ FIXED_MANAGED_IPS = set()
 RESERVED_IPS = {"__FAMILY_ROUTER_IP__", "__FAMILY_RESERVED_GATEWAY_IP__", PROXY_IP}
 AUDIT_PATH = Path("/var/log/family-proxy-ui-audit.jsonl")
 CSRF_TOKEN_PATH = Path("/etc/family-proxy-ui/csrf-token")
-BUILD_VERSION = "0.11.16"
+BUILD_VERSION = "0.11.17"
 BUILD_INFO_PATH = Path("/opt/family-proxy-ui/build-info.json")
 COMPONENT_RELEASE_SOURCES = {
     "mihomo": {
@@ -1337,12 +1338,30 @@ def enforce_system_rule_order(rules):
     return ordered
 
 
+def maintenance_request(function):
+    """Let the host mount guard restart us only between completed mutations."""
+    @functools.wraps(function)
+    def wrapped(self):
+        with (CONFIG_PATH.parent / 'family-proxy-ui.maintenance.lock').open('a') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "管理服务正在恢复，请稍后重试"})
+                return
+            return function(self)
+    return wrapped
+
+
 def load_mihomo_config():
     try:
         text = MIHOMO_CONFIG_PATH.read_text(encoding="utf-8")
         document = yaml.safe_load(text)
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
-        raise RouterError("Mihomo 配置无法读取") from exc
+    except OSError as exc:
+        if exc.errno in (errno.ENOTCONN, errno.ESTALE):
+            raise RouterError("配置存储连接已失效，系统将检查并恢复管理服务，请稍后重新载入") from exc
+        raise RouterError("Mihomo 配置无法读取，请检查文件是否存在及读取权限") from exc
+    except (UnicodeError, yaml.YAMLError) as exc:
+        raise RouterError("Mihomo 配置格式错误，请检查 YAML 格式") from exc
     if not isinstance(document, dict) or not isinstance(document.get("rules"), list):
         raise RouterError("Mihomo 配置缺少有效的 rules 数组")
     rules = document["rules"]
@@ -4761,6 +4780,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.reply(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
+    @maintenance_request
     def do_POST(self):
         if not self.allowed():
             self.reply(HTTPStatus.FORBIDDEN, {"error": "request rejected"})

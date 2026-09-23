@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""Recover only proven stale control-plane mount namespaces, never DNS/proxy cores."""
+import argparse
+import errno
+import fcntl
+import json
+import os
+import shlex
+import subprocess
+import sys
+import tarfile
+import time
+from pathlib import Path
+
+STATE_DIR = Path('/var/lib/family-proxy')
+CONFIG_DIR = Path('/etc/family-proxy-ui')
+BACKUP_DIR = Path('/var/backups/family-proxy')
+SERVICES = {'family-proxy-ui': (18093, '/api/rules'),
+            'family-mosdns-updater': (18102, '/adblock/status')}
+STALE = {errno.ENOTCONN, errno.ESTALE}
+# Never print file contents, exception text, headers or server payloads.
+PROBE = '''import json,sys
+result = 0
+try:
+    for name in sys.argv[1:]:
+        with open(name, 'rb') as handle:
+            while handle.read(65536): pass
+except OSError as exc:
+    result = exc.errno or -1
+print(json.dumps({'errno': result}))
+'''
+
+
+def command(args, timeout=10):
+    return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=True).stdout.strip()
+
+
+def probe(paths, pid=None):
+    args = ['python3', '-c', PROBE, *map(str, paths)]
+    if pid:
+        args = ['nsenter', '-t', str(pid), '-m', '--', *args]
+    try:
+        return int(json.loads(command(args, timeout=5))['errno'])
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        return -1
+
+
+def service_pid(unit):
+    return int(command(['systemctl', 'show', unit, '-p', 'MainPID', '--value']) or 0)
+
+
+def service_paths(unit):
+    if unit == 'family-proxy-ui':
+        config = dict(line.split('=', 1) for line in (CONFIG_DIR / 'router.env').read_text().splitlines()
+                      if '=' in line and not line.lstrip().startswith('#'))
+        root = Path(config['FAMILY_DOCKER_ROOT'])
+        if not root.is_absolute():
+            raise ValueError('invalid root')
+        return [root / 'family-mihomo-fallback/config.yaml']
+    environment = dict(item.split('=', 1) for item in shlex.split(command(
+        ['systemctl', 'show', unit, '-p', 'Environment', '--value'])) if '=' in item)
+    root = Path(environment['FAMILY_MOSDNS_COMPOSE_DIR'])
+    if not root.is_absolute():
+        raise ValueError('invalid root')
+    paths = [root / 'compose.yml', root / 'data/config_custom.yaml']
+    allowlist = root / 'web/family-adblock-allow.txt'
+    if allowlist.exists():
+        paths.append(allowlist)
+    return paths
+
+
+def api_check(unit):
+    from urllib.request import Request, build_opener, ProxyHandler
+    port, path = SERVICES[unit]
+    try:
+        secret = (CONFIG_DIR / 'gateway.secret').read_text().strip()
+        request = Request(f'http://127.0.0.1:{port}{path}', headers={'X-Family-Gateway': secret})
+        with build_opener(ProxyHandler({})).open(request, timeout=3) as response:
+            data = json.load(response)
+        if unit == 'family-proxy-ui':
+            return isinstance(data.get('rules'), list) and bool(data['rules'])
+        return data.get('mode') in ('off', 'observe', 'block') and isinstance(data.get('sources'), list)
+    except Exception:
+        return False
+
+
+def backup(unit, paths):
+    target = BACKUP_DIR / (time.strftime('%Y%m%d-%H%M%S') + f'-{unit}-mount-{os.getpid()}')
+    target.mkdir(mode=0o700, parents=True)
+    with tarfile.open(target / 'before.tar.gz', 'w:gz') as archive:
+        for path in [*paths, CONFIG_DIR, Path('/etc/systemd/system') / (unit + '.service'),
+                     Path('/etc/systemd/system') / (unit + '.service.d')]:
+            if path.exists():
+                archive.add(path, arcname=str(path).lstrip('/'))
+    (target / 'service.txt').write_text(command(['systemctl', 'show', unit]))
+    return str(target)
+
+
+def save_state(state):
+    STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = STATE_DIR / 'storage-guard.json.new'
+    temporary.write_text(json.dumps(state, ensure_ascii=False))
+    temporary.chmod(0o600)
+    temporary.replace(STATE_DIR / 'storage-guard.json')
+
+
+def inspect_service(unit, repair, state):
+    pid = service_pid(unit)
+    if not pid:
+        # Optional/unstarted services are not started by this guard.
+        return {'state': 'inactive'}
+    paths = service_paths(unit)
+    host_error = probe(paths)
+    if host_error:
+        return {'state': 'host_unavailable', 'errno': host_error}
+    service_error = probe(paths, pid)
+    if service_error == 0:
+        return {'state': 'healthy' if api_check(unit) else 'api_unavailable'}
+    if service_error not in STALE:
+        return {'state': 'read_failed', 'errno': service_error}
+    result = {'state': 'stale_mount', 'errno': service_error}
+    if not repair:
+        return result
+    previous = state.get(unit, {})
+    if time.time() - previous.get('last_attempt', 0) < 300:
+        return {**previous, **result, 'state': 'cooldown'}
+    # POST handlers and background workers hold shared locks across mutations.
+    # Exclusive ownership prevents a restart from interrupting an in-flight change.
+    with (CONFIG_DIR / (unit + '.maintenance.lock')).open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {**result, 'state': 'busy'}
+        if service_pid(unit) != pid or probe(paths) or probe(paths, pid) not in STALE:
+            return {**result, 'state': 'changed_during_check'}
+        result.update(backup=backup(unit, paths), last_attempt=int(time.time()))
+        state[unit] = result
+        save_state(state)  # Persist rate limit before attempting a restart.
+        command(['systemctl', 'restart', unit], timeout=45)
+        for _ in range(5):
+            new_pid = service_pid(unit)
+            if new_pid and new_pid != pid and probe(paths, new_pid) == 0 and api_check(unit):
+                return {**result, 'state': 'recovered', 'recovered_at': int(time.time())}
+            time.sleep(1)
+        return {**result, 'state': 'recovery_failed'}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--repair', action='store_true')
+    parser.add_argument('--service', choices=SERVICES)
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        parser.error('root is required')
+    # This helper must run as a host systemd unit, never from a sandboxed service.
+    with Path('/run/family-storage-guard.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print('{"state":"guard_busy"}')
+            return 1
+        try:
+            state = json.loads((STATE_DIR / 'storage-guard.json').read_text())
+        except (OSError, ValueError):
+            state = {}
+        results = {}
+        for unit in ([args.service] if args.service else SERVICES):
+            try:
+                results[unit] = inspect_service(unit, args.repair, state)
+            except Exception:
+                results[unit] = {'state': 'check_failed'}
+            if args.repair:
+                state[unit] = {**state.get(unit, {}), **results[unit], 'checked_at': int(time.time())}
+                save_state(state)
+        print(json.dumps(results, ensure_ascii=False))
+        return int(any(row['state'] not in ('healthy', 'recovered', 'inactive') for row in results.values()))
+
+
+if __name__ == '__main__':
+    sys.exit(main())

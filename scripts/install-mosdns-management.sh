@@ -79,6 +79,7 @@ Path(target).write_text(text, encoding="utf-8")
 PY
 
 python3 -m py_compile /opt/family-mosdns-updater/app.py
+"$REPO_DIR/scripts/install-storage-guard" --start
 systemctl daemon-reload
 systemctl enable family-mosdns-updater.service
 systemctl restart family-mosdns-updater.service

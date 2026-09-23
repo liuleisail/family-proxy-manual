@@ -24,6 +24,8 @@ fi
 if grep -qx 'MIHOMO_GEODATA_AUTO_UPDATE=true' /etc/family-proxy-ui/router.env; then
   systemctl is-enabled --quiet family-mihomo-geodata-refresh.timer || { echo "Mihomo geodata auto-update is configured but its timer is disabled" >&2; exit 1; }
 fi
+systemctl is-enabled --quiet family-storage-guard.timer || { echo "storage guard timer is disabled" >&2; exit 1; }
+/usr/local/sbin/family-storage-guard
 python3 - <<'PY'
 import json
 import importlib.util
@@ -53,6 +55,7 @@ checks = (
     (18093, '/api/wireguard/status'),
     (18093, '/api/wireguard/remote-access'),
     (18093, '/api/captures'),
+    (18093, '/api/rules'),
     (18090, '/api/state'),
 )
 responses = {}

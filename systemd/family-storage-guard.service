@@ -1,0 +1,12 @@
+[Unit]
+Description=Verify and recover stale Family Proxy management mounts
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+# Deliberately use the host mount namespace: filesystem sandboxing here would
+# preserve the same dead FUSE mounts that this bounded helper must detect.
+ExecStart=/usr/local/sbin/family-storage-guard --repair
+TimeoutStartSec=180
+UMask=0077

@@ -2,6 +2,7 @@
 """Restricted Docker image updater for the family MosDNS service."""
 
 import fcntl
+import functools
 import hashlib
 import ipaddress
 import json
@@ -36,6 +37,7 @@ STATUS_PATH = STATE_DIR / "mosdns-updater-status.json"
 RULE_STATUS_PATH = STATE_DIR / "mosdns-rule-updater-status.json"
 VERIFY_STATUS_PATH = STATE_DIR / "mosdns-verify-status.json"
 LOCK_PATH = STATE_DIR / "mosdns-updater.lock"
+MAINTENANCE_LOCK_PATH = STATE_DIR / "family-mosdns-updater.maintenance.lock"
 SECRET_PATH = STATE_DIR / "gateway.secret"
 DEFAULT_CONFIG = {
     "auto_enabled": True,
@@ -1363,6 +1365,7 @@ def do_update():
         old_image = ""
         backup = ""
         switch_started = False
+        core_verified = False
         try:
             old_image = running_image_id()
             set_status("updating", "正在备份 MosDNS 配置", current_image=old_image)
@@ -1380,12 +1383,20 @@ def do_update():
             switch_started = True
             command(["docker", "compose", "up", "-d", "--no-deps", "--force-recreate", "mosdns-t"], timeout=180)
             wait_healthy()
+            core_verified = True
+            (COMPOSE_DIR / "compose.yml").read_bytes()
+            (COMPOSE_DIR / "data/config_custom.yaml").read_bytes()
+            adblock_runtime_status()
             set_status("updated", "MosDNS 已更新并通过健康检查", update_available=False, previous_image=old_image, current_image=new_image, current_version=core_version(), backup=backup, rollback_image=rollback_tag, completed_at=now_iso())
         except ImagePreflightError as exc:
             # The live container was not touched; do not recreate or roll back.
             set_status("error", f"新镜像预检失败，未改动当前容器：{exc}", update_available=True, backup=backup, completed_at=now_iso())
         except Exception as exc:
             failure = str(exc)
+            if core_verified:
+                set_status("error", "核心已更新且运行正常，但管理配置读取失败；系统将检查并恢复管理服务",
+                           current_image=new_image, backup=backup, completed_at=now_iso())
+                return
             if old_image and switch_started:
                 try:
                     set_status("rolling_back", f"更新验证失败，正在恢复旧镜像：{failure}", backup=backup)
@@ -1407,6 +1418,12 @@ def start_worker(target):
     with worker_state_lock:
         if worker_active:
             return False
+        maintenance_lock = MAINTENANCE_LOCK_PATH.open("a")
+        try:
+            fcntl.flock(maintenance_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            maintenance_lock.close()
+            return False
         worker_active = True
 
     def runner():
@@ -1414,8 +1431,15 @@ def start_worker(target):
         try:
             target()
         finally:
+            maintenance_lock.close()
             with worker_state_lock:
                 worker_active = False
+            # Dispatch from systemd's host namespace, not our potentially stale one.
+            try:
+                subprocess.run(["systemctl", "start", "--no-block", "family-storage-guard.service"],
+                               capture_output=True, timeout=5, check=False)
+            except (OSError, subprocess.SubprocessError):
+                pass  # The host timer provides the next bounded retry.
 
     threading.Thread(target=runner, daemon=True).start()
     return True
@@ -1455,6 +1479,19 @@ def scheduler():
             value["last_auto_check"] = int(now)
             save_config(value)
             start_worker(auto_check_task)
+
+
+def maintenance_request(function):
+    @functools.wraps(function)
+    def wrapped(self):
+        with MAINTENANCE_LOCK_PATH.open('a') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                self.reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "管理服务正在恢复，请稍后重试"})
+                return
+            return function(self)
+    return wrapped
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1523,6 +1560,7 @@ class Handler(BaseHTTPRequestHandler):
         value.setdefault("current_version", core_version())
         self.reply(HTTPStatus.OK, value)
 
+    @maintenance_request
     def do_POST(self):
         if not self.authorized() or self.headers.get("X-Requested-With") != "family-dns":
             self.reply(HTTPStatus.FORBIDDEN, {"error": "request rejected"})
