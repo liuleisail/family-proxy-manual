@@ -214,3 +214,14 @@ sudo /usr/local/sbin/family-mihomo-tproxy-auto sync
 - 每次 UI 部署会备份 `/opt/family-proxy-ui` 的旧 Python、前端资源、build-info 和运维 helper；失败时保留本次时间戳目录，可恢复后再重启两个控制面服务。
 
 RouterOS 的命令设计遵循其 [Packet Flow](https://help.mikrotik.com/docs/spaces/ROS/pages/328227/Packet+Flow+in+RouterOS)、[Connection Tracking](https://help.mikrotik.com/docs/spaces/ROS/pages/130220087/Connection+tracking) 与 [Netwatch](https://help.mikrotik.com/docs/spaces/ROS/pages/8323208/Netwatch) 文档：IPv4 策略路由、DNS 和 FastTrack 排除使用共享地址列表，设备增减仍保持单设备事务与独立 IPv6 防漏。
+
+
+## 管理服务存储恢复（v0.11.17）
+
+`family-storage-guard.timer` 每分钟运行一次主机级检查。它读取当前配置确定路径，并分别从宿主机和服务的 mount namespace 实际读取文件（不是只看 stat）。仅当宿主机读取正常、运行中的 `family-proxy-ui` 或 `family-mosdns-updater` 返回 ENOTCONN/ESTALE 时，才在 `/var/backups/family-proxy/*-mount-*/` 备份配置和服务信息，并重启对应管理服务。不会启动未运行的服务，不处理权限错误/缺失文件/宿主机存储故障，不重启 Mihomo、MosDNS 核心或修改 RouterOS。
+
+API 写操作和 DNS 后台任务持有共享维护锁，恢复使用排他锁，忙时等待下一次检查。每个服务恢复尝试至少间隔 5 分钟；失败会保留状态，不循环重启。Mihomo 升级前、升级/回退后调用同一检查；MosDNS 维护任务结束后由 systemd 调度主机级检查。不要从有文件系统隔离的服务中直接运行恢复脚本，否则检查自身也可能继承失效挂载。
+
+只读验证：`sudo /usr/local/sbin/family-storage-guard`；备份式恢复：`sudo systemctl start family-storage-guard.service`。检查结果在 `/var/lib/family-proxy/storage-guard.json`，服务日志不输出文件内容和密钥。定时器由安装器和部署脚本安装；完整部署会拒绝打断进行中的写操作，同时更新 DNS 页面，不重建 DNS 核心。
+
+停用该恢复功能可执行 `sudo systemctl disable --now family-storage-guard.timer`；恢复原程序/单元需使用本次部署备份并执行 `systemctl daemon-reload`。此机制处理已识别的管理服务旧挂载，不保证底层 NAS 存储或外部下载源永不故障。

@@ -441,7 +441,7 @@
     }
     async function maintenanceApi(path, options = {}) {
       const response = await fetch(apiUrl(`/maintenance-api${path}`), {
-        cache: 'no-store', ...options,
+        cache: 'no-store', signal: AbortSignal.timeout(15000), ...options,
         headers: {'Content-Type': 'application/json', 'X-Requested-With': 'family-dns', ...(options.headers || {})}
       });
       const data = await response.json().catch(() => ({}));
@@ -525,7 +525,14 @@
     }
     async function loadAdblock(silent = false) {
       try { const data = await maintenanceApi('/adblock/status'); renderAdblock(data); return data; }
-      catch (error) { if (!silent) toast(`过滤状态读取失败：${error.message}`, true); return null; }
+      catch (error) {
+        $('#adblock-state').textContent = '读取失败';
+        $('#adblock-state').className = 'pill error';
+        $('#adblock-detail').textContent = `过滤状态读取失败：${error.message}。请稍后重新载入。`;
+        if (!state.adblock) $('#adblock-sources').innerHTML = '<div class="empty">暂时无法读取过滤规则</div>';
+        if (!silent) toast(`过滤状态读取失败：${error.message}`, true);
+        return null;
+      }
     }
     async function pollAdblock() {
       for (let attempt = 0; attempt < 120; attempt += 1) {

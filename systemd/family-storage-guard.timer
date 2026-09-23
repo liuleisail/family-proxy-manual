@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Family Proxy management file access every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+RandomizedDelaySec=5s
+Unit=family-storage-guard.service
+
+[Install]
+WantedBy=timers.target

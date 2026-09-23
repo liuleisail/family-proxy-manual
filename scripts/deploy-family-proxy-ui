@@ -20,6 +20,12 @@ for helper in apply-runtime-mode family-mihomo-tproxy-auto refresh-cn-ipv4 sync-
     [[ -f "$SOURCE_DIR/scripts/$helper" ]] || { echo "missing helper: $helper" >&2; exit 1; }
 done
 
+# Refuse to interrupt API mutations or MosDNS background maintenance.
+exec 8>/etc/family-proxy-ui/family-proxy-ui.maintenance.lock
+flock -n -x 8 || { echo "UI mutation in progress; retry deployment later" >&2; exit 1; }
+exec 7>/etc/family-proxy-ui/family-mosdns-updater.maintenance.lock
+flock -n -x 7 || { echo "DNS maintenance in progress; retry deployment later" >&2; exit 1; }
+
 stamp=$(date +%Y%m%d-%H%M%S)
 backup_dir=$BACKUP_ROOT/$stamp
 stage_dir=$(mktemp -d "$TARGET_DIR/.rendered.XXXXXX")
@@ -78,9 +84,18 @@ install -m 755 "$SOURCE_DIR/scripts/family-docker-recover" /usr/local/sbin/famil
 if [[ ! -f /etc/family-proxy-ui/docker-recover-allow.conf ]]; then
     install -m 600 "$SOURCE_DIR/config/docker-recover-allow.conf.example" /etc/family-proxy-ui/docker-recover-allow.conf
 fi
+"$SOURCE_DIR/scripts/install-storage-guard" --start
 if [[ -f /opt/family-mosdns-updater/app.py ]]; then
-    install -m 755 "$SOURCE_DIR/runtime/mosdns/updater.py" /opt/family-mosdns-updater/app.py
-    systemctl restart family-mosdns-updater
+    # Deploy the matching DNS page too; the dedicated installer refreshes its
+    # single-file UI bind mount without restarting the DNS core.
+    python3 - "$SOURCE_DIR/scripts/install-mosdns-management.sh" <<'PYDNS'
+import shlex, subprocess, sys
+value = subprocess.check_output(['systemctl', 'show', 'family-mosdns-updater', '-p', 'Environment', '--value'], text=True)
+env = dict(item.split('=', 1) for item in shlex.split(value) if '=' in item)
+subprocess.run([sys.argv[1], '--compose-dir', env['FAMILY_MOSDNS_COMPOSE_DIR'],
+                '--dns-server', env['FAMILY_MOSDNS_DNS_SERVER'], '--core-api', env['FAMILY_MOSDNS_CORE_API'],
+                '--socks5', env['FAMILY_MOSDNS_SOCKS5']], check=True)
+PYDNS
 fi
 
 systemctl restart family-proxy-ui.service family-mihomo-sub-import.service family-proxy-gateway.service
@@ -131,4 +146,5 @@ for attempt in $(seq 1 20); do
 done
 [[ -s $health_payload ]] || { echo "gated health API did not become ready" >&2; exit 1; }
 python3 -c 'import json, sys; payload = json.load(open(sys.argv[1])); assert payload.get("ready") is True; assert all(payload["checks"].values()); assert {"mihomo", "dns", "policy"} <= payload["checks"].keys(); assert payload.get("build", {}).get("version"); print("gated health verified ({0})".format(payload["build"]))' "$health_payload"
+/usr/local/sbin/family-storage-guard
 echo "Backup: $backup_dir"

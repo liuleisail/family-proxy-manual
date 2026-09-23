@@ -101,6 +101,7 @@ fi
 [[ -s /etc/family-proxy-ui/gateway.secret ]] || { umask 077; head -c 48 /dev/urandom | base64 > /etc/family-proxy-ui/gateway.secret; }
 for unit in "$REPO_DIR"/systemd/*.service; do install -m 644 "$unit" /etc/systemd/system/; done
 for unit in "$REPO_DIR"/systemd/*.timer; do install -m 644 "$unit" /etc/systemd/system/; done
+"$REPO_DIR/scripts/install-storage-guard"
 systemctl daemon-reload
 systemctl enable family-proxy-ui family-mihomo-sub-import family-proxy-gateway family-mihomo-tproxy-auto family-docker-recover family-docker-recover.timer
  /usr/local/sbin/apply-family-proxy-mode
@@ -111,6 +112,7 @@ else
 fi
 echo "Installed control plane. Backup: $backup"
 if (( START )); then
+  systemctl start family-storage-guard.timer
   systemctl restart family-proxy-ui family-mihomo-sub-import family-proxy-gateway
   systemctl --no-pager --full status family-proxy-ui family-mihomo-sub-import family-proxy-gateway
 else

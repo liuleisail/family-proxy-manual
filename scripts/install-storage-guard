@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+[[ $EUID -eq 0 ]] || { echo 'run with sudo' >&2; exit 1; }
+command -v nsenter >/dev/null || { echo 'util-linux (nsenter) is required' >&2; exit 1; }
+backup=/var/backups/family-proxy/$(date +%Y%m%d-%H%M%S)-storage-guard
+install -d -m 700 "$backup"
+for file in /usr/local/sbin/family-storage-guard /etc/systemd/system/family-storage-guard.service /etc/systemd/system/family-storage-guard.timer; do
+    [[ ! -f $file ]] || cp -a "$file" "$backup/"
+done
+install -m 755 "$REPO_DIR/scripts/family-storage-guard" /usr/local/sbin/family-storage-guard
+install -m 644 "$REPO_DIR/systemd/family-storage-guard.service" /etc/systemd/system/
+install -m 644 "$REPO_DIR/systemd/family-storage-guard.timer" /etc/systemd/system/
+python3 -m py_compile /usr/local/sbin/family-storage-guard
+systemctl daemon-reload
+systemctl enable family-storage-guard.timer
+if [[ ${1:-} == --start ]]; then systemctl start family-storage-guard.timer; fi
+printf 'Storage guard installed; backup: %s\n' "$backup"

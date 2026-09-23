@@ -49,6 +49,10 @@ key_files=(
     config/docker-recover-allow.conf.example
     routeros/02-prepare-controller.rsc
     scripts/family-mihomo-upgrade
+    scripts/family-storage-guard
+    scripts/install-storage-guard
+    systemd/family-storage-guard.service
+    systemd/family-storage-guard.timer
     scripts/homekit-direct-routes
     scripts/refresh-cn-ipv4
     scripts/refresh-mihomo-geodata.py
