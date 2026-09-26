@@ -1021,3 +1021,33 @@ up-script 同样替换 enable。字段规律：`to-ports`、`connection-mark`、
 
 - 2026-09-23 23:03 已部署 0.11.17，build `bd5c92d8c912`。主备份 `/var/backups/family-proxy/20260923-230332`，DNS 管理备份 `/var/backups/family-proxy/20260923-230334/mosdns-management`；guard 安装备份分别带 `-storage-guard` 后缀。回滚需恢复这些目录中对应程序/页面/服务单元并 daemon-reload，首次安装的 guard timer 可 disable --now。
 - 发布验证：106 项回归、前端 typecheck/build、发布脚本和 diff 检查通过。NAS verify-server 通过；guard 主机单元运行成功、timer active，两个目标 healthy；规则页面实际显示“39 条/规则已载入”，过滤 mode=off 保持；Mac 国内 UDP/国外 TCP DNS 为 NOERROR，Netwatch up。与本次 baseline 比对，两个核心容器 ID/镜像/启动时间以及 Mihomo 配置、MosDNS 主配置、下载代理配置、上游配置哈希均未改变。
+
+
+## 2026-09-26 16PM Telegram 分流修复与 Muse 美国出口规则（已部署）
+
+### 现象与现场
+
+- 用户：iPhone 16 Pro Max（RouterOS 静态租约 `iphone16PM`，192.168.2.134）刚加入家庭旁路后 Telegram 无法使用。
+- 四层对账正常：RouterOS `family_mihomo_devices`、Z4Pro `managed-ips`、nft `managed4` 均包含 .134；DNS 走旁路；设备有 Google/APNs 等正常连接。Mihomo 日志持续出现 `dial TG-Auto ... context deadline exceeded`（149.154.x / 91.108.x）。
+- 根因：生成的 Telegram IP/域名规则直接指向 `TG-Auto`，而系统实际故障切换由 `Telegram -> TG-出口 -> TG-Auto/TG-应急` 完成；规则绕过 `Telegram` 业务组，导致 `TG-出口` 已切到 `TG-应急` 也不生效。
+
+### 代码与运行时修改
+
+- `runtime/family-mihomo-sub-import.py`：Telegram 客户端 IP 规则和 `api.telegram.org` 规则改指向 `Telegram`；保留 `127.0.0.1` 通知链路指向 `TG-Notify`。新增 `MUSE_ROUTING_RULES`，将 `muse.ai`、`metaaivm.com`、`meta.ai`、`meta.com` 指向 `US-AI`，放在海外 AI 规则集之前。
+- `runtime/rules.html`：Telegram 规则集预设和 legacy 映射从 `TG-Auto` 改为 `Telegram`。
+- 线上 `/etc/family-proxy-ui/rule-sets.json`：`telegram` 集合 policy 从 `TG-Auto` 改为 `Telegram`；备份 `rule-sets.json.bak-20260926-080954`。
+- `tests/test_mihomo_bootstrap.py`：新增 Telegram 走业务包装组、Muse US 路由的生成断言；远端 `python3 -m unittest tests/test_mihomo_bootstrap.py` 17 项通过，`py_compile` 通过。
+
+### 部署与容器异常处理
+
+- 同步 `family-mihomo-sub-import.py`、`rules.html`、测试文件到 Z4Pro `/home/codexops/family-proxy-manual` 后执行 `upgrade-server.sh`。首次 `--apply-current` 在重启 Mihomo 时失败，自动回滚也失败。
+- 直接原因是 `family-mihomo-fallback` 的 `docker-compose.yml` 同时把整个 zfuse 卷目录挂到 `/root/.config/mihomo`，又叠加 `./config.yaml` 文件挂载；卷目录里存在 stale 的 `config.yaml`，重启/force-recreate 均报 `stale NFS file handle`。
+- 线上 compose 改为单独挂载 `geoip.dat`、`geoip.metadb`、`geosite.dat`（只读），保留 `config.yaml`、`cache.db`、providers、imported-providers 挂载，避开 stale 目录项；备份 `docker-compose.yml.before-geodata-bind-20260926-081313`。此修复仅改线上 compose，未改仓库模板；若后续重建该容器时又出现同名 ESTALE，优先核对这个目录挂载组合。
+- 修复后 `docker compose up -d --force-recreate family-mihomo-fallback` 成功，`--apply-current` 成功，`verify-server.sh` 与 `verify-dns-routing.sh --quick` 通过；Mihomo 容器 `Up`，控制接口 9091 返回 v1.19.31。
+
+### 当前状态与未完成验证
+
+- 当前 Telegram 流量已按 `Telegram -> TG-出口` 命中，故障切换不再被绕过；但候选节点真实 MTProto 数据流仍需用户在手机端用真实 Telegram 会话验证。本轮用 64 字节 `req_pq` 探针逐个测多个候选均超时，该探针历史上有假阴性，不能作为“节点坏”的唯一依据。
+- Muse 规则已生成并生效；`muse.ai`/`meta.com` 经旁路 `US-AI` 可返回 307/200（`meta.ai` 返回 403，属于 Meta 账号/地区侧校验）。注意：用 `curl` 经 mixed-port 7890 测试 HTTPS 时，默认 ALPN/h2 会 `unexpected eof`，加 `--no-alpn`（或 TLS 1.2）才正常；该 ALPN 现象本次未改动、未归因，需另行排查真实客户端是否受影响。
+- 运行期间 `family-mihomo-sub-import` 自动把各业务候选池重新收敛为主力机场节点（本次未手工固定）；最终以管理页面“机场与候选池”当前显示为准。
+- 后续修复候选池范围串扰：`start_replace_and_clear_slot` 生成替换建议时此前忽略已保存的机场范围，导致“锁定备用机场 1”后待生效候选仍是主力节点。新增 `replacement_source_scopes()`，清空机场时保留其他池的显式机场锁定，仅把锁定到被清空机场的池回退到全部机场；`suggestions()` 也会在机场范围变化后作废旧建议并提示重新测速。回归测试已补。

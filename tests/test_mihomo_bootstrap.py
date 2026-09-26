@@ -127,6 +127,83 @@ class MihomoBootstrapTests(unittest.TestCase):
         self.assertLess(rules.index("DOMAIN-SUFFIX,gstatic.com,Gemini"), rules.index("GEOSITE,google,Google"))
         self.assertLess(rules.index("DOMAIN-SUFFIX,googleapis.com,Gemini"), rules.index("GEOSITE,google,Google"))
 
+    def test_generated_config_routes_telegram_through_business_wrapper(self):
+        selected = {name: [] for name in MODULE.POOLS}
+        selected["TG"] = ["[备用1] HKG 10", "[备用1] HKG 06"]
+        base = {
+            "proxies": [],
+            "proxy-groups": [],
+            "rules": ["MATCH,DIRECT"],
+        }
+        self.paths["MIHOMO_CONFIG"].write_text(MODULE.yaml.safe_dump(base, allow_unicode=True))
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch.object(MODULE.subprocess, "run", return_value=completed), \
+             patch.object(MODULE, "restart_mihomo"):
+            MODULE.generate_config(selected)
+
+        config = MODULE.yaml.safe_load(self.paths["MIHOMO_CONFIG"].read_text())
+        groups = {item["name"]: item for item in config["proxy-groups"]}
+        rules = config["rules"]
+        self.assertEqual(groups["Telegram"]["proxies"][0], "TG-出口")
+        self.assertIn("IP-CIDR,149.154.160.0/20,Telegram,no-resolve", rules)
+        self.assertIn("DOMAIN,api.telegram.org,Telegram", rules)
+        self.assertNotIn("IP-CIDR,149.154.160.0/20,TG-Auto,no-resolve", rules)
+        self.assertIn(
+            "AND,((SRC-IP-CIDR,127.0.0.1/32),(DOMAIN,api.telegram.org)),TG-Notify",
+            rules,
+        )
+
+    def test_generated_config_adds_muse_us_routing(self):
+        selected = {name: [] for name in MODULE.POOLS}
+        selected["US-AI"] = ["[备用1] USA 02"]
+        base = {
+            "proxies": [],
+            "proxy-groups": [],
+            "rules": ["MATCH,DIRECT"],
+        }
+        self.paths["MIHOMO_CONFIG"].write_text(MODULE.yaml.safe_dump(base, allow_unicode=True))
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch.object(MODULE.subprocess, "run", return_value=completed), \
+             patch.object(MODULE, "restart_mihomo"):
+            MODULE.generate_config(selected)
+
+        config = MODULE.yaml.safe_load(self.paths["MIHOMO_CONFIG"].read_text())
+        rules = config["rules"]
+        self.assertTrue(all(rule in rules for rule in MODULE.MUSE_ROUTING_RULES))
+        self.assertLess(rules.index("DOMAIN-SUFFIX,muse.ai,US-AI"), rules.index("MATCH,DIRECT"))
+
+    def test_replacement_source_scopes_preserve_explicit_locks(self):
+        selections = {name: None for name in MODULE.POOLS}
+        selections["US-AI"] = "backup1"
+        selections["TG"] = "primary"
+        selections["HK-视频"] = {"source": "backup1", "location": "us"}
+        with patch.object(MODULE, "source_selections", return_value=selections):
+            scopes = MODULE.replacement_source_scopes("backup1")
+
+        self.assertEqual(scopes["US-AI"], "all")
+        self.assertEqual(scopes["TG"], "primary")
+        self.assertEqual(scopes["Proxy"], "all")
+        self.assertEqual(scopes["HK-视频"], {"source": "all", "location": "us"})
+
+    def test_suggestions_invalidate_when_source_scope_changes(self):
+        self.paths["POOL_SOURCE_SELECTION"].write_text(json.dumps({
+            "pools": {"US-AI": "backup1"},
+        }))
+        self.paths["SUGGESTIONS"].write_text(json.dumps({
+            "schema": MODULE.SUGGESTION_SCHEMA,
+            "ready": True,
+            "reason": None,
+            "source_selections": {name: "all" for name in MODULE.POOLS},
+            "pools": {"US-AI": ["[主力] USA 01"]},
+        }))
+
+        result = MODULE.suggestions()
+
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["pools"]["US-AI"], [])
+        self.assertEqual(result["source_selections"]["US-AI"], "backup1")
+        self.assertIn("机场范围已变化", result["reason"])
+
     def test_source_pool_candidates_prefer_recently_tested_source_nodes(self):
         records = [
             {"name": "[备用1] 美国慢", "raw": "美国慢", "source": "backup1"},
