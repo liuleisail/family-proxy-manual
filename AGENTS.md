@@ -1033,7 +1033,7 @@ up-script 同样替换 enable。字段规律：`to-ports`、`connection-mark`、
 
 ### 代码与运行时修改
 
-- `runtime/family-mihomo-sub-import.py`：Telegram 客户端 IP 规则和 `api.telegram.org` 规则改指向 `Telegram`；保留 `127.0.0.1` 通知链路指向 `TG-Notify`。新增 `MUSE_ROUTING_RULES`，将 `muse.ai`、`metaaivm.com`、`meta.ai`、`meta.com` 指向 `US-AI`，放在海外 AI 规则集之前。
+- `runtime/family-mihomo-sub-import.py`：Telegram 客户端 IP 规则和 `api.telegram.org` 规则改指向 `Telegram`；保留 `127.0.0.1` 通知链路指向 `TG-Notify`。新增 `MUSE_ROUTING_RULES`，将 `muse.ai`、`metaaivm.com`、`meta.ai`、`meta.com` 指向 `US-AI`，放在海外 AI 规则集之前。`runtime/family-proxy-ui.py` 中的 `TELEGRAM_CLIENT_IP_RULES`/`TELEGRAM_API_RULE`/`TELEGRAM_GENERATED_RULES` 同步为同一口径，避免规则迁移或保存时回写旧 `TG-Auto`。
 - `runtime/rules.html`：Telegram 规则集预设和 legacy 映射从 `TG-Auto` 改为 `Telegram`。
 - 线上 `/etc/family-proxy-ui/rule-sets.json`：`telegram` 集合 policy 从 `TG-Auto` 改为 `Telegram`；备份 `rule-sets.json.bak-20260926-080954`。
 - `tests/test_mihomo_bootstrap.py`：新增 Telegram 走业务包装组、Muse US 路由的生成断言；远端 `python3 -m unittest tests/test_mihomo_bootstrap.py` 17 项通过，`py_compile` 通过。

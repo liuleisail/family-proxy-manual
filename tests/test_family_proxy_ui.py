@@ -192,5 +192,12 @@ class MaintenanceReleaseInfoTests(unittest.TestCase):
         self.assertNotIn("IrineSistiana", result["mosdns"]["release_url"])
 
 
+class TelegramSystemRulesTests(unittest.TestCase):
+    def test_telegram_client_rules_enter_the_business_group(self):
+        self.assertTrue(all(",Telegram" in rule for rule in family_proxy_ui.TELEGRAM_CLIENT_IP_RULES))
+        self.assertEqual(family_proxy_ui.TELEGRAM_API_RULE, "DOMAIN,api.telegram.org,Telegram")
+        self.assertIn("DOMAIN,api.telegram.org,TG-Auto", family_proxy_ui.TELEGRAM_GENERATED_RULES)
+
+
 if __name__ == "__main__":
     unittest.main()
