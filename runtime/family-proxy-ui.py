@@ -158,15 +158,19 @@ TELEGRAM_NOTIFY_RULE = (
     "AND,((SRC-IP-CIDR,127.0.0.1/32),(DOMAIN,api.telegram.org)),TG-Notify"
 )
 TELEGRAM_CLIENT_IP_RULES = (
-    "IP-CIDR,149.154.160.0/20,TG-Auto,no-resolve",
-    "IP-CIDR,91.108.4.0/22,TG-Auto,no-resolve",
-    "IP-CIDR,91.108.56.0/22,TG-Auto,no-resolve",
+    "IP-CIDR,149.154.160.0/20,Telegram,no-resolve",
+    "IP-CIDR,91.108.4.0/22,Telegram,no-resolve",
+    "IP-CIDR,91.108.56.0/22,Telegram,no-resolve",
 )
-TELEGRAM_API_RULE = "DOMAIN,api.telegram.org,TG-Auto"
+TELEGRAM_API_RULE = "DOMAIN,api.telegram.org,Telegram"
 TELEGRAM_GENERATED_RULES = {
     TELEGRAM_LEGACY_NOTIFY_RULE,
     TELEGRAM_NOTIFY_RULE,
     TELEGRAM_API_RULE,
+    "DOMAIN,api.telegram.org,TG-Auto",
+    "IP-CIDR,149.154.160.0/20,TG-Auto,no-resolve",
+    "IP-CIDR,91.108.4.0/22,TG-Auto,no-resolve",
+    "IP-CIDR,91.108.56.0/22,TG-Auto,no-resolve",
     *TELEGRAM_CLIENT_IP_RULES,
 }
 SYSTEM_GENERATED_RULES = TELEGRAM_GENERATED_RULES

@@ -56,14 +56,14 @@
       ['TG-Auto','自动选择（Telegram 候选池）'],['Proxy-Auto','自动选择（Proxy 候选池）'],
       ['HK-视频','HK-视频'],['JP-AI','JP-AI'],['SG-AI','SG-AI'],['US-AI','US-AI'],['其他-AI','其他-AI']
     ];
-    const legacyRouteTargets={Others:'Proxy-Auto',Google:'Proxy-Auto',TikTok:'Proxy-Auto',Youtube:'HK-视频',Telegram:'TG-Auto',AI:'AI-Auto',Gemini:'Gemini-出口',GitHub:'GitHub-Auto',Apple:'DIRECT',MicroSoft:'DIRECT'};
+    const legacyRouteTargets={Others:'Proxy-Auto',Google:'Proxy-Auto',TikTok:'Proxy-Auto',Youtube:'HK-视频',Telegram:'Telegram',AI:'AI-Auto',Gemini:'Gemini-出口',GitHub:'GitHub-Auto',Apple:'DIRECT',MicroSoft:'DIRECT'};
     const legacyRouteLabels={'AI-Auto':'自动选择（全部 AI 候选池）','GitHub-Auto':'自动选择（GitHub 专用候选集合）','DNS-Resolve':'自动选择（Proxy 候选池）','TG-Notify':'自动选择（通知专用候选集合）'};
     const geoSite='https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/';
     const geoIp='https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/';
     const appleApns='https://raw.githubusercontent.com/mrbruce516/apns-fix/refs/heads/main/Apple_APNs.list';
     const ruleSetPresetItems=[
-      {id:'telegram-ip',name:'Telegram IP',group:'Telegram',url:geoIp+'telegram.mrs',behavior:'ipcidr',format:'mrs',policy:'TG-Auto',priority:'high',interval:86400},
-      {id:'telegram-domain',name:'Telegram 域名',group:'Telegram',url:geoSite+'telegram.mrs',behavior:'domain',format:'mrs',policy:'TG-Auto',priority:'high',interval:86400},
+      {id:'telegram-ip',name:'Telegram IP',group:'Telegram',url:geoIp+'telegram.mrs',behavior:'ipcidr',format:'mrs',policy:'Telegram',priority:'high',interval:86400},
+      {id:'telegram-domain',name:'Telegram 域名',group:'Telegram',url:geoSite+'telegram.mrs',behavior:'domain',format:'mrs',policy:'Telegram',priority:'high',interval:86400},
       {id:'apple-apns-classical',name:'Apple APNs',group:'Apple APNs',url:appleApns,behavior:'classical',format:'text',policy:'Proxy-Auto',priority:'high',interval:86400},
       {id:'google-domain',name:'Google',group:'Google',url:geoSite+'google.mrs',behavior:'domain',format:'mrs',policy:'Proxy-Auto',priority:'high',interval:86400},
       {id:'github-domain',name:'GitHub',group:'GitHub',url:geoSite+'github.mrs',behavior:'domain',format:'mrs',policy:'Proxy-Auto',priority:'high',interval:86400},

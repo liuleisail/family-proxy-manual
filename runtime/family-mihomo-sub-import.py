@@ -168,6 +168,17 @@ GEMINI_ROUTING_RULES = (
     "DOMAIN-SUFFIX,accounts.google.com,Gemini",
     "DOMAIN-SUFFIX,oauth2.googleapis.com,Gemini",
 )
+MUSE_ROUTING_RULES = (
+    # Meta Muse is currently US/CA only. Keep its dedicated domains on the US
+    # exit instead of falling through to the generic overseas/HK path. Login and
+    # media assets still use Meta's shared domains, which are intentionally not
+    # redirected here to avoid moving unrelated Facebook/Instagram/WhatsApp
+    # traffic onto the US pool.
+    "DOMAIN-SUFFIX,muse.ai,US-AI",
+    "DOMAIN-SUFFIX,metaaivm.com,US-AI",
+    "DOMAIN-SUFFIX,meta.ai,US-AI",
+    "DOMAIN-SUFFIX,meta.com,US-AI",
+)
 DERIVED_EXITS = ("GitHub-Auto",)
 POOL_MODES = {
     "select": "手动选择",
@@ -559,6 +570,30 @@ def set_source_selection(pool, slot, location=None):
     return {"pool": pool, "source": selected[pool], "source_selections": selected, "pools": pools()}
 
 
+def replacement_source_scopes(removing_slot):
+    """Build source scopes for replace-clear without discarding explicit locks.
+
+    A pool locked to another airport keeps that lock. A pool locked to the
+    airport being cleared (or one with no lock) is opened back up to all
+    airports so the replacement can choose from every remaining source.
+    """
+    scopes = {}
+    for pool, scope in source_selections().items():
+        if scope is None:
+            scopes[pool] = "all"
+            continue
+        if pool == VIDEO_POOL:
+            source = scope.get("source") if isinstance(scope, dict) else scope
+            location = scope.get("location") if isinstance(scope, dict) else "all"
+            scopes[pool] = {
+                "source": "all" if source == removing_slot else source,
+                "location": normalize_video_location(location),
+            }
+        else:
+            scopes[pool] = "all" if scope == removing_slot else scope
+    return scopes
+
+
 def scoped_pool_nodes(pool, scope):
     """Return every imported node eligible for one explicitly selected scope."""
     if scope is None:
@@ -580,20 +615,26 @@ def validate_source_scoped_pools(value, selections):
 
 def suggestions():
     data = read_json(SUGGESTIONS, {})
-    if data.get("schema") != SUGGESTION_SCHEMA:
+    current_selections = source_selections()
+    stored_selections = data.get("source_selections") if isinstance(data.get("source_selections"), dict) else None
+    stale_scope = stored_selections is not None and any(
+        stored_selections.get(pool) != current_selections.get(pool) for pool in POOLS
+    )
+    if data.get("schema") != SUGGESTION_SCHEMA or stale_scope:
         return {
             "pools": {name: [] for name in POOLS},
-            "source_selections": source_selections(),
+            "source_selections": current_selections,
             "generated_at": None,
             "ready": False,
-            "reason": "候选池标准已更新，请重新进行全量稳定性测速",
+            "reason": ("机场范围已变化，请重新进行全量稳定性测速"
+                       if stale_scope else "候选池标准已更新，请重新进行全量稳定性测速"),
         }
     proposal = data.get("pools") if isinstance(data.get("pools"), dict) else {}
     return {
         "pools": {name: list(proposal.get(name, []))[:5] for name in POOLS},
         "source_selections": {
             pool: (data.get("source_selections", {}).get(pool)
-                   if isinstance(data.get("source_selections"), dict) else source_selections().get(pool))
+                   if isinstance(data.get("source_selections"), dict) else current_selections.get(pool))
             for pool in POOLS
         },
         "generated_at": data.get("generated_at"),
@@ -894,16 +935,24 @@ def generate_config(selected=None, settings=None):
     telegram_notify_rule = (
         "AND,((SRC-IP-CIDR,127.0.0.1/32),(DOMAIN,api.telegram.org)),TG-Notify"
     )
+    # Telegram client traffic must enter the "Telegram" business group so the
+    # TG-出口 failsafe wrapper can switch to TG-应急 when the routine TG-Auto
+    # candidates cannot carry MTProto. Routing directly to TG-Auto would bypass
+    # that recovery path.
     telegram_client_ip_rules = (
-        "IP-CIDR,149.154.160.0/20,TG-Auto,no-resolve",
-        "IP-CIDR,91.108.4.0/22,TG-Auto,no-resolve",
-        "IP-CIDR,91.108.56.0/22,TG-Auto,no-resolve",
+        "IP-CIDR,149.154.160.0/20,Telegram,no-resolve",
+        "IP-CIDR,91.108.4.0/22,Telegram,no-resolve",
+        "IP-CIDR,91.108.56.0/22,Telegram,no-resolve",
     )
-    telegram_api_rule = "DOMAIN,api.telegram.org,TG-Auto"
+    telegram_api_rule = "DOMAIN,api.telegram.org,Telegram"
     telegram_generated_rules = (
         "DOMAIN,api.telegram.org,TG-Notify",
         telegram_notify_rule,
         telegram_api_rule,
+        "DOMAIN,api.telegram.org,TG-Auto",
+        "IP-CIDR,149.154.160.0/20,TG-Auto,no-resolve",
+        "IP-CIDR,91.108.4.0/22,TG-Auto,no-resolve",
+        "IP-CIDR,91.108.56.0/22,TG-Auto,no-resolve",
         *telegram_client_ip_rules,
     )
     rules = [rule for rule in rules if str(rule) not in telegram_generated_rules]
@@ -951,6 +1000,11 @@ def generate_config(selected=None, settings=None):
                       if str(rule).startswith(("RULE-SET,family-", "GEOSITE,"))),
                      before_match_index(rules))
     rules[insert_at:insert_at] = GEMINI_ROUTING_RULES
+    rules = [rule for rule in rules if rule not in MUSE_ROUTING_RULES]
+    insert_at = next((index for index, rule in enumerate(rules)
+                      if str(rule).startswith("RULE-SET,family-overseas-ai")),
+                     before_match_index(rules))
+    rules[insert_at:insert_at] = MUSE_ROUTING_RULES
     config["rules"] = rules
     hk, jp, sg, us, other_ai, tg, proxy = (selected[name] for name in POOLS)
     ai_groups = [group for pool, group in (("JP-AI", "JP-AI"), ("SG-AI", "SG-AI"),
@@ -1588,7 +1642,9 @@ def start_replace_and_clear_slot(slot):
         previous_config = MIHOMO_CONFIG.read_bytes()
         previous_suggestions = SUGGESTIONS.read_bytes() if SUGGESTIONS.exists() else None
         try:
-            proposal = build_suggestions(test_nodes(remaining, update_progress))
+            scopes = replacement_source_scopes(slot)
+            current = pools()
+            proposal = build_suggestions(test_nodes(remaining, update_progress), scopes, current)
             if not proposal["ready"]:
                 raise ValueError("无法安全替换：" + str(proposal["reason"]))
             path.write_text("proxies: []\n")
