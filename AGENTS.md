@@ -1051,3 +1051,13 @@ up-script 同样替换 enable。字段规律：`to-ports`、`connection-mark`、
 - Muse 规则已生成并生效；`muse.ai`/`meta.com` 经旁路 `US-AI` 可返回 307/200（`meta.ai` 返回 403，属于 Meta 账号/地区侧校验）。注意：用 `curl` 经 mixed-port 7890 测试 HTTPS 时，默认 ALPN/h2 会 `unexpected eof`，加 `--no-alpn`（或 TLS 1.2）才正常；该 ALPN 现象本次未改动、未归因，需另行排查真实客户端是否受影响。
 - 运行期间 `family-mihomo-sub-import` 自动把各业务候选池重新收敛为主力机场节点（本次未手工固定）；最终以管理页面“机场与候选池”当前显示为准。
 - 后续修复候选池范围串扰：`start_replace_and_clear_slot` 生成替换建议时此前忽略已保存的机场范围，导致“锁定备用机场 1”后待生效候选仍是主力节点。新增 `replacement_source_scopes()`，清空机场时保留其他池的显式机场锁定，仅把锁定到被清空机场的池回退到全部机场；`suggestions()` 也会在机场范围变化后作废旧建议并提示重新测速。回归测试已补。
+
+
+## 2026-09-27 IPv6 防绕行顺序修复
+
+- 版本维持 0.11.17，本次为已部署热修复的源码同步，不发布新版本。
+- 加入设备时 IPv6 guard 限定 out-interface-list=WAN，并通过 add_before 放到启用的 forward established accept 之前；缺少锚点或移动失败进入现有事务回滚。
+- 撤出仍按完整设备标签删除 guard，与位置和 WAN 条件无关；回归验证不会删除其他设备或共享 reject 链。
+- 线上五条既有 guard 已调整，仅范围与顺序改变；NAS 运行文件 /opt/family-proxy-ui/family-proxy-ui.py 已热修补并重启管理服务。未重启代理核心。
+- RouterOS 备份 pre-ipv6-guard-20260927.backup / .rsc；NAS 文件备份 family-proxy-ui.py.before-ipv6-guard-20260927。回滚使用对应备份恢复规则和运行文件。
+- 已检查导出差异、规则位置和拦截计数。真实客户端旧连接、IPv4 业务及故障恢复尚未实测；不能以管理服务存活替代业务验收。

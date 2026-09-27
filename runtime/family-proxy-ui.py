@@ -3560,8 +3560,17 @@ def enable_device(ip):
                 raise RouterError("Z4Pro 转发状态校验失败；未接通 RouterOS 流量")
             api.add("/ip/firewall/address-list", list=SHARED_LIST, address=ip,
                     comment="family-mihomo-managed " + ip)
-            api.add("/ipv6/firewall/filter", chain="forward", action="jump", **{
+            ipv6_anchor = next((rule[".id"] for rule in api.print("/ipv6/firewall/filter")
+                                if rule.get("chain") == "forward"
+                                and rule.get("action") == "accept"
+                                and "established" in rule.get("connection-state", "").split(",")
+                                and rule_enabled(rule)), None)
+            if not ipv6_anchor:
+                raise RouterError("缺少 IPv6 established 放行锚点；未建立防绕行规则")
+            add_before(api, "/ipv6/firewall/filter", ipv6_anchor,
+                       chain="forward", action="jump", **{
                 "jump-target": "family_mihomo_auto_v6", "src-mac-address": mac,
+                "out-interface-list": "WAN",
                 "comment": tag + " IPv6 bypass guard",
             })
             verify_device_rules(api, ip)
