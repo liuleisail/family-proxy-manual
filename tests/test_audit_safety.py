@@ -38,6 +38,29 @@ class AuditSafetyTests(unittest.TestCase):
         ui.cleanup_device_rules(api, '192.168.2.11')
         self.assertEqual(set(api.removed), {'192.168.2.11', 'legacy11'})
 
+    def test_withdraw_removes_wan_guard_only_for_target_device(self):
+        ui = self.ui
+        target, other = '192.168.2.11', '192.168.2.112'
+        class Router:
+            def __init__(self):
+                self.rows = {
+                    '/ip/firewall/address-list': [
+                        {'.id': ip, 'address': ip, 'list': ui.SHARED_LIST}
+                        for ip in (target, other)],
+                    '/ipv6/firewall/filter': [
+                        {'.id': ip, 'comment': ui.managed_tag(ip) + ' IPv6 bypass guard',
+                         'out-interface-list': 'WAN'} for ip in (target, other)] + [
+                        {'.id': 'shared', 'comment': 'family-mihomo-auto IPv6 drop'}],
+                }
+            def print(self, path): return list(self.rows[path])
+            def remove(self, path, item_id):
+                self.rows[path] = [r for r in self.rows[path] if r['.id'] != item_id]
+        api = Router()
+        self.assertEqual(ui.remove_shared_membership(api, target), 2)
+        self.assertEqual([r['.id'] for r in api.rows['/ipv6/firewall/filter']], [other, 'shared'])
+        self.assertEqual([r['.id'] for r in api.rows['/ip/firewall/address-list']], [other])
+        self.assertEqual(ui.remove_shared_membership(api, target), 0)
+
     def test_device_transaction_serializes_read_modify_write(self):
         ui = self.ui
         errors = []
@@ -76,17 +99,33 @@ class AuditSafetyTests(unittest.TestCase):
     def test_enable_prepares_receiver_before_router_and_rolls_back_on_failure(self):
         ui = self.ui
         ip = '192.168.2.112'
-        for fail in (False, True):
+        for fail in (False, True, "missing-anchor", "move-failure"):
             events = []
             class Router:
+                def __init__(self):
+                    self.filters = [] if fail == "missing-anchor" else [
+                        {".id": "input", "chain": "input", "action": "accept", "connection-state": "established"},
+                        {".id": "anchor", "chain": "forward", "action": "accept", "connection-state": "established,related,untracked"}]
                 def __enter__(self): return self
                 def __exit__(self, *args): pass
                 def print(self, path):
+                    if path == "/ipv6/firewall/filter": return list(self.filters)
                     return [{'address': ip, 'mac-address': 'AA', '.id': 'lease', 'dynamic': 'false'}]
                 def add(self, path, **props):
                     events.append('router-add')
-                    if fail:
+                    if fail is True:
                         raise ui.RouterError('write failed')
+                    if path == "/ipv6/firewall/filter":
+                        self.filters.append({".id": "guard", **props})
+                def talk(self, path, props):
+                    if fail == "move-failure": raise ui.RouterError("move failed")
+                    self_outer.assertEqual(props["destination"], "anchor")
+                    guard = next(r for r in self.filters if r[".id"] == props["numbers"])
+                    self_outer.assertEqual(guard["out-interface-list"], "WAN")
+                    self.filters.remove(guard)
+                    self.filters.insert(1, guard)
+                    events.append("guard-before-established")
+            self_outer = self
             with self.subTest(fail=fail), tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
                 mocks = {
                     'MANAGED_IPS_PATH': Path(directory) / 'managed-ips', 'RouterOS': Router,
@@ -100,12 +139,13 @@ class AuditSafetyTests(unittest.TestCase):
                 stack.enter_context(patch.object(ui, 'sync_tproxy', side_effect=lambda: events.append('sync')))
                 stack.enter_context(patch.object(ui, 'remove_shared_membership', side_effect=lambda *args: events.append('detach')))
                 if fail:
-                    with self.assertRaisesRegex(ui.RouterError, 'write failed'): ui.enable_device(ip)
+                    with self.assertRaises(ui.RouterError): ui.enable_device(ip)
                     self.assertEqual(ui.managed_ips(), set())
                     self.assertEqual(events[-2:], ['detach', 'sync'])
                 else:
                     ui.enable_device(ip)
                     self.assertEqual(ui.managed_ips(), {ip})
+                    self.assertIn("guard-before-established", events)
                 self.assertLess(events.index('sync'), events.index('router-add'))
 
     def test_traffic_requires_recent_marked_counter_increase(self):
