@@ -375,8 +375,8 @@ Telegram 同时使用域名和原生 IP 建立连接。配置必须同时保留
 `GEOSITE,telegram,Telegram` 与 `GEOIP,telegram,Telegram,no-resolve`，否则原生 IP
 连接会落入 `Others`。候选池的 HTTP 健康检查只证明 TCP 可用；状态页会把
 `TCP 探针` 与 `UDP 声明/QUIC 未验证` 分开显示，不能把 TCP 绿灯当作 UDP 已验证。
-RouterOS 对 `family_mihomo_devices` 中的所有纳管设备快速拒绝外网 UDP/443，客户端会立即
-回退到稳定的 TCP/HTTPS；局域网目标不受影响。以后从设备页加入的新设备会自动继承该规则，
+RouterOS 仅对 `family_mihomo_devices` 中带有 `family_mihomo_shared` 路由标记、发往旁路的外网 UDP/443 快速拒绝，让支持回退的客户端改用 TCP/HTTPS；不保证所有应用都能回退。
+国内直连、局域网及故障回退后未打旁路路由标记的流量不匹配此规则。国内范围仍以 `family_cn_ipv4` 为准。以后从设备页加入的新设备会自动继承该规则，
 不需要按 IP 单独创建。
 
 “切换状态”页展示策略组、当前叶子节点、稳定保持时间和最近自动切换记录。它用于确认故障切换是否发生；不应把它当作全节点测速页面。

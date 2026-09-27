@@ -3373,6 +3373,7 @@ def ensure_shared_policy(api):
         "chain": "forward", "action": "reject", "reject-with": "icmp-port-unreachable",
         "protocol": "udp", "src-address-list": SHARED_LIST,
         "dst-address-list": "!local_lan_ipv4", "dst-port": "443", "comment": quic_comment,
+        "routing-mark": SHARED_TABLE,
     }
     if not quic_rule:
         api.add("/ip/firewall/filter", **quic_props)

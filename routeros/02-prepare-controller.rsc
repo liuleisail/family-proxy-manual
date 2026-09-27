@@ -89,9 +89,9 @@
 :set policyAnchor [find where comment=($sharedTag . " FastTrack exclude")]
 :local quicRule [find where comment=($sharedTag . " QUIC fast fallback")]
 :if ([:len $quicRule] = 0) do={
-  add chain=forward action=reject reject-with=icmp-port-unreachable protocol=udp src-address-list=$sharedList dst-address-list=!local_lan_ipv4 dst-port=443 comment=($sharedTag . " QUIC fast fallback") place-before=$policyAnchor
+  add chain=forward action=reject reject-with=icmp-port-unreachable protocol=udp src-address-list=$sharedList dst-address-list=!local_lan_ipv4 dst-port=443 routing-mark=$sharedTable comment=($sharedTag . " QUIC fast fallback") place-before=$policyAnchor
 } else={
-  set $quicRule chain=forward action=reject reject-with=icmp-port-unreachable protocol=udp src-address-list=$sharedList dst-address-list=!local_lan_ipv4 dst-port=443
+  set $quicRule chain=forward action=reject reject-with=icmp-port-unreachable protocol=udp src-address-list=$sharedList dst-address-list=!local_lan_ipv4 dst-port=443 routing-mark=$sharedTable
   move $quicRule destination=$policyAnchor
 }
 

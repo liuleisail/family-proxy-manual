@@ -80,9 +80,9 @@ class FakeRouterOS:
         if path.endswith("/move"):
             items = self.data[path.removesuffix("/move")]
             item = next(item for item in items if item[".id"] == payload["numbers"])
+            items.remove(item)
             destination = next(index for index, value in enumerate(items)
                                if value[".id"] == payload["destination"])
-            items.remove(item)
             items.insert(destination, item)
 
 
@@ -90,6 +90,31 @@ class HomeKitMulticastPolicyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.module = load_module()
+
+    def test_quic_scope_is_repaired_and_preserved_on_resync(self):
+        api = FakeRouterOS(self.module)
+        for _ in range(2):
+            self.module.ensure_shared_policy(api)
+            rules = api.data["/ip/firewall/filter"]
+            quic = next(r for r in rules if r.get("comment") == self.module.SHARED_TAG + " QUIC fast fallback")
+            self.assertEqual(quic["routing-mark"], self.module.SHARED_TABLE)
+            self.assertEqual(quic["action"], "reject")
+            self.assertEqual(quic["protocol"], "udp")
+            self.assertEqual(quic["dst-port"], "443")
+            self.assertEqual(quic["src-address-list"], self.module.SHARED_LIST)
+            exclude = next(r for r in rules if r[".id"] == "fasttrack-exclude")
+            self.assertLess(rules.index(quic), rules.index(exclude))
+
+    def test_new_quic_rule_and_manual_template_require_proxy_route_mark(self):
+        api = FakeRouterOS(self.module)
+        api.data["/ip/firewall/filter"] = [r for r in api.data["/ip/firewall/filter"] if r[".id"] != "quic"]
+        self.module.ensure_shared_policy(api)
+        quic = next(r for r in api.data["/ip/firewall/filter"] if r.get("dst-port") == "443")
+        self.assertEqual(quic["routing-mark"], self.module.SHARED_TABLE)
+        script = (ROOT / "routeros/02-prepare-controller.rsc").read_text()
+        lines = [line for line in script.splitlines() if "dst-port=443" in line]
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(all("routing-mark=$sharedTable" in line for line in lines))
 
     def test_adds_multicast_direct_before_connection_marker(self):
         api = FakeRouterOS(self.module)
