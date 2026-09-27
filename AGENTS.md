@@ -1061,3 +1061,12 @@ up-script 同样替换 enable。字段规律：`to-ports`、`connection-mark`、
 - 线上五条既有 guard 已调整，仅范围与顺序改变；NAS 运行文件 /opt/family-proxy-ui/family-proxy-ui.py 已热修补并重启管理服务。未重启代理核心。
 - RouterOS 备份 pre-ipv6-guard-20260927.backup / .rsc；NAS 文件备份 family-proxy-ui.py.before-ipv6-guard-20260927。回滚使用对应备份恢复规则和运行文件。
 - 已检查导出差异、规则位置和拦截计数。真实客户端旧连接、IPv4 业务及故障恢复尚未实测；不能以管理服务存活替代业务验收。
+
+
+## 2026-09-27 QUIC 回退范围收敛
+
+- 版本维持0.11.17。原策略刻意拒绝所有纳管设备非局域网UDP/443，但国内直连也被覆盖。
+- 运行时生成器与手工模板为现有 QUIC fast fallback 增加 routing-mark=family_mihomo_shared；只有实际被打旁路路由标记的流量匹配。保留源受管名单、局域网排除及原拒绝动作/顺序。不添加宽泛accept，不修改国内地址表。
+- 国内直连与故障回退后未打路由标记的报文不再被此规则拒绝；是否属于国内仍以family_cn_ipv4为准。客户端回退TCP能力不能一概保证。
+- RouterOS已备份pre-quic-scope-20260927.backup/.rsc后修改单条规则；NAS运行时定点补丁已部署并重启管理服务，原文件family-proxy-ui.py.before-quic-scope-20260927。撤回时清除该规则routing-mark并恢复生成器备份。
+- 114项回归通过，涵盖新增、修复旧规则、重复同步的范围和顺序；同时修正测试替身move在移除元素前计算目标索引的问题。未进行生产故障切换注入，真实受管客户端HTTP/3与海外回退验收待用户测试。
