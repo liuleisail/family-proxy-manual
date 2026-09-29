@@ -1070,3 +1070,13 @@ up-script 同样替换 enable。字段规律：`to-ports`、`connection-mark`、
 - 国内直连与故障回退后未打路由标记的报文不再被此规则拒绝；是否属于国内仍以family_cn_ipv4为准。客户端回退TCP能力不能一概保证。
 - RouterOS已备份pre-quic-scope-20260927.backup/.rsc后修改单条规则；NAS运行时定点补丁已部署并重启管理服务，原文件family-proxy-ui.py.before-quic-scope-20260927。撤回时清除该规则routing-mark并恢复生成器备份。
 - 114项回归通过，涵盖新增、修复旧规则、重复同步的范围和顺序；同时修正测试替身move在移除元素前计算目标索引的问题。未进行生产故障切换注入，真实受管客户端HTTP/3与海外回退验收待用户测试。
+
+## 2026-09-29 v0.11.18 空接管名单修复
+
+- 删除最后一台接管设备后，RouterOS 名单和 managed-ips 已为空，但旧脚本输出 `elements = {}`，NAS 的 nft 语法检查失败，内核 managed4 残留 .194，导致 forwarding=false、配置漂移与 Netwatch down。与 Surge DHCP 下发无直接因果证据。
+- scripts/family-mihomo-tproxy-auto 仅在有有效设备时输出 elements；空名单保留 typed set 和现有 TPROXY 规则结构。没有重新添加接管设备或修改 DHCP、DNS、RouterOS、TG-Notify。
+- 运行环境修复备份：/var/backups/family-proxy-empty-set-20260929。恢复脚本可从 family-mihomo-tproxy-auto.before 定点安装；注意恢复旧脚本会重新引入空名单缺陷。
+- 回归测试执行实际 shell 生成函数，覆盖空名单、只有无效地址、单台和多台。NAS 已用 nft -c 验证空/单/三台，实际空名单同步后 local_health 全通过、Netwatch up、drift=[]、managed=[]。
+- 发布流程：构建与验证 → 同步 NAS 源码 → 备份部署与运行/页面检查 → 提交 PR、合并、标签及 Release。核心容器不升级。
+- 21:25 发布部署通过：v0.11.18，build `395da1e7954c`；主备份 `/var/backups/family-proxy/20260929-212541`，DNS 管理备份 `/var/backups/family-proxy/20260929-212544/mosdns-management`。恢复上一部署需定点恢复主备份中的运行文件、frontend、VERSION/build-info、helpers 及必要的 DNS 管理文件后重启相关管理服务；不要恢复旧空集合生成缺陷。
+- 117 项回归、typecheck/Vite build/verify-release、NAS verify-server 均通过；已登录 Safari 原版页面显示“旁路运行正常 / 配置一致 / 尚无已接管设备”，新版控制台显示 0.11.18、全部正常和自动回退已启用。Mihomo/MosDNS 核心容器 ID/启动时间、Mihomo 配置哈希与发布前一致。真实客户端业务未回放（当前接管名单为空）。
