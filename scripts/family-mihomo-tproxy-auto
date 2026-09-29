@@ -92,13 +92,13 @@ write_nft_rules() {
   {
     echo "delete table inet $NFT_TABLE"
     echo "table inet $NFT_TABLE {"
-    echo "  set managed4 { type ipv4_addr; elements = {"
+    echo "  set managed4 { type ipv4_addr;"
     if (( managed_count )); then
-      printf '    %s' "${managed[0]}"
+      printf '    elements = { %s' "${managed[0]}"
       for ip in "${managed[@]:1}"; do printf ', %s' "$ip"; done
-      echo
+      echo " }"
     fi
-    echo "  } }"
+    echo "  }"
     echo "  set cn4 { type ipv4_addr; flags interval; auto-merge; elements = {"
     awk -F/ '$1 ~ /^[0-9.]+$/ && $2 ~ /^[0-9]+$/ {printf "%s    %s", (n++ ? ",\n" : ""), $0} END {print ""}' "$CN_LIST"
     echo "  } }"
